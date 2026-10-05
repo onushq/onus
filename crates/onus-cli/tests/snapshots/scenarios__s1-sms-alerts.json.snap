@@ -57,6 +57,14 @@ expression: json
         {
           "file": "services/notifications/src/sms/client.ts",
           "lines": [
+            51,
+            51
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/notifications/src/sms/client.ts",
+          "lines": [
             76,
             76
           ],
@@ -73,12 +81,12 @@ expression: json
       "component": "user-preferences",
       "kindLabel": "Contract change, additive",
       "title": "`UserPreferences` gains an optional `phoneVerified` field",
-      "whyItMatters": "Shared contract used in 3 files across 2 components; existing callers unaffected; declared invariant: phone numbers are stored in E.164",
+      "whyItMatters": "Shared contract used in 4 files across 2 components; existing callers unaffected; declared invariant: phone numbers are stored in E.164",
       "hints": {
         "labels": [
           "pii"
         ],
-        "blastRadius": 3,
+        "blastRadius": 4,
         "novelty": [],
         "confidence": "static",
         "rulesOfTheGame": false,
@@ -134,8 +142,8 @@ expression: json
       "subject": "notifications",
       "component": "notifications",
       "kindLabel": "Internal",
-      "title": "1,403 lines of new code and tests inside `notifications`",
-      "whyItMatters": "Stays inside `notifications`; adds 69 test cases; reads new config `ACME_SMS_API_KEY` and `ACME_SMS_SENDER_ID`; includes code Onus cannot fully resolve in `services/notifications/src/sms/delivery-log.ts` and `services/notifications/src/sms/templates.ts`",
+      "title": "1,402 lines of new code and tests inside `notifications`",
+      "whyItMatters": "Stays inside `notifications`, which `billing` depends on; adds 69 test cases; reads new config `ACME_SMS_API_KEY` and `ACME_SMS_SENDER_ID`; includes code Onus cannot fully resolve in `services/notifications/src/sms/delivery-log.ts` and `services/notifications/src/sms/templates.ts`",
       "hints": {
         "labels": [],
         "blastRadius": 1,
@@ -182,6 +190,14 @@ expression: json
           "file": "services/notifications/src/sms/client.ts",
           "lines": [
             2,
+            50
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/notifications/src/sms/client.ts",
+          "lines": [
+            52,
             75
           ],
           "side": "head"
@@ -324,7 +340,7 @@ expression: json
         }
       ],
       "stats": {
-        "linesAdded": 1403,
+        "linesAdded": 1402,
         "linesRemoved": 0,
         "files": 21
       }

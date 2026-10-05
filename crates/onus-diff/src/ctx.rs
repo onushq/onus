@@ -138,8 +138,8 @@ impl<'a> Ctx<'a> {
             .any(|f| self.component_of_path(&f.path) == component)
     }
 
-    /// Non-test files in the head map that depend on `subject`, and their
-    /// components. For a component id, files in other components that
+    /// Files in the head map (tests included) that depend on `subject`, and
+    /// their components. For a component id, files in other components that
     /// depend on anything inside it.
     pub fn dependents(&self, subject: &str) -> (u32, BTreeSet<String>) {
         let is_component = self.components.contains_key(subject) && !subject.contains(':');
@@ -162,7 +162,7 @@ impl<'a> Ctx<'a> {
                 continue;
             }
             for s in &e.sites {
-                if self.is_test_file(&s.file) || Some(&s.file) == own_file.as_ref() {
+                if Some(&s.file) == own_file.as_ref() {
                     continue;
                 }
                 files.insert(s.file.clone());

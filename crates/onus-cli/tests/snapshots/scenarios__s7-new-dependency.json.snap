@@ -63,7 +63,7 @@ expression: json
       "component": "orders",
       "kindLabel": "Internal",
       "title": "16 changed lines of code inside `orders`",
-      "whyItMatters": "Stays inside `orders`",
+      "whyItMatters": "Stays inside `orders`; no other component depends on it",
       "hints": {
         "labels": [],
         "blastRadius": 0,
@@ -97,6 +97,14 @@ expression: json
             13
           ],
           "side": "head"
+        },
+        {
+          "file": "services/orders/src/shipping/eta.ts",
+          "lines": [
+            16,
+            24
+          ],
+          "side": "base"
         }
       ],
       "stats": {

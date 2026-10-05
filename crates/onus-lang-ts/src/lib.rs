@@ -542,6 +542,16 @@ impl<'a> Linker<'a> {
             }
             // Re-exports.
             for e in &f.exports {
+                if let Export::From { spec, line, .. } | Export::Star { spec, line } = e {
+                    import_targets.push((
+                        *line,
+                        match self.resolver.resolve(&f.path, spec) {
+                            Resolution::File(p) => p,
+                            Resolution::Npm(p) => ids::npm_id(&p),
+                            Resolution::Unresolved => format!("?{spec}"),
+                        },
+                    ));
+                }
                 match e {
                     Export::From {
                         spec,
@@ -751,7 +761,11 @@ impl<'a> Linker<'a> {
                 content_hash: f.content_hash.clone(),
                 imports: {
                     import_targets.sort();
-                    import_targets.into_iter().map(|(_, t)| t).collect()
+                    let mut targets: Vec<String> =
+                        import_targets.into_iter().map(|(_, t)| t).collect();
+                    // One entry per statement, not per re-exported name.
+                    targets.dedup();
+                    targets
                 },
             });
             if f.is_test {

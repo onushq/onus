@@ -149,6 +149,13 @@ pub fn rows(
                     .entry(f.path.clone())
                     .or_default()
                     .extend(unc);
+                if !h.base_lines.is_empty() {
+                    bucket
+                        .base_lines
+                        .entry(f.base_path().to_string())
+                        .or_default()
+                        .extend(h.base_lines.iter().copied());
+                }
             } else {
                 let cov = cov_base.get(f.base_path());
                 let unc: Vec<u32> = h
@@ -226,10 +233,30 @@ pub fn rows(
         } else {
             format!("{} changed lines of {what} {place}", thousands(total))
         };
+        let users: Vec<String> = if comp == "root" {
+            vec![]
+        } else {
+            let (_, comps) = ctx.dependents(&comp);
+            comps
+                .into_iter()
+                .filter(|c| c != &comp)
+                .map(|c| format!("`{c}`"))
+                .collect()
+        };
         let mut notes = vec![if comp == "root" {
             "No component touched".to_string()
+        } else if users.is_empty() {
+            format!("Stays inside `{comp}`; no other component depends on it")
         } else {
-            format!("Stays inside `{comp}`")
+            format!(
+                "Stays inside `{comp}`, which {} {} on",
+                join_and(&users),
+                if users.len() == 1 {
+                    "depends"
+                } else {
+                    "depend"
+                }
+            )
         }];
         if let Some(n) = tests.added_cases.get(&comp).filter(|n| **n > 0) {
             notes.push(format!("adds {}", plural(*n, "test case", "test cases")));

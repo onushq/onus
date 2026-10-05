@@ -8,17 +8,18 @@ expression: md
 |   | Change | Kind | Why it matters |
 |---|---|---|---|
 | ● | Boundary condition changed in `applyDiscount`: `order.subtotalCents > DISCOUNT_THRESHOLD_CENTS` is now `order.subtotalCents >= DISCOUNT_THRESHOLD_CENTS` | Boundary condition changed | Values exactly at the boundary now take the other branch in a payments component; needs a person |
-| ○ | 8 changed lines of code inside `orders` | Internal | Stays inside `orders` |
+| ○ | 8 changed lines of code inside `orders` | Internal | Stays inside `orders`; no other component depends on it |
 
 **Intent check:** not stated (add an `onus-intent` block to the pull request) · **Boundary rules:** no new violations
 
 <details><summary>Evidence per row (files and lines)</summary>
 
 1. **Boundary condition changed in `applyDiscount`: `order.subtotalCents > DISCOUNT_THRESHOLD_CENTS` is now `order.subtotalCents >= DISCOUNT_THRESHOLD_CENTS`**
-   - kind `security-sensitive` / `boundary-condition-changed` · confidence `static` · labels payments · 1 dependent file
+   - kind `security-sensitive` / `boundary-condition-changed` · confidence `static` · labels payments · 2 dependent files
    - `services/billing/src/discount.ts` line 20
 2. **8 changed lines of code inside `orders`**
    - kind `internal` / `internal-changes` · confidence `static` · +6 −2 in 1 file
+   - `services/orders/src/orders.ts` lines 4, 39 (before the change)
    - `services/orders/src/orders.ts` lines 4, 21–24, 43
 
 </details>

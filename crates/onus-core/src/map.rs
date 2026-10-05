@@ -129,6 +129,8 @@ pub enum SymbolKind {
     Type,
     Enum,
     Const,
+    /// A top-level `let` or `var`.
+    Variable,
     Event,
     HttpRoute,
     DbTable,
@@ -145,6 +147,7 @@ impl SymbolKind {
             SymbolKind::Type => "type",
             SymbolKind::Enum => "enum",
             SymbolKind::Const => "const",
+            SymbolKind::Variable => "variable",
             SymbolKind::Event => "event",
             SymbolKind::HttpRoute => "http-route",
             SymbolKind::DbTable => "db-table",
@@ -185,7 +188,8 @@ pub struct SymbolNode {
     pub loc: Option<Loc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub facts: Option<BodyFacts>,
-    /// The literal value of a `const` initialized with a string literal.
+    /// The value of a `const` or variable initialized with a string, number
+    /// or boolean literal (secrets redacted).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub literal: Option<String>,
 }

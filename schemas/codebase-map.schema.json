@@ -724,19 +724,28 @@
       ]
     },
     "SymbolKind": {
-      "type": "string",
-      "enum": [
-        "function",
-        "class",
-        "method",
-        "interface",
-        "type",
-        "enum",
-        "const",
-        "event",
-        "http-route",
-        "db-table",
-        "config-key"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "function",
+            "class",
+            "method",
+            "interface",
+            "type",
+            "enum",
+            "const",
+            "event",
+            "http-route",
+            "db-table",
+            "config-key"
+          ]
+        },
+        {
+          "description": "A top-level `let` or `var`.",
+          "type": "string",
+          "const": "variable"
+        }
       ]
     },
     "SymbolNode": {
@@ -779,7 +788,7 @@
           "$ref": "#/$defs/SymbolKind"
         },
         "literal": {
-          "description": "The literal value of a `const` initialized with a string literal.",
+          "description": "The value of a `const` or variable initialized with a string, number\nor boolean literal (secrets redacted).",
           "type": [
             "string",
             "null"

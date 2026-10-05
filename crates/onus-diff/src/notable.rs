@@ -6,7 +6,8 @@
 use std::collections::BTreeMap;
 
 use onus_core::{
-    BodyFacts, ChangeKind, ChangeLevel, Comparison, FactSite, Location, SemanticChange, SymbolNode,
+    BodyFacts, ChangeKind, ChangeLevel, Comparison, FactSite, Location, SemanticChange, SymbolKind,
+    SymbolNode,
 };
 
 use crate::ctx::{Ctx, change, join_and};
@@ -204,6 +205,40 @@ fn edits<'a>(
     out
 }
 
+/// A `const` or variable whose literal value changed: `LOYALTY_RATE` from
+/// `0.1` to `0.15`.
+fn constant_edit(b: &SymbolNode, h: &SymbolNode) -> Option<Edit> {
+    if !matches!(h.kind, SymbolKind::Const | SymbolKind::Variable) {
+        return None;
+    }
+    let (Some(old), Some(new)) = (&b.literal, &h.literal) else {
+        return None;
+    };
+    if old == new || old.contains("<redacted>") || new.contains("<redacted>") {
+        return None;
+    }
+    let l = h.loc.as_ref()?;
+    let show = |v: &str| -> String {
+        if v.parse::<f64>().is_ok() || v == "true" || v == "false" {
+            v.to_string()
+        } else {
+            format!("\"{v}\"")
+        }
+    };
+    Some(Edit {
+        subkind: "constant-changed",
+        label: "Constant changed",
+        title: format!(
+            "`{}` changes from `{}` to `{}`",
+            h.name,
+            show(old),
+            show(new)
+        ),
+        why: "Code that reads this value now behaves differently",
+        location: Location::head(&l.file, l.start, l.start),
+    })
+}
+
 pub fn rows(ctx: &Ctx, pairs: &Pairs) -> Vec<SemanticChange> {
     let mut rows = Vec::new();
     for (b, h, _) in &pairs.pairs {
@@ -218,7 +253,9 @@ pub fn rows(ctx: &Ctx, pairs: &Pairs) -> Vec<SemanticChange> {
         };
         let component = h.component_id.clone().unwrap_or_default();
         let labels = ctx.labels(&component);
-        for e in edits(h, bf, hf, &bl.file, &hl.file) {
+        let mut all = edits(h, bf, hf, &bl.file, &hl.file);
+        all.extend(constant_edit(b, h));
+        for e in all {
             let sensitive = !labels.is_empty();
             let why = if sensitive {
                 format!(

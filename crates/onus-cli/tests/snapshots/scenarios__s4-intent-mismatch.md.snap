@@ -8,8 +8,8 @@ expression: md
 |   | Change | Kind | Why it matters |
 |---|---|---|---|
 | ● | `billing` now writes to the `payment` table | Outside stated intent · New data write | New write path in a payments component; needs a person |
-| ● | 10 lines of new code inside `billing` | Outside stated intent · Internal | Stays inside `billing` |
-| ○ | 21 changed lines of code inside `logger` | Internal | Stays inside `logger` |
+| ● | 10 lines of new code inside `billing` | Outside stated intent · Internal | Stays inside `billing`; no other component depends on it |
+| ○ | 21 changed lines of code inside `logger` | Internal | Stays inside `logger`, which `billing`, `notifications` and `orders` depend on |
 
 **Intent check:** **2 changes outside stated intent** · **Boundary rules:** no new violations
 
@@ -28,6 +28,7 @@ Stated intent: "Add structured fields to log lines"
    - `services/billing/src/payments.ts` lines 1, 5–6, 30–31, 33–34, 40–42
 3. **21 changed lines of code inside `logger`**
    - kind `internal` / `internal-changes` · confidence `static` · 5 dependent files · +19 −2 in 1 file
+   - `packages/logger/src/format.ts` lines 9, 12 (before the change)
    - `packages/logger/src/format.ts` lines 1–17, 26, 29
 
 </details>

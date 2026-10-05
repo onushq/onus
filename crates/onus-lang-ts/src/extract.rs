@@ -235,6 +235,7 @@ pub fn extract(path: &str, src: &str, is_test: bool, patterns: &Patterns) -> Fil
         src: bytes,
         patterns,
         facts: &mut facts,
+        field_types: HashMap::new(),
     };
     if is_test {
         x.extract_test_file(root);
@@ -466,6 +467,9 @@ struct Extractor<'a> {
     src: &'a [u8],
     patterns: &'a Patterns,
     facts: &'a mut FileFacts,
+    /// In a class: field name → the type it was declared with, so calls on
+    /// `this.<field>` resolve to that type (for example an SDK client).
+    field_types: HashMap<String, String>,
 }
 
 impl Extractor<'_> {
@@ -664,7 +668,7 @@ impl Extractor<'_> {
                     line: line(node),
                 });
             } else {
-                self.value_decl("default", None, Some(value), node, node);
+                self.value_decl("default", SymbolKind::Const, None, Some(value), node, node);
                 self.facts.exports.push(Export::Local {
                     exported: "default".into(),
                     local: "default".into(),
@@ -811,6 +815,11 @@ impl Extractor<'_> {
             }
             "lexical_declaration" | "variable_declaration" => {
                 let mut names = Vec::new();
+                let binding_kind = if has_child_token(node, "const") {
+                    SymbolKind::Const
+                } else {
+                    SymbolKind::Variable
+                };
                 for declarator in named_children(node) {
                     if declarator.kind() != "variable_declarator" {
                         continue;
@@ -832,7 +841,7 @@ impl Extractor<'_> {
                         for b in bound {
                             self.facts.decls.push(Decl {
                                 name: b.clone(),
-                                kind: SymbolKind::Const,
+                                kind: binding_kind,
                                 shape: Some(unverified_value()),
                                 fingerprint: short_hash(norm(declarator, self.src).as_bytes()),
                                 start: line(node),
@@ -849,7 +858,7 @@ impl Extractor<'_> {
                     let name = self.t(name_node);
                     let value = declarator.child_by_field_name("value");
                     let ty = declarator.child_by_field_name("type");
-                    self.value_decl(&name, ty, value, declarator, node);
+                    self.value_decl(&name, binding_kind, ty, value, declarator, node);
                     names.push(name);
                 }
                 names
@@ -859,9 +868,11 @@ impl Extractor<'_> {
     }
 
     /// A `const`/`let` declaration, or an `export default <expression>`.
+    #[allow(clippy::too_many_arguments)]
     fn value_decl(
         &mut self,
         name: &str,
+        kind: SymbolKind,
         ty: Option<Node>,
         value: Option<Node>,
         declarator: Node,
@@ -883,7 +894,7 @@ impl Extractor<'_> {
                 return;
             }
         }
-        let literal = value.and_then(|v| string_value(v, self.src));
+        let literal = value.and_then(|v| literal_value(v, self.src));
         let shape = match (ty, value) {
             (Some(t), _) => ContractShape {
                 kind: ShapeKind::Value,
@@ -924,7 +935,7 @@ impl Extractor<'_> {
         }
         self.facts.decls.push(Decl {
             name: name.to_string(),
-            kind: SymbolKind::Const,
+            kind,
             shape: Some(shape),
             fingerprint: fp,
             start: line(stmt),
@@ -1045,6 +1056,10 @@ impl Extractor<'_> {
             self.scan(h, Some(name), &locals);
         }
         let mut unverified = false;
+        let outer_fields = std::mem::take(&mut self.field_types);
+        if let Some(body) = node.child_by_field_name("body") {
+            self.field_types = self.class_field_types(body);
+        }
         if let Some(body) = node.child_by_field_name("body") {
             for m in named_children(body) {
                 let private = named_children(m).iter().any(|c| {
@@ -1133,6 +1148,7 @@ impl Extractor<'_> {
                 }
             }
         }
+        self.field_types = outer_fields;
         let mut all_locals = HashSet::new();
         collect_bindings(node, self.src, &mut all_locals);
         all_locals.remove(name);
@@ -1159,6 +1175,51 @@ impl Extractor<'_> {
             literal: None,
             enum_values: vec![],
         });
+    }
+
+    /// Fields and constructor parameter properties with a declared type.
+    fn class_field_types(&self, body: Node) -> HashMap<String, String> {
+        let mut out = HashMap::new();
+        for m in named_children(body) {
+            match m.kind() {
+                "public_field_definition" => {
+                    if let (Some(n), Some(t)) =
+                        (m.child_by_field_name("name"), m.child_by_field_name("type"))
+                        && let Some(root) = type_root(t, self.src)
+                    {
+                        out.insert(self.t(n), root);
+                    }
+                }
+                "method_definition" => {
+                    let is_ctor = m
+                        .child_by_field_name("name")
+                        .is_some_and(|n| text(n, self.src) == "constructor");
+                    let Some(params) = m.child_by_field_name("parameters").filter(|_| is_ctor)
+                    else {
+                        continue;
+                    };
+                    for p in named_children(params) {
+                        let property = named_children(p)
+                            .iter()
+                            .any(|c| matches!(c.kind(), "accessibility_modifier" | "readonly"))
+                            || has_child_token(p, "readonly");
+                        if !property {
+                            continue;
+                        }
+                        if let (Some(pat), Some(t)) = (
+                            p.child_by_field_name("pattern"),
+                            p.child_by_field_name("type"),
+                        ) && pat.kind() == "identifier"
+                            && let Some(root) = type_root(t, self.src)
+                        {
+                            out.insert(self.t(pat), root);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        out
     }
 
     fn type_decl(
@@ -1589,6 +1650,14 @@ impl Extractor<'_> {
             });
         }
 
+        // Calls on a typed field: `this.provider.messages.create()` is a call
+        // on the field's declared type.
+        if let Some(field) = this_field(func, self.src)
+            && let Some(ty) = self.field_types.get(&field).cloned()
+            && !locals.contains(&ty)
+        {
+            self.push_ref(from, ty, None, RefKind::Call, node);
+        }
         // The call itself.
         if let Some((root, member)) = root_of(func, self.src)
             && !locals.contains(&root)
@@ -1990,6 +2059,22 @@ fn unverified_value() -> ContractShape {
     }
 }
 
+/// The value of a literal initializer: string contents, a number without
+/// separators, or `true`/`false`.
+fn literal_value(node: Node, src: &[u8]) -> Option<String> {
+    match node.kind() {
+        "number" => Some(text(node, src).replace('_', "")),
+        "true" | "false" => Some(node.kind().to_string()),
+        "unary_expression" => {
+            let arg = node.child_by_field_name("argument")?;
+            let op = node.child_by_field_name("operator").map(|o| text(o, src))?;
+            (op == "-" && arg.kind() == "number")
+                .then(|| format!("-{}", text(arg, src).replace('_', "")))
+        }
+        _ => string_value(node, src),
+    }
+}
+
 fn literal_type(node: Node) -> Option<&'static str> {
     match node.kind() {
         "number" => Some("number"),
@@ -2055,6 +2140,33 @@ fn root_of(node: Node, src: &[u8]) -> Option<(String, Option<String>)> {
         }
         _ => None,
     }
+}
+
+/// The leading type name of an annotation: `AcmeSmsClient`, `sdk.Client`
+/// → `sdk`, `Promise<X>` → `Promise`.
+fn type_root(node: Node, src: &[u8]) -> Option<String> {
+    let t = norm_type(node, src);
+    let t = t.trim_start_matches(':');
+    let root: String = t
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
+        .collect();
+    (!root.is_empty()).then_some(root)
+}
+
+/// For `this.provider.messages.create`, the field directly on `this`.
+fn this_field(node: Node, src: &[u8]) -> Option<String> {
+    let mut cur = node;
+    while cur.kind() == "member_expression" {
+        let obj = cur.child_by_field_name("object")?;
+        if obj.kind() == "this" {
+            return cur
+                .child_by_field_name("property")
+                .map(|p| text(p, src).to_string());
+        }
+        cur = obj;
+    }
+    None
 }
 
 fn env_key(node: Node, src: &[u8]) -> Option<String> {

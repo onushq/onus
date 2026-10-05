@@ -8,7 +8,7 @@ expression: md
 |   | Change | Kind | Why it matters |
 |---|---|---|---|
 | ○ | `orders` adds the npm package `date-fns` (^4.1.0) | New dependency | New third-party code in the supply chain; `date-fns` is not used anywhere else in this repository |
-| ○ | 16 changed lines of code inside `orders` | Internal | Stays inside `orders` |
+| ○ | 16 changed lines of code inside `orders` | Internal | Stays inside `orders`; no other component depends on it |
 
 **Intent check:** not stated (add an `onus-intent` block to the pull request) · **Boundary rules:** no new violations
 
@@ -20,7 +20,7 @@ expression: md
    - `services/orders/src/shipping/eta.ts` line 1
 2. **16 changed lines of code inside `orders`**
    - kind `internal` / `internal-changes` · confidence `static` · +2 −14 in 1 file
-   - `services/orders/src/shipping/eta.ts` lines 9–13 (before the change)
+   - `services/orders/src/shipping/eta.ts` lines 9–13, 16–24 (before the change)
    - `services/orders/src/shipping/eta.ts` lines 2, 13
 
 </details>

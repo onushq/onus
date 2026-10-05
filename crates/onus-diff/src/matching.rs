@@ -132,14 +132,12 @@ pub fn rename_rows(ctx: &Ctx, pairs: &Pairs) -> Vec<SemanticChange> {
             ));
         }
         let mut call_sites = 0u32;
-        let mut files = BTreeSet::new();
         for e in &ctx.head.edges {
             if e.to != h.id {
                 continue;
             }
             for s in &e.sites {
                 locations.push(Location::head(&s.file, s.line, s.line));
-                files.insert(s.file.clone());
             }
             if e.kind == EdgeKind::Calls {
                 call_sites += e.sites.len() as u32;
@@ -200,7 +198,7 @@ pub fn rename_rows(ctx: &Ctx, pairs: &Pairs) -> Vec<SemanticChange> {
             why,
             locations,
         );
-        row.hints.blast_radius = files.len() as u32;
+        row.hints.blast_radius = ctx.dependents(&h.id).0;
         rows.push(row);
     }
     rows

@@ -82,7 +82,7 @@ fn s1_sms_alerts_has_exactly_the_manifesto_rows() {
     assert!(
         contract
             .why_it_matters
-            .contains("3 files across 2 components")
+            .contains("4 files across 2 components")
     );
 
     let consumer = &r.changes[2];
@@ -95,7 +95,13 @@ fn s1_sms_alerts_has_exactly_the_manifesto_rows() {
     let internal = &r.changes[3];
     assert_eq!(internal.component.as_deref(), Some("notifications"));
     let stats = internal.stats.unwrap();
-    assert_eq!(stats.lines_added + stats.lines_removed, 1_403);
+    assert_eq!(stats.lines_added + stats.lines_removed, 1_402);
+    // The call that sends phone numbers out is cited, not just the import.
+    assert!(
+        sms.locations
+            .iter()
+            .any(|l| l.file.ends_with("sms/client.ts") && l.lines == [51, 51])
+    );
     assert_eq!(r.summary.needs_attention, 1);
     assert_eq!(r.text_stats.files, 23);
     assert_eq!(r.text_stats.lines_added + r.text_stats.lines_removed, 1_408);
@@ -162,7 +168,11 @@ fn s5_weakened_tests_are_rules_of_the_game() {
         t.why_it_matters
             .contains("source in `billing` changed in the same pull request")
     );
-    assert_eq!(subkinds(&r)[0], "test-weakened");
+    // The source change behind it: a payments rate moves from 0.1 to 0.15.
+    let rate = row(&r, "constant-changed");
+    assert_eq!(rate.title, "`LOYALTY_RATE` changes from `0.1` to `0.15`");
+    assert_eq!(rate.kind, ChangeKind::SecuritySensitive);
+    assert_eq!(subkinds(&r), ["constant-changed", "test-weakened"]);
 }
 
 #[test]

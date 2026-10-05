@@ -28,7 +28,7 @@ expression: json
         "labels": [
           "payments"
         ],
-        "blastRadius": 1,
+        "blastRadius": 2,
         "novelty": [],
         "confidence": "static",
         "rulesOfTheGame": false,
@@ -55,7 +55,7 @@ expression: json
       "component": "orders",
       "kindLabel": "Internal",
       "title": "8 changed lines of code inside `orders`",
-      "whyItMatters": "Stays inside `orders`",
+      "whyItMatters": "Stays inside `orders`; no other component depends on it",
       "hints": {
         "labels": [],
         "blastRadius": 0,
@@ -72,6 +72,14 @@ expression: json
             4,
             4
           ],
+          "side": "base"
+        },
+        {
+          "file": "services/orders/src/orders.ts",
+          "lines": [
+            4,
+            4
+          ],
           "side": "head"
         },
         {
@@ -81,6 +89,14 @@ expression: json
             24
           ],
           "side": "head"
+        },
+        {
+          "file": "services/orders/src/orders.ts",
+          "lines": [
+            39,
+            39
+          ],
+          "side": "base"
         },
         {
           "file": "services/orders/src/orders.ts",

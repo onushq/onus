@@ -161,7 +161,10 @@ expression: json
       "isTest": false,
       "lines": 2,
       "contentHash": "0e7d92f624e8b008",
-      "imports": []
+      "imports": [
+        "packages/events/src/bus.ts",
+        "packages/events/src/types.ts"
+      ]
     },
     {
       "path": "packages/events/src/types.ts",
@@ -188,7 +191,9 @@ expression: json
       "isTest": false,
       "lines": 2,
       "contentHash": "323ecc7b6ce30c22",
-      "imports": []
+      "imports": [
+        "packages/logger/src/logger.ts"
+      ]
     },
     {
       "path": "packages/logger/src/logger.test.ts",
@@ -241,7 +246,9 @@ expression: json
       "isTest": false,
       "lines": 1,
       "contentHash": "052c2d797fc81437",
-      "imports": []
+      "imports": [
+        "packages/money/src/format.ts"
+      ]
     },
     {
       "path": "services/billing/src/db.ts",
@@ -282,7 +289,13 @@ expression: json
       "isTest": false,
       "lines": 6,
       "contentHash": "1961c5a3f5c63991",
-      "imports": []
+      "imports": [
+        "services/billing/src/discount.ts",
+        "services/billing/src/payments.ts",
+        "services/billing/src/receipts.ts",
+        "services/billing/src/subscriptions.ts",
+        "services/billing/src/types.ts"
+      ]
     },
     {
       "path": "services/billing/src/lines/balance-due.ts",
@@ -665,7 +678,10 @@ expression: json
       "isTest": false,
       "lines": 2,
       "contentHash": "5afe4f2cf2aa0318",
-      "imports": []
+      "imports": [
+        "services/notifications/src/handlers/index.ts",
+        "services/notifications/src/email/sendgrid.ts"
+      ]
     },
     {
       "path": "services/notifications/src/templates/locale.ts",
@@ -715,7 +731,11 @@ expression: json
       "isTest": false,
       "lines": 3,
       "contentHash": "fc0d83c6d3c332d0",
-      "imports": []
+      "imports": [
+        "services/orders/src/orders.ts",
+        "services/orders/src/shipping/eta.ts",
+        "services/orders/src/types.ts"
+      ]
     },
     {
       "path": "services/orders/src/orders.test.ts",
@@ -999,7 +1019,10 @@ expression: json
       "isTest": false,
       "lines": 2,
       "contentHash": "b7d01382efa27143",
-      "imports": []
+      "imports": [
+        "services/user-preferences/src/types.ts",
+        "services/user-preferences/src/preferences.ts"
+      ]
     },
     {
       "path": "services/user-preferences/src/preferences.test.ts",
@@ -1069,7 +1092,8 @@ expression: json
         "file": "services/billing/src/discount.ts",
         "start": 1,
         "end": 1
-      }
+      },
+      "literal": "10000"
     },
     {
       "id": "billing:src/discount.ts#DiscountResult",
@@ -1127,7 +1151,8 @@ expression: json
         "file": "services/billing/src/discount.ts",
         "start": 2,
         "end": 2
-      }
+      },
+      "literal": "0.1"
     },
     {
       "id": "billing:src/discount.ts#OrderTotals",
@@ -1365,7 +1390,8 @@ expression: json
         "file": "services/billing/src/lines/dunning-message.ts",
         "start": 3,
         "end": 3
-      }
+      },
+      "literal": "4"
     },
     {
       "id": "billing:src/lines/dunning-message.ts#dunningMessage",
@@ -1512,7 +1538,8 @@ expression: json
         "file": "services/billing/src/lines/invoice-line.ts",
         "start": 3,
         "end": 3
-      }
+      },
+      "literal": "40"
     },
     {
       "id": "billing:src/lines/invoice-line.ts#invoiceLine",
@@ -2788,7 +2815,7 @@ expression: json
     {
       "id": "notifications:src/email/sendgrid.ts#configured",
       "componentId": "notifications",
-      "kind": "const",
+      "kind": "variable",
       "name": "configured",
       "visibility": "internal",
       "shape": {
@@ -2801,7 +2828,8 @@ expression: json
         "file": "services/notifications/src/email/sendgrid.ts",
         "start": 7,
         "end": 7
-      }
+      },
+      "literal": "false"
     },
     {
       "id": "notifications:src/email/sendgrid.ts#ensureConfigured",
@@ -4578,7 +4606,8 @@ expression: json
         "file": "services/orders/src/shipping/eta.ts",
         "start": 7,
         "end": 7
-      }
+      },
+      "literal": "5"
     },
     {
       "id": "orders:src/shipping/eta.ts#TRANSIT_DAYS",
@@ -4967,7 +4996,8 @@ expression: json
         "file": "services/orders/src/util/ids.ts",
         "start": 3,
         "end": 3
-      }
+      },
+      "literal": "12"
     },
     {
       "id": "orders:src/util/ids.ts#isOrderId",

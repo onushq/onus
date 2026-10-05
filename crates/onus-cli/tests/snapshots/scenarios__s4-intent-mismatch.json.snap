@@ -55,7 +55,7 @@ expression: json
       "component": "billing",
       "kindLabel": "Internal",
       "title": "10 lines of new code inside `billing`",
-      "whyItMatters": "Stays inside `billing`",
+      "whyItMatters": "Stays inside `billing`; no other component depends on it",
       "hints": {
         "labels": [
           "payments"
@@ -124,7 +124,7 @@ expression: json
       "component": "logger",
       "kindLabel": "Internal",
       "title": "21 changed lines of code inside `logger`",
-      "whyItMatters": "Stays inside `logger`",
+      "whyItMatters": "Stays inside `logger`, which `billing`, `notifications` and `orders` depend on",
       "hints": {
         "labels": [],
         "blastRadius": 5,
@@ -142,6 +142,22 @@ expression: json
             17
           ],
           "side": "head"
+        },
+        {
+          "file": "packages/logger/src/format.ts",
+          "lines": [
+            9,
+            9
+          ],
+          "side": "base"
+        },
+        {
+          "file": "packages/logger/src/format.ts",
+          "lines": [
+            12,
+            12
+          ],
+          "side": "base"
         },
         {
           "file": "packages/logger/src/format.ts",
