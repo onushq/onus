@@ -1,0 +1,4 @@
+# Keep fixtures and snapshots byte-identical on every platform.
+* text=auto eol=lf
+*.snap text eol=lf
+fixtures/** text eol=lf
