@@ -15,7 +15,7 @@ use crate::ctx::{Ctx, change, join_and};
 type Key = (String, String);
 
 /// `(from component, to)` → edges, for one edge kind.
-fn by_component<'a>(map: &'a CodebaseMap, kind: EdgeKind) -> BTreeMap<Key, Vec<&'a Edge>> {
+fn by_component(map: &CodebaseMap, kind: EdgeKind) -> BTreeMap<Key, Vec<&Edge>> {
     let mut out: BTreeMap<Key, Vec<&Edge>> = BTreeMap::new();
     for e in &map.edges {
         if e.kind != kind {
@@ -491,12 +491,12 @@ fn component_pairs(map: &CodebaseMap) -> ComponentPairs<'_> {
         if !e.kind.is_code_dependency() {
             continue;
         }
-        if let (Some(f), Some(t)) = (ids::component_of(&e.from), ids::component_of(&e.to)) {
-            if f != t {
-                out.entry((f.to_string(), t.to_string()))
-                    .or_default()
-                    .push(e);
-            }
+        if let (Some(f), Some(t)) = (ids::component_of(&e.from), ids::component_of(&e.to))
+            && f != t
+        {
+            out.entry((f.to_string(), t.to_string()))
+                .or_default()
+                .push(e);
         }
     }
     out

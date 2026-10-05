@@ -90,7 +90,7 @@ fn compare_cases(base: &TestNode, head: Option<&TestNode>, w: &mut Weakening) ->
                     .push(format!("expected values edited in {}", quote(&h.name)));
                 for e in head_expected {
                     w.locations.push(Location::head(
-                        &head.map_or("", |n| n.file.as_str()).to_string(),
+                        head.map_or("", |n| n.file.as_str()).to_string(),
                         e.line,
                         e.line,
                     ));

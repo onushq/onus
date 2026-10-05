@@ -20,7 +20,7 @@ fn thousands(n: u32) -> String {
     let s = n.to_string();
     let mut out = String::new();
     for (i, c) in s.chars().enumerate() {
-        if i > 0 && (s.len() - i) % 3 == 0 {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(c);
@@ -165,29 +165,29 @@ pub fn to_markdown(report: &SemanticReport, rules_declared: bool) -> String {
         intent_line(report),
         rules_line(report, rules_declared)
     );
-    if let Some(i) = &report.intent_check {
-        if !i.mismatches.is_empty() {
+    if let Some(i) = &report.intent_check
+        && !i.mismatches.is_empty()
+    {
+        let _ = writeln!(out);
+        if !i.stated.is_empty() {
+            let _ = writeln!(out, "Stated intent: \"{}\"", i.stated);
             let _ = writeln!(out);
-            if !i.stated.is_empty() {
-                let _ = writeln!(out, "Stated intent: \"{}\"", i.stated);
-                let _ = writeln!(out);
-            }
-            let titles: BTreeMap<&str, &str> = report
-                .changes
-                .iter()
-                .map(|c| (c.id.as_str(), c.title.as_str()))
-                .collect();
-            for m in &i.mismatches {
-                let _ = writeln!(
-                    out,
-                    "- {}: {}",
-                    titles
-                        .get(m.change_id.as_str())
-                        .copied()
-                        .unwrap_or(&m.change_id),
-                    m.reason
-                );
-            }
+        }
+        let titles: BTreeMap<&str, &str> = report
+            .changes
+            .iter()
+            .map(|c| (c.id.as_str(), c.title.as_str()))
+            .collect();
+        for m in &i.mismatches {
+            let _ = writeln!(
+                out,
+                "- {}: {}",
+                titles
+                    .get(m.change_id.as_str())
+                    .copied()
+                    .unwrap_or(&m.change_id),
+                m.reason
+            );
         }
     }
     let _ = writeln!(out);
@@ -208,10 +208,9 @@ pub fn to_markdown(report: &SemanticReport, rules_declared: bool) -> String {
                 facts.push(format!("labels {}", c.hints.labels.join(", ")));
             }
             if c.hints.blast_radius > 0 {
-                facts.push(format!(
-                    "{}",
-                    plural(c.hints.blast_radius, "dependent file", "dependent files")
-                ));
+                facts.push(
+                    plural(c.hints.blast_radius, "dependent file", "dependent files").to_string(),
+                );
             }
             if !c.hints.novelty.is_empty() {
                 facts.push(format!("novelty {}", c.hints.novelty.join(", ")));

@@ -108,22 +108,22 @@ pub fn diff_trees(
         if bytes.is_empty() {
             continue;
         }
-        if let Some(candidates) = deleted_by_content.get_mut(&bytes) {
-            if let Some(pos) = candidates.iter().position(|c| !renamed_from.contains(c)) {
-                let from = candidates[pos];
-                renamed_from.insert(from);
-                renamed_to.insert(*a);
-                files.push(FileChange {
-                    path: a.to_string(),
-                    old_path: Some(from.to_string()),
-                    status: Status::Renamed,
-                    binary: is_binary(&bytes),
-                    hunks: vec![],
-                    added: 0,
-                    removed: 0,
-                    added_lines: vec![],
-                });
-            }
+        if let Some(candidates) = deleted_by_content.get_mut(&bytes)
+            && let Some(pos) = candidates.iter().position(|c| !renamed_from.contains(c))
+        {
+            let from = candidates[pos];
+            renamed_from.insert(from);
+            renamed_to.insert(*a);
+            files.push(FileChange {
+                path: a.to_string(),
+                old_path: Some(from.to_string()),
+                status: Status::Renamed,
+                binary: is_binary(&bytes),
+                hunks: vec![],
+                added: 0,
+                removed: 0,
+                added_lines: vec![],
+            });
         }
     }
     deleted.retain(|d| !renamed_from.contains(d));

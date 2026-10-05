@@ -85,10 +85,11 @@ impl Tokens {
                     continue;
                 }
             }
-            if let (Some(prev), Some(first)) = (out.chars().last(), tok.chars().next()) {
-                if is_word(prev) && is_word(first) {
-                    out.push(' ');
-                }
+            if let (Some(prev), Some(first)) = (out.chars().last(), tok.chars().next())
+                && is_word(prev)
+                && is_word(first)
+            {
+                out.push(' ');
             }
             out.push_str(tok);
         }

@@ -272,10 +272,10 @@ fn first_error(node: Node) -> Option<Node> {
     }
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        if child.has_error() {
-            if let Some(n) = first_error(child) {
-                return Some(n);
-            }
+        if child.has_error()
+            && let Some(n) = first_error(child)
+        {
+            return Some(n);
         }
     }
     None
@@ -656,22 +656,20 @@ impl Extractor<'_> {
             }
             return;
         }
-        if is_default {
-            if let Some(value) = node.child_by_field_name("value") {
-                if value.kind() == "identifier" {
-                    self.facts.exports.push(Export::Local {
-                        exported: "default".into(),
-                        local: self.t(value),
-                        line: line(node),
-                    });
-                } else {
-                    self.value_decl("default", None, Some(value), node, node);
-                    self.facts.exports.push(Export::Local {
-                        exported: "default".into(),
-                        local: "default".into(),
-                        line: line(node),
-                    });
-                }
+        if is_default && let Some(value) = node.child_by_field_name("value") {
+            if value.kind() == "identifier" {
+                self.facts.exports.push(Export::Local {
+                    exported: "default".into(),
+                    local: self.t(value),
+                    line: line(node),
+                });
+            } else {
+                self.value_decl("default", None, Some(value), node, node);
+                self.facts.exports.push(Export::Local {
+                    exported: "default".into(),
+                    local: "default".into(),
+                    line: line(node),
+                });
             }
         }
     }
@@ -878,11 +876,11 @@ impl Extractor<'_> {
                 self.function_like(name, SymbolKind::Function, v, name_node, stmt);
                 return;
             }
-            if matches!(v.kind(), "class") {
-                if let Some(name_node) = declarator.child_by_field_name("name") {
-                    self.class(name, v, name_node);
-                    return;
-                }
+            if matches!(v.kind(), "class")
+                && let Some(name_node) = declarator.child_by_field_name("name")
+            {
+                self.class(name, v, name_node);
+                return;
             }
         }
         let literal = value.and_then(|v| string_value(v, self.src));
@@ -1291,29 +1289,28 @@ impl Extractor<'_> {
                 });
             }
             "if_statement" => {
-                if node.child_by_field_name("alternative").is_none() {
-                    if let Some(cons) = node.child_by_field_name("consequence") {
-                        if exits(cons) {
-                            let cond = node
-                                .child_by_field_name("condition")
-                                .map(|c| norm(c, self.src))
-                                .unwrap_or_default();
-                            facts.guards.push(FactSite {
-                                text: self.scrub(cond, node),
-                                line: line(node),
-                            });
-                        }
-                    }
+                if node.child_by_field_name("alternative").is_none()
+                    && let Some(cons) = node.child_by_field_name("consequence")
+                    && exits(cons)
+                {
+                    let cond = node
+                        .child_by_field_name("condition")
+                        .map(|c| norm(c, self.src))
+                        .unwrap_or_default();
+                    facts.guards.push(FactSite {
+                        text: self.scrub(cond, node),
+                        line: line(node),
+                    });
                 }
             }
             "catch_clause" => {
-                if let Some(body) = node.child_by_field_name("body") {
-                    if named_children(body).iter().all(|c| c.kind() == "comment") {
-                        facts.empty_catches.push(FactSite {
-                            text: "catch {}".into(),
-                            line: line(node),
-                        });
-                    }
+                if let Some(body) = node.child_by_field_name("body")
+                    && named_children(body).iter().all(|c| c.kind() == "comment")
+                {
+                    facts.empty_catches.push(FactSite {
+                        text: "catch {}".into(),
+                        line: line(node),
+                    });
                 }
             }
             _ => {}
@@ -1364,12 +1361,11 @@ impl Extractor<'_> {
             "comment" => return,
             "call_expression" => self.call(node, from, locals),
             "new_expression" => {
-                if let Some(c) = node.child_by_field_name("constructor") {
-                    if let Some((root, member)) = root_of(c, self.src) {
-                        if !locals.contains(&root) {
-                            self.push_ref(from, root, member, RefKind::Call, node);
-                        }
-                    }
+                if let Some(c) = node.child_by_field_name("constructor")
+                    && let Some((root, member)) = root_of(c, self.src)
+                    && !locals.contains(&root)
+                {
+                    self.push_ref(from, root, member, RefKind::Call, node);
                 }
             }
             "decorator" => self.decorator(node, from),
@@ -1416,35 +1412,35 @@ impl Extractor<'_> {
                 if let (Some(obj), Some(prop)) = (
                     node.child_by_field_name("object"),
                     node.child_by_field_name("property"),
-                ) {
-                    if obj.kind() == "identifier" && !is_call_function(node) {
-                        let name = self.t(obj);
-                        if !locals.contains(&name) {
-                            self.push_ref(from, name, Some(self.t(prop)), RefKind::Value, node);
-                        }
-                        return;
+                ) && obj.kind() == "identifier"
+                    && !is_call_function(node)
+                {
+                    let name = self.t(obj);
+                    if !locals.contains(&name) {
+                        self.push_ref(from, name, Some(self.t(prop)), RefKind::Value, node);
                     }
+                    return;
                 }
             }
             "subscript_expression" => {
-                if let Some(obj) = node.child_by_field_name("object") {
-                    if norm(obj, self.src) == "process.env" {
-                        let idx = node.child_by_field_name("index");
-                        match idx.and_then(|i| string_value(i, self.src)) {
-                            Some(key) => self.facts.env.push(SiteUse {
-                                from: from.map(str::to_string),
-                                value: key,
-                                line: line(node),
-                            }),
-                            None => self.facts.diagnostics.push(diag(
-                                "dynamic-config-key",
-                                self.path,
-                                line(node),
-                                "process.env is read with a computed key",
-                            )),
-                        }
-                        return;
+                if let Some(obj) = node.child_by_field_name("object")
+                    && norm(obj, self.src) == "process.env"
+                {
+                    let idx = node.child_by_field_name("index");
+                    match idx.and_then(|i| string_value(i, self.src)) {
+                        Some(key) => self.facts.env.push(SiteUse {
+                            from: from.map(str::to_string),
+                            value: key,
+                            line: line(node),
+                        }),
+                        None => self.facts.diagnostics.push(diag(
+                            "dynamic-config-key",
+                            self.path,
+                            line(node),
+                            "process.env is read with a computed key",
+                        )),
                     }
+                    return;
                 }
             }
             _ => {}
@@ -1523,56 +1519,56 @@ impl Extractor<'_> {
         }
 
         // Prisma: <client>.<model>.<operation>(...)
-        if func.kind() == "member_expression" {
-            if let (Some(obj), Some(op)) = (
+        if func.kind() == "member_expression"
+            && let (Some(obj), Some(op)) = (
                 func.child_by_field_name("object"),
                 func.child_by_field_name("property"),
-            ) {
-                let op = self.t(op);
-                if obj.kind() == "member_expression" {
-                    if let (Some(client), Some(model)) = (
-                        obj.child_by_field_name("object"),
-                        obj.child_by_field_name("property"),
-                    ) {
-                        let client_text = norm(client, self.src);
-                        let client_last = client_text.rsplit('.').next().unwrap_or("");
-                        if self
-                            .patterns
-                            .prisma_clients
-                            .iter()
-                            .any(|c| c == client_last)
-                        {
-                            let model = self.t(model);
-                            let write = PRISMA_WRITES.contains(&op.as_str());
-                            if write || PRISMA_READS.contains(&op.as_str()) {
-                                self.facts.data.push(DataUse {
-                                    from: from.map(str::to_string),
-                                    model,
-                                    write,
-                                    line: line(node),
-                                });
-                            }
-                        }
-                    }
-                } else {
-                    let client_last = callee.split('.').rev().nth(1).unwrap_or("");
+            )
+        {
+            let op = self.t(op);
+            if obj.kind() == "member_expression" {
+                if let (Some(client), Some(model)) = (
+                    obj.child_by_field_name("object"),
+                    obj.child_by_field_name("property"),
+                ) {
+                    let client_text = norm(client, self.src);
+                    let client_last = client_text.rsplit('.').next().unwrap_or("");
                     if self
                         .patterns
                         .prisma_clients
                         .iter()
                         .any(|c| c == client_last)
-                        && matches!(
-                            op.as_str(),
-                            "$queryRaw" | "$executeRaw" | "$queryRawUnsafe" | "$executeRawUnsafe"
-                        )
                     {
-                        self.facts.diagnostics.push(diag(
-                            "raw-query",
-                            self.path,
-                            line(node),
-                            "raw SQL query; the tables it reads or writes are unknown",
-                        ));
+                        let model = self.t(model);
+                        let write = PRISMA_WRITES.contains(&op.as_str());
+                        if write || PRISMA_READS.contains(&op.as_str()) {
+                            self.facts.data.push(DataUse {
+                                from: from.map(str::to_string),
+                                model,
+                                write,
+                                line: line(node),
+                            });
+                        }
                     }
+                }
+            } else {
+                let client_last = callee.split('.').rev().nth(1).unwrap_or("");
+                if self
+                    .patterns
+                    .prisma_clients
+                    .iter()
+                    .any(|c| c == client_last)
+                    && matches!(
+                        op.as_str(),
+                        "$queryRaw" | "$executeRaw" | "$queryRawUnsafe" | "$executeRawUnsafe"
+                    )
+                {
+                    self.facts.diagnostics.push(diag(
+                        "raw-query",
+                        self.path,
+                        line(node),
+                        "raw SQL query; the tables it reads or writes are unknown",
+                    ));
                 }
             }
         }
@@ -1585,31 +1581,29 @@ impl Extractor<'_> {
                     .split('.')
                     .nth(1)
                     .is_some_and(|m| AXIOS_METHODS.contains(&m)));
-        if is_http {
-            if let Some(host) = args.first().and_then(|a| self.literal_host(*a)) {
-                self.facts.hosts.push(SiteUse {
-                    from: from.map(str::to_string),
-                    value: host,
-                    line: line(node),
-                });
-            }
+        if is_http && let Some(host) = args.first().and_then(|a| self.literal_host(*a)) {
+            self.facts.hosts.push(SiteUse {
+                from: from.map(str::to_string),
+                value: host,
+                line: line(node),
+            });
         }
 
         // The call itself.
-        if let Some((root, member)) = root_of(func, self.src) {
-            if !locals.contains(&root) {
-                self.push_ref(from, root, member, RefKind::Call, node);
-            }
+        if let Some((root, member)) = root_of(func, self.src)
+            && !locals.contains(&root)
+        {
+            self.push_ref(from, root, member, RefKind::Call, node);
         }
         // Recurse into the callee's inner parts (for chained calls) and the
         // arguments.
         match func.kind() {
             "identifier" => {}
             "member_expression" => {
-                if let Some(obj) = func.child_by_field_name("object") {
-                    if obj.kind() != "identifier" {
-                        self.scan(obj, from, locals);
-                    }
+                if let Some(obj) = func.child_by_field_name("object")
+                    && obj.kind() != "identifier"
+                {
+                    self.scan(obj, from, locals);
                 }
             }
             _ => self.scan(func, from, locals),
@@ -1746,72 +1740,72 @@ impl Extractor<'_> {
         inherited: &[String],
         out: &mut Vec<TestCase>,
     ) {
-        if node.kind() == "call_expression" {
-            if let Some((base, mods)) = self.test_callee(node) {
-                let args: Vec<Node> = node
-                    .child_by_field_name("arguments")
-                    .map(|a| {
-                        named_children(a)
-                            .into_iter()
-                            .filter(|c| c.kind() != "comment")
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let title = args
-                    .first()
-                    .map(|a| string_value(*a, self.src).unwrap_or_else(|| norm(*a, self.src)))
-                    .unwrap_or_default();
-                let name = if prefix.is_empty() {
-                    title
-                } else {
-                    format!("{prefix} › {title}")
-                };
-                let mut markers: Vec<String> = inherited.to_vec();
-                for m in mods {
-                    if !markers.contains(&m) {
-                        markers.push(m);
-                    }
+        if node.kind() == "call_expression"
+            && let Some((base, mods)) = self.test_callee(node)
+        {
+            let args: Vec<Node> = node
+                .child_by_field_name("arguments")
+                .map(|a| {
+                    named_children(a)
+                        .into_iter()
+                        .filter(|c| c.kind() != "comment")
+                        .collect()
+                })
+                .unwrap_or_default();
+            let title = args
+                .first()
+                .map(|a| string_value(*a, self.src).unwrap_or_else(|| norm(*a, self.src)))
+                .unwrap_or_default();
+            let name = if prefix.is_empty() {
+                title
+            } else {
+                format!("{prefix} › {title}")
+            };
+            let mut markers: Vec<String> = inherited.to_vec();
+            for m in mods {
+                if !markers.contains(&m) {
+                    markers.push(m);
                 }
-                markers.sort();
-                let body = args.get(1).copied().filter(|b| {
-                    matches!(
-                        b.kind(),
-                        "arrow_function" | "function_expression" | "function"
-                    )
-                });
-                if base == "describe" {
-                    if let Some(b) = body {
-                        self.collect_cases(b, &name, &markers, out);
-                    }
-                    return;
-                }
-                let mut assertions = Vec::new();
-                let mut expected = Vec::new();
+            }
+            markers.sort();
+            let body = args.get(1).copied().filter(|b| {
+                matches!(
+                    b.kind(),
+                    "arrow_function" | "function_expression" | "function"
+                )
+            });
+            if base == "describe" {
                 if let Some(b) = body {
-                    self.collect_assertions(b, &mut assertions, &mut expected);
+                    self.collect_cases(b, &name, &markers, out);
                 }
-                let fingerprint = body
-                    .map(|b| {
-                        let mut l = HashSet::new();
-                        collect_bindings(b, self.src, &mut l);
-                        fingerprint(b, self.src, None, &l)
-                    })
-                    .unwrap_or_default();
-                if body.is_none() && !markers.iter().any(|m| m == "todo") {
-                    markers.push("todo".into());
-                    markers.sort();
-                }
-                out.push(TestCase {
-                    name: secrets::redact(&name),
-                    line: line(node),
-                    end_line: end_line(node),
-                    assertions,
-                    markers,
-                    expected,
-                    fingerprint,
-                });
                 return;
             }
+            let mut assertions = Vec::new();
+            let mut expected = Vec::new();
+            if let Some(b) = body {
+                self.collect_assertions(b, &mut assertions, &mut expected);
+            }
+            let fingerprint = body
+                .map(|b| {
+                    let mut l = HashSet::new();
+                    collect_bindings(b, self.src, &mut l);
+                    fingerprint(b, self.src, None, &l)
+                })
+                .unwrap_or_default();
+            if body.is_none() && !markers.iter().any(|m| m == "todo") {
+                markers.push("todo".into());
+                markers.sort();
+            }
+            out.push(TestCase {
+                name: secrets::redact(&name),
+                line: line(node),
+                end_line: end_line(node),
+                assertions,
+                markers,
+                expected,
+                fingerprint,
+            });
+            return;
         }
         for child in named_children(node) {
             self.collect_cases(child, prefix, inherited, out);
@@ -1856,55 +1850,49 @@ impl Extractor<'_> {
         assertions: &mut Vec<FactSite>,
         expected: &mut Vec<FactSite>,
     ) {
-        if node.kind() == "call_expression" {
-            if let Some(func) = node.child_by_field_name("function") {
-                let callee = norm(func, self.src);
-                let is_expect = func.kind() == "identifier" && callee == "expect";
-                let is_assert = callee == "assert"
-                    || (func.kind() == "member_expression"
-                        && func
-                            .child_by_field_name("object")
-                            .is_some_and(|o| text(o, self.src) == "assert"));
-                if is_expect || is_assert {
-                    // The whole chain: expect(x).not.toBe(y)
-                    let mut top = node;
-                    while let Some(p) = top.parent() {
-                        let continues = (p.kind() == "member_expression"
-                            && p.child_by_field_name("object") == Some(top))
-                            || (p.kind() == "call_expression"
-                                && p.child_by_field_name("function") == Some(top));
-                        if !continues {
-                            break;
-                        }
-                        top = p;
+        if node.kind() == "call_expression"
+            && let Some(func) = node.child_by_field_name("function")
+        {
+            let callee = norm(func, self.src);
+            let is_expect = func.kind() == "identifier" && callee == "expect";
+            let is_assert = callee == "assert"
+                || (func.kind() == "member_expression"
+                    && func
+                        .child_by_field_name("object")
+                        .is_some_and(|o| text(o, self.src) == "assert"));
+            if is_expect || is_assert {
+                // The whole chain: expect(x).not.toBe(y)
+                let mut top = node;
+                while let Some(p) = top.parent() {
+                    let continues = (p.kind() == "member_expression"
+                        && p.child_by_field_name("object") == Some(top))
+                        || (p.kind() == "call_expression"
+                            && p.child_by_field_name("function") == Some(top));
+                    if !continues {
+                        break;
                     }
-                    assertions.push(FactSite {
-                        text: self.scrub(norm(top, self.src), top),
-                        line: line(node),
-                    });
-                    if is_expect && top.kind() == "call_expression" && top != node {
-                        let matcher = top
-                            .child_by_field_name("function")
-                            .and_then(|f| f.child_by_field_name("property"))
-                            .map(|p| self.t(p))
-                            .unwrap_or_default();
-                        if let Some(args) = top.child_by_field_name("arguments") {
-                            for a in named_children(args) {
-                                if matches!(
-                                    a.kind(),
-                                    "number"
-                                        | "string"
-                                        | "true"
-                                        | "false"
-                                        | "null"
-                                        | "template_string"
-                                ) {
-                                    expected.push(FactSite {
-                                        text: self
-                                            .scrub(format!("{matcher}:{}", norm(a, self.src)), a),
-                                        line: line(a),
-                                    });
-                                }
+                    top = p;
+                }
+                assertions.push(FactSite {
+                    text: self.scrub(norm(top, self.src), top),
+                    line: line(node),
+                });
+                if is_expect && top.kind() == "call_expression" && top != node {
+                    let matcher = top
+                        .child_by_field_name("function")
+                        .and_then(|f| f.child_by_field_name("property"))
+                        .map(|p| self.t(p))
+                        .unwrap_or_default();
+                    if let Some(args) = top.child_by_field_name("arguments") {
+                        for a in named_children(args) {
+                            if matches!(
+                                a.kind(),
+                                "number" | "string" | "true" | "false" | "null" | "template_string"
+                            ) {
+                                expected.push(FactSite {
+                                    text: self.scrub(format!("{matcher}:{}", norm(a, self.src)), a),
+                                    line: line(a),
+                                });
                             }
                         }
                     }
@@ -1943,10 +1931,11 @@ fn scrub(src: &[u8], value: String, node: Node) -> String {
 
 fn collect_literals(node: Node, src: &[u8], out: &mut BTreeSet<String>) {
     if node.kind() == "string" {
-        if let Some(v) = string_value(node, src) {
-            if v.chars().count() >= 3 && v.chars().count() <= 120 {
-                out.insert(scrub(src, v, node));
-            }
+        if let Some(v) = string_value(node, src)
+            && v.chars().count() >= 3
+            && v.chars().count() <= 120
+        {
+            out.insert(scrub(src, v, node));
         }
         return;
     }

@@ -85,10 +85,10 @@ pub fn diff(input: &DiffInput) -> SemanticReport {
         .map(|d| d.file.as_str())
         .collect();
     for r in &mut rows {
-        if r.hints.labels.is_empty() {
-            if let Some(c) = &r.component {
-                r.hints.labels = ctx.labels(c);
-            }
+        if r.hints.labels.is_empty()
+            && let Some(c) = &r.component
+        {
+            r.hints.labels = ctx.labels(c);
         }
         if r.locations
             .iter()

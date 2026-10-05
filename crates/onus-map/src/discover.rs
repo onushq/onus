@@ -154,12 +154,11 @@ pub fn workspace_dirs(root: &Path, files: &[String]) -> Option<Vec<String>> {
             patterns.extend(list.iter().filter_map(|v| v.as_str()).map(str::to_string));
         }
     }
-    if let Ok(text) = std::fs::read_to_string(root.join("pnpm-workspace.yaml")) {
-        if let Ok(v) = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&text) {
-            if let Some(list) = v.get("packages").and_then(|p| p.as_sequence()) {
-                patterns.extend(list.iter().filter_map(|v| v.as_str()).map(str::to_string));
-            }
-        }
+    if let Ok(text) = std::fs::read_to_string(root.join("pnpm-workspace.yaml"))
+        && let Ok(v) = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&text)
+        && let Some(list) = v.get("packages").and_then(|p| p.as_sequence())
+    {
+        patterns.extend(list.iter().filter_map(|v| v.as_str()).map(str::to_string));
     }
     if patterns.is_empty() {
         return None;
@@ -184,10 +183,11 @@ pub fn workspace_dirs(root: &Path, files: &[String]) -> Option<Vec<String>> {
     let exclude = exclude.build().ok()?;
     let mut dirs = BTreeSet::new();
     for f in files {
-        if let Some(dir) = f.strip_suffix("/package.json") {
-            if include.is_match(dir) && !exclude.is_match(dir) {
-                dirs.insert(dir.to_string());
-            }
+        if let Some(dir) = f.strip_suffix("/package.json")
+            && include.is_match(dir)
+            && !exclude.is_match(dir)
+        {
+            dirs.insert(dir.to_string());
         }
     }
     Some(dirs.into_iter().collect())
@@ -197,10 +197,10 @@ fn fallback_dirs(files: &[String]) -> Vec<String> {
     let mut dirs = BTreeSet::new();
     for f in files {
         let mut parts = f.split('/');
-        if let (Some(top), Some(name), Some(_)) = (parts.next(), parts.next(), parts.next()) {
-            if FALLBACK_PARENTS.contains(&top) {
-                dirs.insert(format!("{top}/{name}"));
-            }
+        if let (Some(top), Some(name), Some(_)) = (parts.next(), parts.next(), parts.next())
+            && FALLBACK_PARENTS.contains(&top)
+        {
+            dirs.insert(format!("{top}/{name}"));
         }
     }
     dirs.into_iter().collect()
@@ -279,10 +279,10 @@ fn to_source(dir: &str, target: &str, files: &BTreeSet<&str>) -> Option<String> 
         return Some(src);
     }
     for out_dir in ["dist/", "build/", "lib/", "out/", "esm/", "cjs/"] {
-        if let Some(rest) = stem.strip_prefix(out_dir) {
-            if let Some(src) = with_source_ext(&join_dir(dir, &format!("src/{rest}")), files) {
-                return Some(src);
-            }
+        if let Some(rest) = stem.strip_prefix(out_dir)
+            && let Some(src) = with_source_ext(&join_dir(dir, &format!("src/{rest}")), files)
+        {
+            return Some(src);
         }
     }
     None
@@ -326,10 +326,10 @@ impl ComponentMatcher {
                     b.add(g);
                 }
                 // `services/orders/**` should also match the folder itself.
-                if let Some(dir) = r.strip_suffix("/**") {
-                    if let Ok(g) = Glob::new(dir) {
-                        b.add(g);
-                    }
+                if let Some(dir) = r.strip_suffix("/**")
+                    && let Ok(g) = Glob::new(dir)
+                {
+                    b.add(g);
                 }
             }
             if let Ok(set) = b.build() {
@@ -451,12 +451,11 @@ pub fn package_deps(
             }
         };
         // Only the package.json at the component's own root counts.
-        if !dir.is_empty() {
-            if let Some(c) = components.iter().find(|c| c.id == component) {
-                if component_dir(&c.roots) != dir {
-                    continue;
-                }
-            }
+        if !dir.is_empty()
+            && let Some(c) = components.iter().find(|c| c.id == component)
+            && component_dir(&c.roots) != dir
+        {
+            continue;
         }
         let Ok(text) = std::fs::read_to_string(root.join(f)) else {
             continue;

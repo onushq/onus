@@ -204,10 +204,10 @@ pub fn resolve_extractors(config: Option<&OnusConfig>) -> ResolvedExtractors {
             publish = events.publish.clone();
             subscribe = events.subscribe.clone();
         }
-        if let Some(p) = &cfg.extractors.prisma {
-            if !p.clients.is_empty() {
-                prisma_clients = p.clients.clone();
-            }
+        if let Some(p) = &cfg.extractors.prisma
+            && !p.clients.is_empty()
+        {
+            prisma_clients = p.clients.clone();
         }
     }
     ResolvedExtractors {

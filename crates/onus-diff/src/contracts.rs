@@ -329,23 +329,59 @@ pub fn rows(ctx: &Ctx, pairs: &Pairs) -> Vec<SemanticChange> {
             signature_location(r, false).into_iter().collect(),
         ));
     }
+    // New exports: one row per symbol, or one per component when several.
+    let mut new_exports: BTreeMap<&str, Vec<&SymbolNode>> = BTreeMap::new();
     for a in &pairs.added {
-        if a.visibility != Visibility::Public || a.kind == SymbolKind::Method {
+        if a.visibility == Visibility::Public && a.kind != SymbolKind::Method {
+            new_exports
+                .entry(a.component_id.as_deref().unwrap_or(""))
+                .or_default()
+                .push(a);
+        }
+    }
+    for (component, symbols) in new_exports {
+        if let [a] = symbols.as_slice() {
+            let deltas = vec![Delta::additive(
+                "export-added",
+                format!("is a new export of `{component}`"),
+            )];
+            rows.push(contract_row(
+                ctx,
+                a,
+                deltas,
+                signature_location(a, true).into_iter().collect(),
+            ));
             continue;
         }
-        let deltas = vec![Delta::additive(
+        let names: Vec<String> = symbols
+            .iter()
+            .take(5)
+            .map(|s| format!("`{}`", s.name))
+            .collect();
+        let more = if symbols.len() > 5 {
+            format!(" and {} more", symbols.len() - 5)
+        } else {
+            String::new()
+        };
+        let mut row = change(
+            ChangeKind::Additive,
             "export-added",
+            ChangeLevel::Structure,
+            component,
+            Some(component),
+            "Contract change, additive",
+            format!("`{component}` exports {} new symbols", symbols.len()),
             format!(
-                "is a new export of `{}`",
-                a.component_id.as_deref().unwrap_or("")
+                "New public surface: {}{more}; existing callers unaffected",
+                names.join(", ")
             ),
-        )];
-        rows.push(contract_row(
-            ctx,
-            a,
-            deltas,
-            signature_location(a, true).into_iter().collect(),
-        ));
+            symbols
+                .iter()
+                .filter_map(|s| signature_location(s, true))
+                .collect(),
+        );
+        row.id = format!("export-added:{component}");
+        rows.push(row);
     }
     rows
 }

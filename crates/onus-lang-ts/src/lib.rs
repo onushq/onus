@@ -288,12 +288,11 @@ impl<'a> Linker<'a> {
             return None;
         }
         for e in &f.exports {
-            if let Export::Star { spec, .. } = e {
-                if let Some(Target::Module(t)) = self.resolve_spec(file, spec) {
-                    if let Some(found) = self.resolve_export(t, name, depth + 1) {
-                        return Some(found);
-                    }
-                }
+            if let Export::Star { spec, .. } = e
+                && let Some(Target::Module(t)) = self.resolve_spec(file, spec)
+                && let Some(found) = self.resolve_export(t, name, depth + 1)
+            {
+                return Some(found);
             }
         }
         None
@@ -462,31 +461,31 @@ impl<'a> Linker<'a> {
                             &f.path,
                             imp.line,
                         );
-                        if imp.bindings.is_empty() {
-                            if let Some(slug) = self.external_slug(p) {
-                                add(
-                                    &module,
-                                    &ids::external_id(slug),
-                                    EdgeKind::CallsExternal,
-                                    Confidence::Inferred,
-                                    &f.path,
-                                    imp.line,
-                                );
-                            }
+                        if imp.bindings.is_empty()
+                            && let Some(slug) = self.external_slug(p)
+                        {
+                            add(
+                                &module,
+                                &ids::external_id(slug),
+                                EdgeKind::CallsExternal,
+                                Confidence::Inferred,
+                                &f.path,
+                                imp.line,
+                            );
                         }
                     }
                     Resolution::File(_) => {
-                        if imp.bindings.is_empty() {
-                            if let Some(t) = self.file_of(res) {
-                                add(
-                                    &module,
-                                    &self.module_id(t),
-                                    EdgeKind::Imports,
-                                    Confidence::Static,
-                                    &f.path,
-                                    imp.line,
-                                );
-                            }
+                        if imp.bindings.is_empty()
+                            && let Some(t) = self.file_of(res)
+                        {
+                            add(
+                                &module,
+                                &self.module_id(t),
+                                EdgeKind::Imports,
+                                Confidence::Static,
+                                &f.path,
+                                imp.line,
+                            );
                         }
                         for b in &imp.bindings {
                             match self.resolve_binding(fi, ii, b, 0) {
@@ -647,20 +646,19 @@ impl<'a> Linker<'a> {
                         }
                     }
                     Some(Target::Npm(p)) => {
-                        if r.kind == RefKind::Call
-                            || (r.kind == RefKind::Value && r.member.is_some())
+                        if (r.kind == RefKind::Call
+                            || (r.kind == RefKind::Value && r.member.is_some()))
+                            && let Some(slug) = self.external_slug(&p)
                         {
-                            if let Some(slug) = self.external_slug(&p) {
-                                called_packages.insert(p.clone());
-                                add(
-                                    &from,
-                                    &ids::external_id(slug),
-                                    EdgeKind::CallsExternal,
-                                    Confidence::Static,
-                                    &f.path,
-                                    r.line,
-                                );
-                            }
+                            called_packages.insert(p.clone());
+                            add(
+                                &from,
+                                &ids::external_id(slug),
+                                EdgeKind::CallsExternal,
+                                Confidence::Static,
+                                &f.path,
+                                r.line,
+                            );
                         }
                     }
                     _ => {}
@@ -668,19 +666,19 @@ impl<'a> Linker<'a> {
             }
             // Registered SDKs imported but never called in this file.
             for (ii, imp) in f.imports.iter().enumerate() {
-                if let Resolution::Npm(p) = &self.resolutions[fi][ii] {
-                    if !imp.bindings.is_empty() && !called_packages.contains(p) {
-                        if let Some(slug) = self.external_slug(p) {
-                            add(
-                                &module,
-                                &ids::external_id(slug),
-                                EdgeKind::CallsExternal,
-                                Confidence::Inferred,
-                                &f.path,
-                                imp.line,
-                            );
-                        }
-                    }
+                if let Resolution::Npm(p) = &self.resolutions[fi][ii]
+                    && !imp.bindings.is_empty()
+                    && !called_packages.contains(p)
+                    && let Some(slug) = self.external_slug(p)
+                {
+                    add(
+                        &module,
+                        &ids::external_id(slug),
+                        EdgeKind::CallsExternal,
+                        Confidence::Inferred,
+                        &f.path,
+                        imp.line,
+                    );
                 }
             }
 

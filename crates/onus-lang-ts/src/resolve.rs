@@ -112,12 +112,11 @@ impl Resolver {
                 .try_file(&candidate)
                 .map_or(Resolution::Unresolved, Resolution::File);
         }
-        if let Some(cfg) = self.nearest_tsconfig(from) {
-            if let Some(base) = &cfg.base_url {
-                if let Some(f) = self.try_file(&join(base, spec)) {
-                    return Resolution::File(f);
-                }
-            }
+        if let Some(cfg) = self.nearest_tsconfig(from)
+            && let Some(base) = &cfg.base_url
+            && let Some(f) = self.try_file(&join(base, spec))
+        {
+            return Resolution::File(f);
         }
         Resolution::Npm(package_name(spec).to_string())
     }
@@ -136,10 +135,10 @@ impl Resolver {
     fn nearest_tsconfig(&self, from: &str) -> Option<&TsConfig> {
         let mut dir = parent(from);
         loop {
-            if let Some(cfg) = self.tsconfigs.get(dir) {
-                if cfg.base_url.is_some() || !cfg.paths.is_empty() {
-                    return Some(cfg);
-                }
+            if let Some(cfg) = self.tsconfigs.get(dir)
+                && (cfg.base_url.is_some() || !cfg.paths.is_empty())
+            {
+                return Some(cfg);
             }
             if dir.is_empty() {
                 return None;
@@ -258,16 +257,16 @@ fn read_tsconfig(root: &Path, rel: &str, depth: u32) -> Option<TsConfig> {
         dir: dir.clone(),
         ..TsConfig::default()
     };
-    if let Some(ext) = json.get("extends").and_then(|v| v.as_str()) {
-        if ext.starts_with('.') {
-            let mut target = join(&dir, ext);
-            if !target.ends_with(".json") {
-                target.push_str(".json");
-            }
-            if let Some(parent_cfg) = read_tsconfig(root, &target, depth + 1) {
-                cfg.base_url = parent_cfg.base_url;
-                cfg.paths = parent_cfg.paths;
-            }
+    if let Some(ext) = json.get("extends").and_then(|v| v.as_str())
+        && ext.starts_with('.')
+    {
+        let mut target = join(&dir, ext);
+        if !target.ends_with(".json") {
+            target.push_str(".json");
+        }
+        if let Some(parent_cfg) = read_tsconfig(root, &target, depth + 1) {
+            cfg.base_url = parent_cfg.base_url;
+            cfg.paths = parent_cfg.paths;
         }
     }
     let opts = json.get("compilerOptions");
