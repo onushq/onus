@@ -1,0 +1,40 @@
+name: Bug report
+description: Something Onus does is wrong, including a report that states a false fact.
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for the report. For security problems, use private reporting instead (see SECURITY.md).
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What Onus did, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: The smallest repository, diff or command that shows the problem.
+      placeholder: |
+        1. onus report --base main --head my-branch
+        2. ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Onus version
+      placeholder: onus --version
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      placeholder: macOS 15 arm64, Ubuntu 24.04, GitHub Actions ubuntu-latest
+  - type: textarea
+    id: output
+    attributes:
+      label: Output or report
+      description: Paste the relevant output. Remove anything private.
+      render: text

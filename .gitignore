@@ -1,0 +1,9 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Local only
+manifesto.pdf
+.DS_Store
+.env*
+*.local

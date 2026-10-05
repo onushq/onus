@@ -1,0 +1,32 @@
+name: Feature request
+description: Suggest a change kind, extractor, report improvement or anything else.
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What is hard or impossible today? A real pull request or situation helps most.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you'd like Onus to do
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Semantic diff and report
+        - Codebase map
+        - CLI
+        - GitHub Action
+        - Later phases (tokens, lanes, judge, environments)
+        - Not sure
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you've considered

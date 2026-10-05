@@ -1,0 +1,34 @@
+name: New language adapter
+description: Propose support for analyzing another language.
+labels: ["lang:new", "enhancement"]
+body:
+  - type: input
+    id: language
+    attributes:
+      label: Language
+      placeholder: Python
+    validations:
+      required: true
+  - type: input
+    id: grammar
+    attributes:
+      label: tree-sitter grammar
+      description: Link to the grammar crate you'd use.
+  - type: textarea
+    id: modules
+    attributes:
+      label: Modules and packages
+      description: How imports resolve, and how components (packages, modules, services) are discovered.
+    validations:
+      required: true
+  - type: textarea
+    id: contracts
+    attributes:
+      label: Contracts
+      description: What counts as a public contract in this language, and how its shape (fields, optionality, signatures) is read from the syntax.
+  - type: checkboxes
+    id: help
+    attributes:
+      label: Contribution
+      options:
+        - label: I'd like to help build this adapter.
