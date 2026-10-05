@@ -794,6 +794,7 @@ impl<'a> Linker<'a> {
                         file: f.path.clone(),
                         start: d.start,
                         end: d.end,
+                        signature_end: d.signature_end,
                     }),
                     facts: d.facts.clone(),
                     literal: d.literal.clone(),

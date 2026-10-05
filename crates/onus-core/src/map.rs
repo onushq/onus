@@ -196,6 +196,9 @@ pub struct Loc {
     pub file: String,
     pub start: u32,
     pub end: u32,
+    /// Last line of the signature, when the symbol has a separate body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature_end: Option<u32>,
 }
 
 #[derive(

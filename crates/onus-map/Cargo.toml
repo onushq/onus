@@ -1,0 +1,26 @@
+[package]
+name = "onus-map"
+description = "Onus map building: workspace discovery, the declared layer and language adapters combined into a CodebaseMap"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+globset.workspace = true
+ignore.workspace = true
+onus-core.workspace = true
+onus-lang-ts.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml_ng.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -103,6 +103,8 @@ pub struct Decl {
     pub fingerprint: String,
     pub start: u32,
     pub end: u32,
+    /// Last line of the signature for functions and methods.
+    pub signature_end: Option<u32>,
     pub facts: Option<BodyFacts>,
     pub literal: Option<String>,
     /// Enum members and their literal values, for event-name lookup.
@@ -471,6 +473,12 @@ impl Extractor<'_> {
         text(node, self.src).to_string()
     }
 
+    /// Redacts `value` if it, or the source line it comes from, contains a
+    /// secret. Some secret patterns need the variable name for context.
+    fn scrub(&self, value: String, node: Node) -> String {
+        scrub(self.src, value, node)
+    }
+
     // ---- modules ----
 
     fn extract_module(&mut self, root: Node) {
@@ -831,6 +839,7 @@ impl Extractor<'_> {
                                 fingerprint: short_hash(norm(declarator, self.src).as_bytes()),
                                 start: line(node),
                                 end: end_line(node),
+                                signature_end: None,
                                 facts: None,
                                 literal: None,
                                 enum_values: vec![],
@@ -922,8 +931,9 @@ impl Extractor<'_> {
             fingerprint: fp,
             start: line(stmt),
             end: end_line(stmt),
+            signature_end: None,
             facts: None,
-            literal: literal.map(|l| secrets::redact(&l)),
+            literal: literal.map(|l| self.scrub(l, declarator)),
             enum_values: vec![],
         });
     }
@@ -950,6 +960,7 @@ impl Extractor<'_> {
             fingerprint: fp,
             start: line(span),
             end: end_line(span),
+            signature_end: signature_end(node),
             facts: (!facts.is_empty()).then_some(facts),
             literal: None,
             enum_values: vec![],
@@ -1087,6 +1098,7 @@ impl Extractor<'_> {
                             fingerprint: fp,
                             start: line(m),
                             end: end_line(m),
+                            signature_end: signature_end(m),
                             facts: (!facts.is_empty()).then_some(facts),
                             literal: None,
                             enum_values: vec![],
@@ -1144,6 +1156,7 @@ impl Extractor<'_> {
             fingerprint: fp,
             start: line(node),
             end: end_line(node),
+            signature_end: None,
             facts: None,
             literal: None,
             enum_values: vec![],
@@ -1169,6 +1182,7 @@ impl Extractor<'_> {
             fingerprint: fp,
             start: line(node),
             end: end_line(node),
+            signature_end: None,
             facts: None,
             literal: None,
             enum_values: vec![],
@@ -1250,15 +1264,15 @@ impl Extractor<'_> {
                     if COMPARISON_OPS.contains(&op.as_str()) {
                         facts.comparisons.push(Comparison {
                             op,
-                            left: secrets::redact(&norm(l, self.src)),
-                            right: secrets::redact(&norm(r, self.src)),
+                            left: self.scrub(norm(l, self.src), node),
+                            right: self.scrub(norm(r, self.src), node),
                             line: line(node),
                         });
                     }
                 }
             }
             "throw_statement" => facts.throws.push(FactSite {
-                text: secrets::redact(&norm(node, self.src)),
+                text: self.scrub(norm(node, self.src), node),
                 line: line(node),
             }),
             "await_expression" => {
@@ -1272,7 +1286,7 @@ impl Extractor<'_> {
                     None => String::new(),
                 };
                 facts.awaits.push(FactSite {
-                    text: secrets::redact(&text),
+                    text: self.scrub(text, node),
                     line: line(node),
                 });
             }
@@ -1285,7 +1299,7 @@ impl Extractor<'_> {
                                 .map(|c| norm(c, self.src))
                                 .unwrap_or_default();
                             facts.guards.push(FactSite {
-                                text: secrets::redact(&cond),
+                                text: self.scrub(cond, node),
                                 line: line(node),
                             });
                         }
@@ -1722,7 +1736,7 @@ impl Extractor<'_> {
         self.facts.test_cases = cases;
         let mut literals = BTreeSet::new();
         collect_literals(root, self.src, &mut literals);
-        self.facts.literals = literals.into_iter().map(|l| secrets::redact(&l)).collect();
+        self.facts.literals = literals.into_iter().collect();
     }
 
     fn collect_cases(
@@ -1865,7 +1879,7 @@ impl Extractor<'_> {
                         top = p;
                     }
                     assertions.push(FactSite {
-                        text: secrets::redact(&norm(top, self.src)),
+                        text: self.scrub(norm(top, self.src), top),
                         line: line(node),
                     });
                     if is_expect && top.kind() == "call_expression" && top != node {
@@ -1886,10 +1900,8 @@ impl Extractor<'_> {
                                         | "template_string"
                                 ) {
                                     expected.push(FactSite {
-                                        text: secrets::redact(&format!(
-                                            "{matcher}:{}",
-                                            norm(a, self.src)
-                                        )),
+                                        text: self
+                                            .scrub(format!("{matcher}:{}", norm(a, self.src)), a),
                                         line: line(a),
                                     });
                                 }
@@ -1905,11 +1917,35 @@ impl Extractor<'_> {
     }
 }
 
+/// The full source line(s) a node starts on.
+fn line_text<'a>(src: &'a [u8], node: Node) -> &'a str {
+    let start = node.start_byte();
+    let begin = src[..start]
+        .iter()
+        .rposition(|b| *b == b'\n')
+        .map_or(0, |i| i + 1);
+    let end = src[start..]
+        .iter()
+        .position(|b| *b == b'\n')
+        .map_or(src.len(), |i| start + i);
+    std::str::from_utf8(&src[begin..end]).unwrap_or("")
+}
+
+fn scrub(src: &[u8], value: String, node: Node) -> String {
+    if secrets::contains_secret(&value) {
+        secrets::redact(&value)
+    } else if secrets::contains_secret(line_text(src, node)) {
+        "<redacted>".to_string()
+    } else {
+        value
+    }
+}
+
 fn collect_literals(node: Node, src: &[u8], out: &mut BTreeSet<String>) {
     if node.kind() == "string" {
         if let Some(v) = string_value(node, src) {
             if v.chars().count() >= 3 && v.chars().count() <= 120 {
-                out.insert(v);
+                out.insert(scrub(src, v, node));
             }
         }
         return;
@@ -1931,14 +1967,22 @@ fn truncate(s: &str, max: usize) -> String {
 
 fn exits(node: Node) -> bool {
     match node.kind() {
-        "return_statement" | "throw_statement" | "continue_statement" | "break_statement" => true,
-        "statement_block" => named_children(node)
-            .into_iter()
-            .filter(|c| c.kind() != "comment")
-            .last()
-            .is_some_and(exits),
+        "return_statement" | "throw_statement" => true,
+        "statement_block" => {
+            // A guard is short: `if (x) { log(); return; }` at most.
+            let stmts: Vec<Node> = named_children(node)
+                .into_iter()
+                .filter(|c| c.kind() != "comment")
+                .collect();
+            stmts.len() <= 2 && stmts.last().is_some_and(|l| exits(*l))
+        }
         _ => false,
     }
+}
+
+/// The line where a function's body starts, i.e. the end of its signature.
+fn signature_end(node: Node) -> Option<u32> {
+    node.child_by_field_name("body").map(line)
 }
 
 fn strip_colon(s: String) -> String {
