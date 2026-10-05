@@ -1,0 +1,23 @@
+[package]
+name = "onus-lang-ts"
+description = "Onus language adapter for TypeScript and JavaScript, built on tree-sitter"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+onus-core.workspace = true
+rayon.workspace = true
+serde_json.workspace = true
+tree-sitter.workspace = true
+tree-sitter-typescript.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
