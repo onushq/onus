@@ -1,0 +1,52 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Order {
+  id            String    @id
+  customerId    String
+  status        String    @default("pending")
+  currency      String    @default("USD")
+  subtotalCents Int
+  totalCents    Int
+  carrier       String?
+  shippedAt     DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  payments      Payment[]
+  invoices      Invoice[]
+}
+
+model Payment {
+  id                  String    @id @default(cuid())
+  orderId             String
+  order               Order     @relation(fields: [orderId], references: [id])
+  amountCents         Int
+  status              String
+  createdAt           DateTime  @default(now())
+  lastAttemptLoggedAt DateTime?
+}
+
+model Invoice {
+  id          String   @id @default(cuid())
+  orderId     String
+  order       Order    @relation(fields: [orderId], references: [id])
+  number      String   @unique
+  amountCents Int
+  currency    String   @default("USD")
+  issuedAt    DateTime @default(now())
+}
+
+model UserPreference {
+  userId      String  @id
+  email       String
+  phone       String?
+  emailOptOut Boolean @default(false)
+  smsOptOut   Boolean @default(false)
+  locale      String?
+}
