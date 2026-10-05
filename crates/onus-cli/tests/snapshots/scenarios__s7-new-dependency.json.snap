@@ -1,0 +1,120 @@
+---
+source: crates/onus-cli/tests/scenarios.rs
+expression: json
+---
+{
+  "schemaVersion": 1,
+  "base": "base",
+  "head": "head",
+  "summary": {
+    "meaningChanges": 2,
+    "needsAttention": 0,
+    "secrets": 0,
+    "newRuleViolations": 0,
+    "intentMismatches": 0
+  },
+  "changes": [
+    {
+      "id": "new-dependency:npm:date-fns@orders",
+      "kind": "dependency",
+      "subkind": "new-dependency",
+      "level": "relationship",
+      "subject": "npm:date-fns",
+      "component": "orders",
+      "kindLabel": "New dependency",
+      "title": "`orders` adds the npm package `date-fns` (^4.1.0)",
+      "whyItMatters": "New third-party code in the supply chain; `date-fns` is not used anywhere else in this repository",
+      "hints": {
+        "labels": [],
+        "blastRadius": 0,
+        "novelty": [
+          "new-package:date-fns"
+        ],
+        "confidence": "static",
+        "rulesOfTheGame": false,
+        "intentMismatch": false,
+        "needsPerson": false
+      },
+      "locations": [
+        {
+          "file": "services/orders/package.json",
+          "lines": [
+            13,
+            13
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/orders/src/shipping/eta.ts",
+          "lines": [
+            1,
+            1
+          ],
+          "side": "head"
+        }
+      ]
+    },
+    {
+      "id": "internal-changes:orders",
+      "kind": "internal",
+      "subkind": "internal-changes",
+      "level": "structure",
+      "subject": "orders",
+      "component": "orders",
+      "kindLabel": "Internal",
+      "title": "16 changed lines of code inside `orders`",
+      "whyItMatters": "Stays inside `orders`",
+      "hints": {
+        "labels": [],
+        "blastRadius": 0,
+        "novelty": [],
+        "confidence": "static",
+        "rulesOfTheGame": false,
+        "intentMismatch": false,
+        "needsPerson": false
+      },
+      "locations": [
+        {
+          "file": "services/orders/src/shipping/eta.ts",
+          "lines": [
+            2,
+            2
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/orders/src/shipping/eta.ts",
+          "lines": [
+            9,
+            13
+          ],
+          "side": "base"
+        },
+        {
+          "file": "services/orders/src/shipping/eta.ts",
+          "lines": [
+            13,
+            13
+          ],
+          "side": "head"
+        }
+      ],
+      "stats": {
+        "linesAdded": 2,
+        "linesRemoved": 14,
+        "files": 1
+      }
+    }
+  ],
+  "ruleViolations": [],
+  "structure": {
+    "movedFiles": [],
+    "formattingOnly": []
+  },
+  "textStats": {
+    "files": 2,
+    "linesAdded": 4,
+    "linesRemoved": 14
+  },
+  "mapDiagnostics": []
+}

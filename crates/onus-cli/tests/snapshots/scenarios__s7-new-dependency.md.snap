@@ -1,0 +1,32 @@
+---
+source: crates/onus-cli/tests/scenarios.rs
+expression: md
+---
+<!-- onus-report -->
+### Onus · 2 meaning-level changes · 0 need attention · 18 lines in 2 files
+
+|   | Change | Kind | Why it matters |
+|---|---|---|---|
+| ○ | `orders` adds the npm package `date-fns` (^4.1.0) | New dependency | New third-party code in the supply chain; `date-fns` is not used anywhere else in this repository |
+| ○ | 16 changed lines of code inside `orders` | Internal | Stays inside `orders` |
+
+**Intent check:** not stated (add an `onus-intent` block to the pull request) · **Boundary rules:** no new violations
+
+<details><summary>Evidence per row (files and lines)</summary>
+
+1. **`orders` adds the npm package `date-fns` (^4.1.0)**
+   - kind `dependency` / `new-dependency` · confidence `static` · novelty new-package:date-fns
+   - `services/orders/package.json` line 13
+   - `services/orders/src/shipping/eta.ts` line 1
+2. **16 changed lines of code inside `orders`**
+   - kind `internal` / `internal-changes` · confidence `static` · +2 −14 in 1 file
+   - `services/orders/src/shipping/eta.ts` lines 9–13 (before the change)
+   - `services/orders/src/shipping/eta.ts` lines 2, 13
+
+</details>
+
+<details><summary>Map confidence notes</summary>
+
+Every import, call and event in the changed files was resolved statically.
+
+</details>

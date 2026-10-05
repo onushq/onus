@@ -1,0 +1,67 @@
+---
+source: crates/onus-cli/tests/scenarios.rs
+expression: md
+---
+<!-- onus-report -->
+### Onus · 1 meaning-level change · 0 need attention · 164 lines in 42 files
+
+|   | Change | Kind | Why it matters |
+|---|---|---|---|
+| ○ | `formatMoney` renamed to `formatCurrency` | Rename | No behavior change (identical body); 40 call sites in 40 files updated; exported name of `money` changed and every caller in this repository was updated |
+
+**Intent check:** not stated (add an `onus-intent` block to the pull request) · **Boundary rules:** no new violations
+
+<details><summary>Evidence per row (files and lines)</summary>
+
+1. **`formatMoney` renamed to `formatCurrency`**
+   - kind `internal` / `rename` · confidence `static` · 41 dependent files
+   - `packages/money/src/format.test.ts` lines 2, 6
+   - `packages/money/src/format.ts` line 12
+   - `packages/money/src/index.ts` line 1
+   - `services/billing/src/lines/balance-due.ts` lines 1, 7
+   - `services/billing/src/lines/chargeback.ts` lines 1, 4
+   - `services/billing/src/lines/credit-note.ts` lines 1, 8
+   - `services/billing/src/lines/dunning-message.ts` lines 1, 6
+   - `services/billing/src/lines/installment.ts` lines 1, 10
+   - `services/billing/src/lines/invoice-footer.ts` lines 1, 5
+   - `services/billing/src/lines/invoice-line.ts` lines 1, 7
+   - `services/billing/src/lines/late-fee.ts` lines 1, 8
+   - `services/billing/src/lines/payment-summary.ts` lines 1, 8
+   - `services/billing/src/lines/payout-line.ts` lines 1, 8
+   - `services/billing/src/lines/proration.ts` lines 1, 9
+   - `services/billing/src/lines/refund-receipt.ts` lines 1, 8
+   - `services/billing/src/lines/statement-header.ts` lines 1, 11
+   - `services/billing/src/lines/tax-summary.ts` lines 1, 9
+   - `services/notifications/src/formatters/cart-reminder.ts` lines 1, 9
+   - `services/notifications/src/formatters/invoice-ready.ts` lines 1, 8
+   - `services/notifications/src/formatters/loyalty-balance.ts` lines 1, 8
+   - `services/notifications/src/formatters/order-total.ts` lines 1, 8
+   - `services/notifications/src/formatters/payment-failed.ts` lines 1, 4
+   - `services/notifications/src/formatters/price-drop.ts` lines 1, 8
+   - `services/notifications/src/formatters/refund-text.ts` lines 1, 8
+   - `services/notifications/src/formatters/shipping-cost.ts` lines 1, 7
+   - `services/notifications/src/formatters/subscription-renewal.ts` lines 1, 10
+   - `services/orders/src/receipts/backorder-note.ts` lines 1, 8
+   - `services/orders/src/receipts/bundle-line.ts` lines 1, 11
+   - `services/orders/src/receipts/cancellation-fee.ts` lines 1, 8
+   - `services/orders/src/receipts/deposit-line.ts` lines 1, 8
+   - `services/orders/src/receipts/discount-line.ts` lines 1, 8
+   - `services/orders/src/receipts/gift-card.ts` lines 1, 9
+   - `services/orders/src/receipts/line-item.ts` lines 1, 9
+   - `services/orders/src/receipts/price-adjustment.ts` lines 1, 9
+   - `services/orders/src/receipts/refund-note.ts` lines 1, 4
+   - `services/orders/src/receipts/savings-banner.ts` lines 1, 7
+   - `services/orders/src/receipts/shipping-fee.ts` lines 1, 7
+   - `services/orders/src/receipts/store-credit.ts` lines 1, 8
+   - `services/orders/src/receipts/subtotal.ts` lines 1, 8
+   - `services/orders/src/receipts/tax-line.ts` lines 1, 9
+   - `services/orders/src/receipts/tip-line.ts` lines 1, 7
+   - `services/orders/src/receipts/total-line.ts` lines 1, 9
+
+</details>
+
+<details><summary>Map confidence notes</summary>
+
+Every import, call and event in the changed files was resolved statically.
+
+</details>

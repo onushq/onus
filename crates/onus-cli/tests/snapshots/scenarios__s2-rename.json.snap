@@ -1,0 +1,707 @@
+---
+source: crates/onus-cli/tests/scenarios.rs
+expression: json
+---
+{
+  "schemaVersion": 1,
+  "base": "base",
+  "head": "head",
+  "summary": {
+    "meaningChanges": 1,
+    "needsAttention": 0,
+    "secrets": 0,
+    "newRuleViolations": 0,
+    "intentMismatches": 0
+  },
+  "changes": [
+    {
+      "id": "rename:money:src/format.ts#formatCurrency",
+      "kind": "internal",
+      "subkind": "rename",
+      "level": "structure",
+      "subject": "money:src/format.ts#formatCurrency",
+      "component": "money",
+      "kindLabel": "Rename",
+      "title": "`formatMoney` renamed to `formatCurrency`",
+      "whyItMatters": "No behavior change (identical body); 40 call sites in 40 files updated; exported name of `money` changed and every caller in this repository was updated",
+      "hints": {
+        "labels": [],
+        "blastRadius": 41,
+        "novelty": [],
+        "confidence": "static",
+        "rulesOfTheGame": false,
+        "intentMismatch": false,
+        "needsPerson": false
+      },
+      "locations": [
+        {
+          "file": "packages/money/src/format.test.ts",
+          "lines": [
+            2,
+            2
+          ],
+          "side": "head"
+        },
+        {
+          "file": "packages/money/src/format.test.ts",
+          "lines": [
+            6,
+            6
+          ],
+          "side": "head"
+        },
+        {
+          "file": "packages/money/src/format.ts",
+          "lines": [
+            12,
+            12
+          ],
+          "side": "head"
+        },
+        {
+          "file": "packages/money/src/index.ts",
+          "lines": [
+            1,
+            1
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/billing/src/lines/balance-due.ts",
+          "lines": [
+            1,
+            1
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/billing/src/lines/balance-due.ts",
+          "lines": [
+            7,
+            7
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/billing/src/lines/chargeback.ts",
+          "lines": [
+            1,
+            1
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/billing/src/lines/chargeback.ts",
+          "lines": [
+            4,
+            4
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/billing/src/lines/credit-note.ts",
+          "lines": [
+            1,
+            1
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/billing/src/lines/credit-note.ts",
+          "lines": [
+            8,
+            8
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/billing/src/lines/dunning-message.ts",
+          "lines": [
+            1,
+            1
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/billing/src/lines/dunning-message.ts",
+          "lines": [
+            6,
+            6
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/billing/src/lines/installment.ts",
+          "lines": [
+            1,
+            1
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/billing/src/lines/installment.ts",
+          "lines": [
+            10,
+            10
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/billing/src/lines/invoice-footer.ts",
+          "lines": [
+            1,
+            1
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/billing/src/lines/invoice-footer.ts",
+          "lines": [
+            5,
+            5
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/billing/src/lines/invoice-line.ts",
+          "lines": [
+            1,
+            1
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/billing/src/lines/invoice-line.ts",
+          "lines": [
+            7,
+            7
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/billing/src/lines/late-fee.ts",
+          "lines": [
+            1,
+            1
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/billing/src/lines/late-fee.ts",
+          "lines": [
+            8,
+            8
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/billing/src/lines/payment-summary.ts",
+          "lines": [
+            1,
+            1
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/billing/src/lines/payment-summary.ts",
+          "lines": [
+            8,
+            8
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/billing/src/lines/payout-line.ts",
+          "lines": [
+            1,
+            1
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/billing/src/lines/payout-line.ts",
+          "lines": [
+            8,
+            8
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/billing/src/lines/proration.ts",
+          "lines": [
+            1,
+            1
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/billing/src/lines/proration.ts",
+          "lines": [
+            9,
+            9
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/billing/src/lines/refund-receipt.ts",
+          "lines": [
+            1,
+            1
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/billing/src/lines/refund-receipt.ts",
+          "lines": [
+            8,
+            8
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/billing/src/lines/statement-header.ts",
+          "lines": [
+            1,
+            1
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/billing/src/lines/statement-header.ts",
+          "lines": [
+            11,
+            11
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/billing/src/lines/tax-summary.ts",
+          "lines": [
+            1,
+            1
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/billing/src/lines/tax-summary.ts",
+          "lines": [
+            9,
+            9
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/notifications/src/formatters/cart-reminder.ts",
+          "lines": [
+            1,
+            1
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/notifications/src/formatters/cart-reminder.ts",
+          "lines": [
+            9,
+            9
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/notifications/src/formatters/invoice-ready.ts",
+          "lines": [
+            1,
+            1
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/notifications/src/formatters/invoice-ready.ts",
+          "lines": [
+            8,
+            8
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/notifications/src/formatters/loyalty-balance.ts",
+          "lines": [
+            1,
+            1
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/notifications/src/formatters/loyalty-balance.ts",
+          "lines": [
+            8,
+            8
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/notifications/src/formatters/order-total.ts",
+          "lines": [
+            1,
+            1
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/notifications/src/formatters/order-total.ts",
+          "lines": [
+            8,
+            8
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/notifications/src/formatters/payment-failed.ts",
+          "lines": [
+            1,
+            1
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/notifications/src/formatters/payment-failed.ts",
+          "lines": [
+            4,
+            4
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/notifications/src/formatters/price-drop.ts",
+          "lines": [
+            1,
+            1
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/notifications/src/formatters/price-drop.ts",
+          "lines": [
+            8,
+            8
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/notifications/src/formatters/refund-text.ts",
+          "lines": [
+            1,
+            1
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/notifications/src/formatters/refund-text.ts",
+          "lines": [
+            8,
+            8
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/notifications/src/formatters/shipping-cost.ts",
+          "lines": [
+            1,
+            1
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/notifications/src/formatters/shipping-cost.ts",
+          "lines": [
+            7,
+            7
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/notifications/src/formatters/subscription-renewal.ts",
+          "lines": [
+            1,
+            1
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/notifications/src/formatters/subscription-renewal.ts",
+          "lines": [
+            10,
+            10
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/orders/src/receipts/backorder-note.ts",
+          "lines": [
+            1,
+            1
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/orders/src/receipts/backorder-note.ts",
+          "lines": [
+            8,
+            8
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/orders/src/receipts/bundle-line.ts",
+          "lines": [
+            1,
+            1
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/orders/src/receipts/bundle-line.ts",
+          "lines": [
+            11,
+            11
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/orders/src/receipts/cancellation-fee.ts",
+          "lines": [
+            1,
+            1
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/orders/src/receipts/cancellation-fee.ts",
+          "lines": [
+            8,
+            8
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/orders/src/receipts/deposit-line.ts",
+          "lines": [
+            1,
+            1
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/orders/src/receipts/deposit-line.ts",
+          "lines": [
+            8,
+            8
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/orders/src/receipts/discount-line.ts",
+          "lines": [
+            1,
+            1
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/orders/src/receipts/discount-line.ts",
+          "lines": [
+            8,
+            8
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/orders/src/receipts/gift-card.ts",
+          "lines": [
+            1,
+            1
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/orders/src/receipts/gift-card.ts",
+          "lines": [
+            9,
+            9
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/orders/src/receipts/line-item.ts",
+          "lines": [
+            1,
+            1
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/orders/src/receipts/line-item.ts",
+          "lines": [
+            9,
+            9
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/orders/src/receipts/price-adjustment.ts",
+          "lines": [
+            1,
+            1
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/orders/src/receipts/price-adjustment.ts",
+          "lines": [
+            9,
+            9
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/orders/src/receipts/refund-note.ts",
+          "lines": [
+            1,
+            1
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/orders/src/receipts/refund-note.ts",
+          "lines": [
+            4,
+            4
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/orders/src/receipts/savings-banner.ts",
+          "lines": [
+            1,
+            1
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/orders/src/receipts/savings-banner.ts",
+          "lines": [
+            7,
+            7
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/orders/src/receipts/shipping-fee.ts",
+          "lines": [
+            1,
+            1
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/orders/src/receipts/shipping-fee.ts",
+          "lines": [
+            7,
+            7
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/orders/src/receipts/store-credit.ts",
+          "lines": [
+            1,
+            1
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/orders/src/receipts/store-credit.ts",
+          "lines": [
+            8,
+            8
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/orders/src/receipts/subtotal.ts",
+          "lines": [
+            1,
+            1
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/orders/src/receipts/subtotal.ts",
+          "lines": [
+            8,
+            8
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/orders/src/receipts/tax-line.ts",
+          "lines": [
+            1,
+            1
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/orders/src/receipts/tax-line.ts",
+          "lines": [
+            9,
+            9
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/orders/src/receipts/tip-line.ts",
+          "lines": [
+            1,
+            1
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/orders/src/receipts/tip-line.ts",
+          "lines": [
+            7,
+            7
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/orders/src/receipts/total-line.ts",
+          "lines": [
+            1,
+            1
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/orders/src/receipts/total-line.ts",
+          "lines": [
+            9,
+            9
+          ],
+          "side": "head"
+        }
+      ]
+    }
+  ],
+  "ruleViolations": [],
+  "structure": {
+    "movedFiles": [],
+    "formattingOnly": []
+  },
+  "textStats": {
+    "files": 42,
+    "linesAdded": 82,
+    "linesRemoved": 82
+  },
+  "mapDiagnostics": []
+}

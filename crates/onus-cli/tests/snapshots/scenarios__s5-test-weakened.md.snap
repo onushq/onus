@@ -1,0 +1,31 @@
+---
+source: crates/onus-cli/tests/scenarios.rs
+expression: md
+---
+<!-- onus-report -->
+### Onus · 2 meaning-level changes · 1 needs attention · 5 lines in 2 files
+
+|   | Change | Kind | Why it matters |
+|---|---|---|---|
+| ● | Tests in `billing` were weakened | Tests weakened | 1 assertion removed from "applyDiscount › gives loyalty members 10% off large orders"; "applyDiscount › does not discount customers outside the loyalty program" is now skipped; source in `billing` changed in the same pull request; needs a person |
+| ○ | 2 changed lines of code inside `billing` | Internal | Stays inside `billing` |
+
+**Intent check:** not stated (add an `onus-intent` block to the pull request) · **Boundary rules:** no new violations
+
+<details><summary>Evidence per row (files and lines)</summary>
+
+1. **Tests in `billing` were weakened**
+   - kind `test` / `test-weakened` · confidence `static` · labels payments · rules of the game
+   - `services/billing/src/discount.test.ts` line 8 (before the change)
+   - `services/billing/src/discount.test.ts` line 22
+2. **2 changed lines of code inside `billing`**
+   - kind `internal` / `internal-changes` · confidence `static` · labels payments · +1 −1 in 1 file
+   - `services/billing/src/discount.ts` line 2
+
+</details>
+
+<details><summary>Map confidence notes</summary>
+
+Every import, call and event in the changed files was resolved statically.
+
+</details>

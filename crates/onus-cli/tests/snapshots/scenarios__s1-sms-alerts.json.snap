@@ -1,0 +1,359 @@
+---
+source: crates/onus-cli/tests/scenarios.rs
+expression: json
+---
+{
+  "schemaVersion": 1,
+  "base": "base",
+  "head": "head",
+  "summary": {
+    "meaningChanges": 4,
+    "needsAttention": 1,
+    "secrets": 0,
+    "newRuleViolations": 0,
+    "intentMismatches": 0
+  },
+  "changes": [
+    {
+      "id": "new-external-service:external:acme-sms@notifications",
+      "kind": "security-sensitive",
+      "subkind": "new-external-service",
+      "level": "relationship",
+      "subject": "external:acme-sms",
+      "component": "notifications",
+      "kindLabel": "New external dependency",
+      "title": "`notifications` now calls an external SMS provider (Acme SMS)",
+      "whyItMatters": "Customer phone numbers leave the system via Acme SMS, a new vendor; needs a person",
+      "hints": {
+        "labels": [],
+        "blastRadius": 1,
+        "novelty": [
+          "new-data-egress:phone",
+          "new-dependency:@acme/sms",
+          "new-vendor:Acme SMS"
+        ],
+        "confidence": "declared",
+        "rulesOfTheGame": false,
+        "intentMismatch": false,
+        "needsPerson": true
+      },
+      "locations": [
+        {
+          "file": "services/notifications/package.json",
+          "lines": [
+            12,
+            12
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/notifications/src/sms/client.ts",
+          "lines": [
+            1,
+            1
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/notifications/src/sms/client.ts",
+          "lines": [
+            76,
+            76
+          ],
+          "side": "head"
+        }
+      ]
+    },
+    {
+      "id": "contract-field-added-optional:user-preferences:src/types.ts#UserPreferences",
+      "kind": "additive",
+      "subkind": "contract-field-added-optional",
+      "level": "structure",
+      "subject": "user-preferences:src/types.ts#UserPreferences",
+      "component": "user-preferences",
+      "kindLabel": "Contract change, additive",
+      "title": "`UserPreferences` gains an optional `phoneVerified` field",
+      "whyItMatters": "Shared contract used in 3 files across 2 components; existing callers unaffected; declared invariant: phone numbers are stored in E.164",
+      "hints": {
+        "labels": [
+          "pii"
+        ],
+        "blastRadius": 3,
+        "novelty": [],
+        "confidence": "static",
+        "rulesOfTheGame": false,
+        "intentMismatch": false,
+        "needsPerson": false
+      },
+      "locations": [
+        {
+          "file": "services/user-preferences/src/types.ts",
+          "lines": [
+            2,
+            10
+          ],
+          "side": "head"
+        }
+      ]
+    },
+    {
+      "id": "new-event-consumer:event:OrderShipped@notifications",
+      "kind": "additive",
+      "subkind": "new-event-consumer",
+      "level": "relationship",
+      "subject": "event:OrderShipped",
+      "component": "notifications",
+      "kindLabel": "New event consumer",
+      "title": "`notifications` subscribes to the `OrderShipped` event",
+      "whyItMatters": "Additive; `orders` is unchanged",
+      "hints": {
+        "labels": [],
+        "blastRadius": 2,
+        "novelty": [],
+        "confidence": "static",
+        "rulesOfTheGame": false,
+        "intentMismatch": false,
+        "needsPerson": false
+      },
+      "locations": [
+        {
+          "file": "services/notifications/src/handlers/index.ts",
+          "lines": [
+            7,
+            7
+          ],
+          "side": "head"
+        }
+      ]
+    },
+    {
+      "id": "internal-changes:notifications",
+      "kind": "internal",
+      "subkind": "internal-changes",
+      "level": "structure",
+      "subject": "notifications",
+      "component": "notifications",
+      "kindLabel": "Internal",
+      "title": "1,403 lines of new code and tests inside `notifications`",
+      "whyItMatters": "Stays inside `notifications`; adds 69 test cases; reads new config `ACME_SMS_API_KEY` and `ACME_SMS_SENDER_ID`; includes code Onus cannot fully resolve in `services/notifications/src/sms/delivery-log.ts` and `services/notifications/src/sms/templates.ts`",
+      "hints": {
+        "labels": [],
+        "blastRadius": 1,
+        "novelty": [],
+        "confidence": "low",
+        "rulesOfTheGame": false,
+        "intentMismatch": false,
+        "needsPerson": false
+      },
+      "locations": [
+        {
+          "file": "services/notifications/src/handlers/index.ts",
+          "lines": [
+            3,
+            3
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/notifications/src/handlers/order-shipped.test.ts",
+          "lines": [
+            1,
+            68
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/notifications/src/handlers/order-shipped.ts",
+          "lines": [
+            1,
+            50
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/notifications/src/sms/client.test.ts",
+          "lines": [
+            1,
+            60
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/notifications/src/sms/client.ts",
+          "lines": [
+            2,
+            75
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/notifications/src/sms/client.ts",
+          "lines": [
+            77,
+            83
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/notifications/src/sms/delivery-log.ts",
+          "lines": [
+            1,
+            51
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/notifications/src/sms/eligibility.test.ts",
+          "lines": [
+            1,
+            70
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/notifications/src/sms/eligibility.ts",
+          "lines": [
+            1,
+            42
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/notifications/src/sms/phone.test.ts",
+          "lines": [
+            1,
+            69
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/notifications/src/sms/phone.ts",
+          "lines": [
+            1,
+            89
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/notifications/src/sms/quiet-hours.test.ts",
+          "lines": [
+            1,
+            61
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/notifications/src/sms/quiet-hours.ts",
+          "lines": [
+            1,
+            71
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/notifications/src/sms/rate-limit.test.ts",
+          "lines": [
+            1,
+            53
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/notifications/src/sms/rate-limit.ts",
+          "lines": [
+            1,
+            78
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/notifications/src/sms/retry.test.ts",
+          "lines": [
+            1,
+            82
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/notifications/src/sms/retry.ts",
+          "lines": [
+            1,
+            73
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/notifications/src/sms/send.test.ts",
+          "lines": [
+            1,
+            101
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/notifications/src/sms/send.ts",
+          "lines": [
+            1,
+            107
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/notifications/src/sms/templates.test.ts",
+          "lines": [
+            1,
+            69
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/notifications/src/sms/templates.ts",
+          "lines": [
+            1,
+            80
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/notifications/src/sms/types.ts",
+          "lines": [
+            1,
+            47
+          ],
+          "side": "head"
+        }
+      ],
+      "stats": {
+        "linesAdded": 1403,
+        "linesRemoved": 0,
+        "files": 21
+      }
+    }
+  ],
+  "ruleViolations": [],
+  "structure": {
+    "movedFiles": [],
+    "formattingOnly": []
+  },
+  "textStats": {
+    "files": 23,
+    "linesAdded": 1408,
+    "linesRemoved": 0
+  },
+  "mapDiagnostics": [
+    {
+      "kind": "dynamic-access",
+      "file": "services/notifications/src/sms/delivery-log.ts",
+      "line": 50,
+      "message": "call through a computed member; the target is unknown",
+      "confidence": "low"
+    },
+    {
+      "kind": "dynamic-access",
+      "file": "services/notifications/src/sms/templates.ts",
+      "line": 72,
+      "message": "call through a computed member; the target is unknown",
+      "confidence": "low"
+    }
+  ]
+}

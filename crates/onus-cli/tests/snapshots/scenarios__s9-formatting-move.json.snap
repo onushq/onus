@@ -1,0 +1,37 @@
+---
+source: crates/onus-cli/tests/scenarios.rs
+expression: json
+---
+{
+  "schemaVersion": 1,
+  "base": "base",
+  "head": "head",
+  "summary": {
+    "meaningChanges": 0,
+    "needsAttention": 0,
+    "secrets": 0,
+    "newRuleViolations": 0,
+    "intentMismatches": 0
+  },
+  "changes": [],
+  "ruleViolations": [],
+  "structure": {
+    "movedFiles": [
+      {
+        "from": "services/orders/src/util/ids.ts",
+        "to": "services/orders/src/lib/ids.ts"
+      }
+    ],
+    "formattingOnly": [
+      "services/orders/src/orders.ts",
+      "services/orders/src/returns.ts",
+      "services/orders/src/shipping/tracking.ts"
+    ]
+  },
+  "textStats": {
+    "files": 4,
+    "linesAdded": 69,
+    "linesRemoved": 66
+  },
+  "mapDiagnostics": []
+}

@@ -1,0 +1,60 @@
+---
+source: crates/onus-cli/tests/scenarios.rs
+expression: md
+---
+<!-- onus-report -->
+### Onus · 4 meaning-level changes · 1 needs attention · 1,408 lines in 23 files
+
+|   | Change | Kind | Why it matters |
+|---|---|---|---|
+| ● | `notifications` now calls an external SMS provider (Acme SMS) | New external dependency | Customer phone numbers leave the system via Acme SMS, a new vendor; needs a person |
+| ○ | `UserPreferences` gains an optional `phoneVerified` field | Contract change, additive | Shared contract used in 3 files across 2 components; existing callers unaffected; declared invariant: phone numbers are stored in E.164 |
+| ○ | `notifications` subscribes to the `OrderShipped` event | New event consumer | Additive; `orders` is unchanged |
+| ○ | 1,403 lines of new code and tests inside `notifications` | Internal | Stays inside `notifications`; adds 69 test cases; reads new config `ACME_SMS_API_KEY` and `ACME_SMS_SENDER_ID`; includes code Onus cannot fully resolve in `services/notifications/src/sms/delivery-log.ts` and `services/notifications/src/sms/templates.ts` |
+
+**Intent check:** not stated (add an `onus-intent` block to the pull request) · **Boundary rules:** no new violations
+
+<details><summary>Evidence per row (files and lines)</summary>
+
+1. **`notifications` now calls an external SMS provider (Acme SMS)**
+   - kind `security-sensitive` / `new-external-service` · confidence `declared` · 1 dependent file · novelty new-data-egress:phone, new-dependency:@acme/sms, new-vendor:Acme SMS
+   - `services/notifications/package.json` line 12
+   - `services/notifications/src/sms/client.ts` lines 1, 76
+2. **`UserPreferences` gains an optional `phoneVerified` field**
+   - kind `additive` / `contract-field-added-optional` · confidence `static` · labels pii · 3 dependent files
+   - `services/user-preferences/src/types.ts` lines 2–10
+3. **`notifications` subscribes to the `OrderShipped` event**
+   - kind `additive` / `new-event-consumer` · confidence `static` · 2 dependent files
+   - `services/notifications/src/handlers/index.ts` line 7
+4. **1,403 lines of new code and tests inside `notifications`**
+   - kind `internal` / `internal-changes` · confidence `low` · 1 dependent file · +1,403 −0 in 21 files
+   - `services/notifications/src/handlers/index.ts` line 3
+   - `services/notifications/src/handlers/order-shipped.test.ts` lines 1–68
+   - `services/notifications/src/handlers/order-shipped.ts` lines 1–50
+   - `services/notifications/src/sms/client.test.ts` lines 1–60
+   - `services/notifications/src/sms/client.ts` lines 2–75, 77–83
+   - `services/notifications/src/sms/delivery-log.ts` lines 1–51
+   - `services/notifications/src/sms/eligibility.test.ts` lines 1–70
+   - `services/notifications/src/sms/eligibility.ts` lines 1–42
+   - `services/notifications/src/sms/phone.test.ts` lines 1–69
+   - `services/notifications/src/sms/phone.ts` lines 1–89
+   - `services/notifications/src/sms/quiet-hours.test.ts` lines 1–61
+   - `services/notifications/src/sms/quiet-hours.ts` lines 1–71
+   - `services/notifications/src/sms/rate-limit.test.ts` lines 1–53
+   - `services/notifications/src/sms/rate-limit.ts` lines 1–78
+   - `services/notifications/src/sms/retry.test.ts` lines 1–82
+   - `services/notifications/src/sms/retry.ts` lines 1–73
+   - `services/notifications/src/sms/send.test.ts` lines 1–101
+   - `services/notifications/src/sms/send.ts` lines 1–107
+   - `services/notifications/src/sms/templates.test.ts` lines 1–69
+   - `services/notifications/src/sms/templates.ts` lines 1–80
+   - `services/notifications/src/sms/types.ts` lines 1–47
+
+</details>
+
+<details><summary>Map confidence notes</summary>
+
+- `services/notifications/src/sms/delivery-log.ts:50` dynamic-access: call through a computed member; the target is unknown (confidence `low`)
+- `services/notifications/src/sms/templates.ts:72` dynamic-access: call through a computed member; the target is unknown (confidence `low`)
+
+</details>
