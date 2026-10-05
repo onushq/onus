@@ -164,7 +164,7 @@ const DEPENDENCY_SECTIONS: &[&str] = &[
 /// sections (those are handled as packages).
 fn manifest_changes(ctx: &Ctx, f: &FileChange) -> Option<Vec<String>> {
     let read = |root: &std::path::Path, p: &str| -> Option<Value> {
-        let text = std::fs::read_to_string(root.join(p)).ok()?;
+        let text = std::fs::read_to_string(onus_core::paths::native(root, p)).ok()?;
         serde_json::from_str(&text).ok()
     };
     let base = read(ctx.base_root, f.base_path())?;

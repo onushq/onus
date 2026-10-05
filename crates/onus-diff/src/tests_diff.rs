@@ -276,7 +276,8 @@ fn is_domain_value(ctx: &Ctx, comp: &str, literal: &str, at: Option<(&str, u32)>
         if f.is_test || f.component_id.as_deref() != Some(comp) {
             continue;
         }
-        let Ok(text) = std::fs::read_to_string(ctx.head_root.join(&f.path)) else {
+        let Ok(text) = std::fs::read_to_string(onus_core::paths::native(ctx.head_root, &f.path))
+        else {
             continue;
         };
         for (i, line) in text.lines().enumerate() {

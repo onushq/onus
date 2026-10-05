@@ -11,6 +11,7 @@ pub mod config;
 pub mod hash;
 pub mod ids;
 pub mod map;
+pub mod paths;
 pub mod rank;
 pub mod schema;
 pub mod secrets;

@@ -250,7 +250,7 @@ fn read_tsconfig(root: &Path, rel: &str, depth: u32) -> Option<TsConfig> {
     if depth > 5 {
         return None;
     }
-    let text = std::fs::read_to_string(root.join(rel)).ok()?;
+    let text = std::fs::read_to_string(onus_core::paths::native(root, rel)).ok()?;
     let json = jsonc::parse(&text)?;
     let dir = parent(rel).to_string();
     let mut cfg = TsConfig {

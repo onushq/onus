@@ -55,7 +55,7 @@ impl LanguageAdapter for TypeScriptAdapter {
         let facts: Vec<FileFacts> = sources
             .par_iter()
             .map(|f| {
-                let text = std::fs::read(ws.root.join(&f.path))
+                let text = std::fs::read(onus_core::paths::native(&ws.root, &f.path))
                     .map(|b| String::from_utf8_lossy(&b).into_owned())
                     .unwrap_or_default();
                 extract::extract(&f.path, &text, f.is_test, &patterns)

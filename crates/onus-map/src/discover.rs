@@ -120,7 +120,7 @@ fn component_ids(dirs: &[String]) -> Vec<String> {
 }
 
 pub fn read_json(root: &Path, rel: &str) -> Option<Value> {
-    let text = std::fs::read_to_string(root.join(rel)).ok()?;
+    let text = std::fs::read_to_string(onus_core::paths::native(root, rel)).ok()?;
     onus_lang_ts::jsonc::parse(&text)
 }
 
@@ -364,7 +364,8 @@ impl Codeowners {
         else {
             return Codeowners::default();
         };
-        let text = std::fs::read_to_string(root.join(path)).unwrap_or_default();
+        let text =
+            std::fs::read_to_string(onus_core::paths::native(root, path)).unwrap_or_default();
         Codeowners::parse(&text)
     }
 
@@ -457,7 +458,7 @@ pub fn package_deps(
         {
             continue;
         }
-        let Ok(text) = std::fs::read_to_string(root.join(f)) else {
+        let Ok(text) = std::fs::read_to_string(onus_core::paths::native(root, f)) else {
             continue;
         };
         let Some(json) = onus_lang_ts::jsonc::parse(&text) else {

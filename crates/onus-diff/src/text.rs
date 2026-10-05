@@ -71,7 +71,7 @@ impl TreeDiff {
 }
 
 fn read(root: &Path, rel: &str) -> Option<Vec<u8>> {
-    std::fs::read(root.join(rel)).ok()
+    std::fs::read(onus_core::paths::native(root, rel)).ok()
 }
 
 fn is_binary(bytes: &[u8]) -> bool {

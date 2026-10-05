@@ -5,10 +5,13 @@
 use std::path::{Path, PathBuf};
 
 pub fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
+    // Not canonicalized: on Windows that yields a `\\?\` path.
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    manifest
+        .parent()
+        .and_then(Path::parent)
         .expect("repository root")
+        .to_path_buf()
 }
 
 pub fn fixture() -> PathBuf {
@@ -54,7 +57,7 @@ pub fn apply_overlay(scenario: &Path, head: &Path) {
     walk(scenario, Path::new(""), head, true);
     if let Ok(list) = std::fs::read_to_string(scenario.join("deleted.txt")) {
         for line in list.lines().map(str::trim).filter(|l| !l.is_empty()) {
-            std::fs::remove_file(head.join(line)).unwrap();
+            std::fs::remove_file(onus_core::paths::native(head, line)).unwrap();
         }
     }
 }

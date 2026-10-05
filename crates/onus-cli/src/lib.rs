@@ -133,9 +133,11 @@ pub struct Materialized {
 }
 
 fn git(repo: &Path, args: &[&str]) -> Result<Vec<u8>> {
+    // Committed bytes, whatever the machine's line-ending settings.
     let out = Command::new("git")
         .arg("-C")
         .arg(repo)
+        .args(["-c", "core.autocrlf=false"])
         .args(args)
         .output()
         .context("cannot run git; is it installed?")?;
