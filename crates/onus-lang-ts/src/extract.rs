@@ -1420,7 +1420,13 @@ impl Extractor<'_> {
     fn scan(&mut self, node: Node, from: Option<&str>, locals: &HashSet<String>) {
         match node.kind() {
             "comment" => return,
-            "call_expression" => self.call(node, from, locals),
+            "call_expression" => {
+                // `call` walks the callee and the arguments itself; walking
+                // the children again would visit nested calls twice per
+                // level, which is exponential in the depth of a chain.
+                self.call(node, from, locals);
+                return;
+            }
             "new_expression" => {
                 if let Some(c) = node.child_by_field_name("constructor")
                     && let Some((root, member)) = root_of(c, self.src)
@@ -1755,7 +1761,8 @@ impl Extractor<'_> {
             .or_else(|| raw.strip_prefix("http://"))?;
         let host = rest.split(['/', '?', '#']).next()?;
         let host = host.split('@').next_back()?.split(':').next()?;
-        (!host.is_empty() && host.contains('.')).then(|| host.to_ascii_lowercase())
+        let host = host.to_ascii_lowercase();
+        (!host.is_empty() && host.contains('.') && !is_local_host(&host)).then_some(host)
     }
 
     fn env_destructure(&mut self, pattern: Node, value: Node, from: Option<&str>) {
@@ -2142,6 +2149,38 @@ fn root_of(node: Node, src: &[u8]) -> Option<(String, Option<String>)> {
     }
 }
 
+/// Hosts that never leave the machine or the cluster, or that are reserved
+/// for examples: loopback, private and link-local addresses, `.local`,
+/// `.internal`, `.localhost`, `.test`, `.invalid` and `example.*`.
+pub fn is_local_host(host: &str) -> bool {
+    if host == "localhost" || host == "0.0.0.0" {
+        return true;
+    }
+    if [
+        ".localhost",
+        ".local",
+        ".internal",
+        ".test",
+        ".invalid",
+        ".example",
+    ]
+    .iter()
+    .any(|s| host.ends_with(s))
+    {
+        return true;
+    }
+    if ["example.com", "example.org", "example.net"]
+        .iter()
+        .any(|d| host == *d || host.ends_with(&format!(".{d}")))
+    {
+        return true;
+    }
+    if let Ok(ip) = host.parse::<std::net::Ipv4Addr>() {
+        return ip.is_loopback() || ip.is_private() || ip.is_link_local() || ip.is_unspecified();
+    }
+    false
+}
+
 /// The leading type name of an annotation: `AcmeSmsClient`, `sdk.Client`
 /// → `sdk`, `Promise<X>` → `Promise`.
 fn type_root(node: Node, src: &[u8]) -> Option<String> {
@@ -2398,7 +2437,7 @@ export async function ship(id: string, total: number): Promise<void> {
   await bus.publish("OrderShipped", { id });
   bus.subscribe(Events.Placed, () => {});
   const key = process.env.SMS_KEY;
-  await fetch(`https://api.example.com/v1/${id}`);
+  await fetch(`https://api.carrier.io/v1/${id}`);
   try { x(); } catch (e) {}
   handlers[id]();
 }
@@ -2414,7 +2453,7 @@ export async function ship(id: string, total: number): Promise<void> {
         let data: Vec<(&str, bool)> = f.data.iter().map(|d| (d.model.as_str(), d.write)).collect();
         assert_eq!(data, [("payment", true), ("order", false)]);
         assert_eq!(f.env[0].value, "SMS_KEY");
-        assert_eq!(f.hosts[0].value, "api.example.com");
+        assert_eq!(f.hosts[0].value, "api.carrier.io");
         let facts = decl(&f, "ship").facts.clone().unwrap();
         assert_eq!(facts.comparisons[0].op, ">");
         assert_eq!(facts.comparisons[0].left, "total");
@@ -2423,6 +2462,51 @@ export async function ship(id: string, total: number): Promise<void> {
         assert_eq!(facts.awaits.len(), 4);
         assert_eq!(facts.empty_catches.len(), 1);
         assert!(f.diagnostics.iter().any(|d| d.kind == "dynamic-access"));
+    }
+
+    #[test]
+    fn local_and_example_hosts_are_not_external() {
+        for h in [
+            "127.0.0.1",
+            "localhost",
+            "10.1.2.3",
+            "example.com",
+            "api.example.org",
+            "synapse-gateway.infrastructure.svc.cluster.local",
+            "db.internal",
+        ] {
+            assert!(is_local_host(h), "{h}");
+        }
+        for h in ["api.stripe.com", "8.8.8.8", "www.cenhud.com"] {
+            assert!(!is_local_host(h), "{h}");
+        }
+    }
+
+    #[test]
+    fn deep_call_chains_are_linear() {
+        // `a.b().b().b()...` 200 levels deep, and calls nested 200 deep as
+        // arguments: both must be walked once per call.
+        let chain = format!("export function f(): void {{ a{} }}", ".b()".repeat(200));
+        let nested = format!(
+            "export function g(): void {{ {}x{} }}",
+            "h(".repeat(200),
+            ")".repeat(200)
+        );
+        // Like the adapter, walk on a thread with a large stack.
+        let (fa, fb, elapsed) = std::thread::Builder::new()
+            .stack_size(crate::PARSE_STACK_BYTES)
+            .spawn(move || {
+                let start = std::time::Instant::now();
+                let fa = extract("a.ts", &chain, false, &patterns());
+                let fb = extract("b.ts", &nested, false, &patterns());
+                (fa, fb, start.elapsed())
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert!(elapsed < std::time::Duration::from_secs(5), "{elapsed:?}");
+        assert_eq!(fa.refs.iter().filter(|r| r.name == "a").count(), 1);
+        assert_eq!(fb.refs.iter().filter(|r| r.name == "h").count(), 1);
     }
 
     #[test]

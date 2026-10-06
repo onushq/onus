@@ -47,28 +47,36 @@ fn quote(name: &str) -> String {
 
 fn compare_cases(base: &TestNode, head: Option<&TestNode>, w: &mut Weakening) -> u32 {
     let head_cases: Vec<&TestCase> = head.map(|h| h.cases.iter().collect()).unwrap_or_default();
-    let mut unmatched_head: Vec<&TestCase> = head_cases
+    // Cases can share a title (`it.each(...)("rejects %d")` twice): pair the
+    // n-th base case of a title with the n-th head case of that title.
+    let mut by_name: BTreeMap<&str, Vec<&TestCase>> = BTreeMap::new();
+    for h in &head_cases {
+        by_name.entry(h.name.as_str()).or_default().push(h);
+    }
+    for list in by_name.values_mut() {
+        list.reverse();
+    }
+    let mut pairs: Vec<(&TestCase, Option<&TestCase>)> = base
+        .cases
         .iter()
-        .filter(|h| !base.cases.iter().any(|b| b.name == h.name))
-        .copied()
+        .map(|b| (b, by_name.get_mut(b.name.as_str()).and_then(|l| l.pop())))
         .collect();
+    let mut unmatched_head: Vec<&TestCase> = by_name.into_values().flatten().collect();
+    unmatched_head.sort_by_key(|c| (c.line, c.name.clone()));
     let mut removed = Vec::new();
-    for b in &base.cases {
-        let h = head_cases
-            .iter()
-            .find(|h| h.name == b.name)
-            .copied()
-            .or_else(|| {
-                // A renamed case keeps its body.
-                let pos = unmatched_head
-                    .iter()
-                    .position(|h| !b.fingerprint.is_empty() && h.fingerprint == b.fingerprint)?;
-                Some(unmatched_head.remove(pos))
-            });
+    for (b, h) in pairs.iter_mut() {
+        let h = h.or_else(|| {
+            // A renamed case keeps its body.
+            let pos = unmatched_head
+                .iter()
+                .position(|h| !b.fingerprint.is_empty() && h.fingerprint == b.fingerprint)?;
+            Some(unmatched_head.remove(pos))
+        });
         let Some(h) = h else {
-            removed.push(b);
+            removed.push(*b);
             continue;
         };
+        let b = *b;
         let lost = multiset_minus(&b.assertions, &h.assertions);
         let gained = multiset_minus(&h.assertions, &b.assertions);
         if h.assertions.len() < b.assertions.len() {
@@ -136,6 +144,10 @@ pub fn analyze(ctx: &Ctx, pairs: &Pairs) -> TestsResult {
         match base_by_file.get(base_path) {
             Some(b) => {
                 seen_base.insert(b.file.as_str());
+                // A test file that did not change cannot have been weakened.
+                if b.file == h.file && ctx.text.get(&h.file).is_none() {
+                    continue;
+                }
                 let w = weak.entry(comp.clone()).or_default();
                 let added = compare_cases(b, Some(h), w);
                 *result.added_cases.entry(comp).or_default() += added;
@@ -207,19 +219,19 @@ fn capitalize(s: &str) -> String {
 /// New comparisons in source that test a string literal also used in the
 /// component's tests, e.g. `if (orderId === "test-order-1")`.
 fn special_cases(ctx: &Ctx, pairs: &Pairs, weak: &mut BTreeMap<String, Weakening>) {
+    // Only literals the tests already used before this change, and only in
+    // code that already existed: new code and its new tests naturally share
+    // values, but existing code that starts matching an existing test input
+    // is the pattern worth a look.
     let mut literals: BTreeMap<String, BTreeSet<&str>> = BTreeMap::new();
-    for t in ctx.base.tests.iter().chain(&ctx.head.tests) {
+    for t in &ctx.base.tests {
         let comp = t.component_id.clone().unwrap_or_else(|| "root".into());
         literals
             .entry(comp)
             .or_default()
             .extend(t.literals.iter().map(String::as_str));
     }
-    let candidates = pairs
-        .pairs
-        .iter()
-        .map(|(b, h, _)| (Some(*b), *h))
-        .chain(pairs.added.iter().map(|h| (None, *h)));
+    let candidates = pairs.pairs.iter().map(|(b, h, _)| (Some(*b), *h));
     for (b, h) in candidates {
         let Some(hf) = &h.facts else {
             continue;
@@ -290,4 +302,58 @@ fn is_domain_value(ctx: &Ctx, comp: &str, literal: &str, at: Option<(&str, u32)>
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn case(name: &str, line: u32, expected: &str) -> TestCase {
+        TestCase {
+            name: name.into(),
+            line,
+            end_line: line + 4,
+            assertions: vec![FactSite {
+                text: format!("expect(x).toThrow({expected})"),
+                line: line + 1,
+            }],
+            markers: vec![],
+            expected: vec![FactSite {
+                text: format!("toThrow:{expected}"),
+                line: line + 1,
+            }],
+            fingerprint: format!("fp-{expected}"),
+        }
+    }
+
+    fn node(cases: Vec<TestCase>) -> TestNode {
+        TestNode {
+            id: "c:a.spec.ts".into(),
+            component_id: Some("c".into()),
+            file: "a.spec.ts".into(),
+            cases,
+            exercises: vec![],
+            literals: vec![],
+        }
+    }
+
+    #[test]
+    fn cases_sharing_a_title_pair_in_order() {
+        let cases = || {
+            vec![
+                case("rejects year %d", 10, "\"too low\""),
+                case("rejects year %d", 20, "\"too high\""),
+            ]
+        };
+        let mut w = Weakening::default();
+        let added = compare_cases(&node(cases()), Some(&node(cases())), &mut w);
+        assert_eq!(added, 0);
+        assert!(w.notes.is_empty(), "{:?}", w.notes);
+
+        // Dropping the second of the two still reads as a removed case.
+        let mut w = Weakening::default();
+        let fewer = node(vec![case("rejects year %d", 10, "\"too low\"")]);
+        compare_cases(&node(cases()), Some(&fewer), &mut w);
+        assert_eq!(w.notes, ["test \"rejects year %d\" removed"]);
+    }
 }

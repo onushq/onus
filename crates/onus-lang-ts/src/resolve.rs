@@ -16,6 +16,9 @@ use crate::jsonc;
 pub enum Resolution {
     /// A file in the tree, relative to the root.
     File(String),
+    /// A file in the tree that Onus does not analyze (`.svelte`, `.graphql`,
+    /// `.json`, styles, images).
+    Asset(String),
     /// A third-party package.
     Npm(String),
     /// A relative or mapped path that matches no file.
@@ -73,12 +76,17 @@ impl Resolver {
     pub fn resolve(&self, from: &str, spec: &str) -> Resolution {
         if spec.starts_with("./") || spec.starts_with("../") || spec == "." || spec == ".." {
             let joined = join(parent(from), spec);
-            return self
-                .try_file(&joined)
-                .map_or(Resolution::Unresolved, Resolution::File);
+            return self.try_target(&joined);
         }
         if spec.starts_with('/') {
             return Resolution::Unresolved;
+        }
+        // SvelteKit's `$lib` alias: `src/lib` next to `svelte.config.*`.
+        if let Some(rest) = spec.strip_prefix("$lib")
+            && (rest.is_empty() || rest.starts_with('/'))
+            && let Some(kit) = self.svelte_kit_root(from)
+        {
+            return self.try_target(&join(&join(&kit, "src/lib"), &format!(".{rest}")));
         }
         if let Some(cfg) = self.nearest_tsconfig(from) {
             let mut mapped = false;
@@ -87,8 +95,9 @@ impl Resolver {
                     mapped = true;
                     for t in targets {
                         let candidate = t.replace('*', star);
-                        if let Some(f) = self.try_file(&candidate) {
-                            return Resolution::File(f);
+                        match self.try_target(&candidate) {
+                            Resolution::Unresolved => {}
+                            found => return found,
                         }
                     }
                 }
@@ -108,9 +117,7 @@ impl Resolver {
                 return Resolution::Unresolved;
             }
             let candidate = join(&pkg.dir, &format!(".{sub}"));
-            return self
-                .try_file(&candidate)
-                .map_or(Resolution::Unresolved, Resolution::File);
+            return self.try_target(&candidate);
         }
         if let Some(cfg) = self.nearest_tsconfig(from)
             && let Some(base) = &cfg.base_url
@@ -119,6 +126,40 @@ impl Resolver {
             return Resolution::File(f);
         }
         Resolution::Npm(package_name(spec).to_string())
+    }
+
+    /// A code file (with extension and index probing), else any existing
+    /// file as an asset, else unresolved.
+    fn try_target(&self, candidate: &str) -> Resolution {
+        if let Some(f) = self.try_file(candidate) {
+            return Resolution::File(f);
+        }
+        let candidate = candidate.trim_end_matches('/');
+        if self.files.contains(candidate) {
+            return Resolution::Asset(candidate.to_string());
+        }
+        Resolution::Unresolved
+    }
+
+    /// The nearest folder above `from` with a `svelte.config.*` file.
+    fn svelte_kit_root(&self, from: &str) -> Option<String> {
+        let mut dir = parent(from);
+        loop {
+            for name in ["svelte.config.js", "svelte.config.ts", "svelte.config.mjs"] {
+                let f = if dir.is_empty() {
+                    name.to_string()
+                } else {
+                    format!("{dir}/{name}")
+                };
+                if self.files.contains(&f) {
+                    return Some(dir.to_string());
+                }
+            }
+            if dir.is_empty() {
+                return None;
+            }
+            dir = parent(dir);
+        }
     }
 
     fn is_workspace_package(&self, spec: &str) -> bool {
@@ -417,6 +458,41 @@ mod tests {
         assert_eq!(
             r.resolve("src/app/main.ts", "@shared/nope"),
             Resolution::Unresolved
+        );
+    }
+
+    #[test]
+    fn resolves_assets_and_the_sveltekit_lib_alias() {
+        let tmp = tempfile::tempdir().unwrap();
+        let r = resolver(
+            tmp.path(),
+            &[
+                "apps/web/svelte.config.js",
+                "apps/web/src/lib/api.ts",
+                "apps/web/src/lib/Card.svelte",
+                "apps/web/src/routes/page.ts",
+                "apps/web/src/routes/query.graphql",
+            ],
+            None,
+        );
+        let from = "apps/web/src/routes/page.ts";
+        assert_eq!(
+            r.resolve(from, "$lib/api"),
+            Resolution::File("apps/web/src/lib/api.ts".into())
+        );
+        assert_eq!(
+            r.resolve(from, "$lib/Card.svelte"),
+            Resolution::Asset("apps/web/src/lib/Card.svelte".into())
+        );
+        assert_eq!(
+            r.resolve(from, "./query.graphql"),
+            Resolution::Asset("apps/web/src/routes/query.graphql".into())
+        );
+        assert_eq!(r.resolve(from, "./missing.svelte"), Resolution::Unresolved);
+        // Outside a SvelteKit app, `$lib` is just a package name.
+        assert_eq!(
+            r.resolve("other/x.ts", "$lib/api"),
+            Resolution::Npm("$lib".into())
         );
     }
 

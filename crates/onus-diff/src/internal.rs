@@ -9,7 +9,7 @@ use onus_core::{
     SourceFile, Stats, StructureNotes,
 };
 
-use crate::ctx::{Ctx, change, join_and, plural, ranges, thousands};
+use crate::ctx::{Ctx, change, join_and, join_some, plural, ranges, thousands};
 use crate::tests_diff::TestsResult;
 use crate::text::Status;
 
@@ -244,13 +244,14 @@ pub fn rows(
                 .collect()
         };
         let mut notes = vec![if comp == "root" {
-            "No component touched".to_string()
+            "Outside every component Onus found; declare them in onus.yaml to track them"
+                .to_string()
         } else if users.is_empty() {
             format!("Stays inside `{comp}`; no other component depends on it")
         } else {
             format!(
                 "Stays inside `{comp}`, which {} {} on",
-                join_and(&users),
+                join_some(&users, 3),
                 if users.len() == 1 {
                     "depends"
                 } else {

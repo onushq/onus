@@ -414,8 +414,21 @@ fn contract_row(
         format!("`{}` {}{more}", s.name, join_and(&phrases))
     };
     let component = s.component_id.as_deref().unwrap_or("");
-    let (files, comps) = ctx.dependents(&s.id);
-    let used = if files == 0 {
+    let removed = !ctx.head_syms.contains_key(s.id.as_str());
+    let (files, comps) = if removed {
+        ctx.base_dependents(&s.id)
+    } else {
+        ctx.dependents(&s.id)
+    };
+    let used = if removed && files == 0 {
+        format!("Public contract of `{component}` that nothing else in this repository used")
+    } else if removed {
+        format!(
+            "Shared contract that was used in {} across {}",
+            plural(files, "file", "files"),
+            plural(comps.len() as u32, "component", "components")
+        )
+    } else if files == 0 {
         format!("Public contract of `{component}` with no other users in this repository yet")
     } else {
         format!(

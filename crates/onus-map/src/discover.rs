@@ -430,6 +430,7 @@ pub fn package_deps(
     components: &[Component],
     matcher: &ComponentMatcher,
 ) -> Vec<PackageDep> {
+    let catalogs = pnpm_catalogs(root);
     let workspace_names: BTreeSet<String> = components
         .iter()
         .filter_map(|c| c.package_name.clone())
@@ -478,6 +479,9 @@ pub fn package_deps(
                 if workspace_names.contains(name) || version.starts_with("workspace:") {
                     continue;
                 }
+                // `catalog:` points into pnpm-workspace.yaml; compare the real
+                // version, not the indirection.
+                let version = resolve_catalog(&catalogs, name, &version).unwrap_or(version);
                 out.push(PackageDep {
                     component_id: component.clone(),
                     name: name.clone(),
@@ -493,6 +497,56 @@ pub fn package_deps(
         (&a.component_id, &a.name, &a.section).cmp(&(&b.component_id, &b.name, &b.section))
     });
     out
+}
+
+/// pnpm catalogs from `pnpm-workspace.yaml`: `catalog` is named `default`,
+/// `catalogs.<name>` keep their names.
+pub fn pnpm_catalogs(root: &Path) -> BTreeMap<String, BTreeMap<String, String>> {
+    let mut out = BTreeMap::new();
+    let Ok(text) = std::fs::read_to_string(root.join("pnpm-workspace.yaml")) else {
+        return out;
+    };
+    let Ok(v) = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&text) else {
+        return out;
+    };
+    let entries = |m: &serde_yaml_ng::Value| -> BTreeMap<String, String> {
+        m.as_mapping()
+            .map(|m| {
+                m.iter()
+                    .filter_map(|(k, v)| {
+                        let version = match v {
+                            serde_yaml_ng::Value::String(s) => s.clone(),
+                            serde_yaml_ng::Value::Number(n) => n.to_string(),
+                            _ => return None,
+                        };
+                        Some((k.as_str()?.to_string(), version))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    if let Some(c) = v.get("catalog") {
+        out.insert("default".to_string(), entries(c));
+    }
+    if let Some(named) = v.get("catalogs").and_then(|c| c.as_mapping()) {
+        for (k, c) in named {
+            if let Some(k) = k.as_str() {
+                out.insert(k.to_string(), entries(c));
+            }
+        }
+    }
+    out
+}
+
+/// The version a `catalog:` or `catalog:<name>` specifier stands for.
+pub fn resolve_catalog(
+    catalogs: &BTreeMap<String, BTreeMap<String, String>>,
+    package: &str,
+    version: &str,
+) -> Option<String> {
+    let name = version.strip_prefix("catalog:")?.trim();
+    let name = if name.is_empty() { "default" } else { name };
+    catalogs.get(name)?.get(package).cloned()
 }
 
 /// Line of `"name":` inside the given section of a package.json text.
@@ -514,6 +568,31 @@ pub fn find_dep_line(text: &str, section: &str, name: &str) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolves_pnpm_catalog_versions() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("pnpm-workspace.yaml"),
+            "packages: [libs/*]\ncatalog:\n  zod: 3.23.8\n  '@ai-sdk/langchain': 3.0.127\ncatalogs:\n  react18:\n    react: ^18.3.1\n",
+        )
+        .unwrap();
+        let c = pnpm_catalogs(tmp.path());
+        assert_eq!(
+            resolve_catalog(&c, "zod", "catalog:").as_deref(),
+            Some("3.23.8")
+        );
+        assert_eq!(
+            resolve_catalog(&c, "@ai-sdk/langchain", "catalog:default").as_deref(),
+            Some("3.0.127")
+        );
+        assert_eq!(
+            resolve_catalog(&c, "react", "catalog:react18").as_deref(),
+            Some("^18.3.1")
+        );
+        assert_eq!(resolve_catalog(&c, "react", "catalog:"), None);
+        assert_eq!(resolve_catalog(&c, "zod", "^3.0.0"), None);
+    }
 
     #[test]
     fn codeowners_last_match_wins() {

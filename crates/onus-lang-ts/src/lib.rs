@@ -26,6 +26,9 @@ use crate::extract::{
 };
 use crate::resolve::{Resolution, Resolver};
 
+/// Stack size of the threads that walk syntax trees.
+pub const PARSE_STACK_BYTES: usize = 256 * 1024 * 1024;
+
 /// Component id used for analyzed files outside every component.
 pub const ROOT_COMPONENT: &str = "root";
 
@@ -52,15 +55,27 @@ impl LanguageAdapter for TypeScriptAdapter {
         let patterns = patterns(ws);
         let sources: Vec<&onus_core::WorkspaceFile> =
             ws.files.iter().filter(|f| self.handles(&f.path)).collect();
-        let facts: Vec<FileFacts> = sources
-            .par_iter()
-            .map(|f| {
-                let text = std::fs::read(onus_core::paths::native(&ws.root, &f.path))
-                    .map(|b| String::from_utf8_lossy(&b).into_owned())
-                    .unwrap_or_default();
-                extract::extract(&f.path, &text, f.is_test, &patterns)
-            })
-            .collect();
+        let extract_all = || -> Vec<FileFacts> {
+            sources
+                .par_iter()
+                .map(|f| {
+                    let text = std::fs::read(onus_core::paths::native(&ws.root, &f.path))
+                        .map(|b| String::from_utf8_lossy(&b).into_owned())
+                        .unwrap_or_default();
+                    extract::extract(&f.path, &text, f.is_test, &patterns)
+                })
+                .collect()
+        };
+        // The syntax-tree walks are recursive, and real code nests deeply
+        // (long method chains, generated expressions), so parse on threads
+        // with large stacks. Only the pages actually used are committed.
+        let facts = match rayon::ThreadPoolBuilder::new()
+            .stack_size(PARSE_STACK_BYTES)
+            .build()
+        {
+            Ok(pool) => pool.install(extract_all),
+            Err(_) => extract_all(),
+        };
         let resolver = Resolver::new(
             &ws.root,
             ws.files.iter().map(|f| f.path.clone()),
@@ -92,6 +107,8 @@ fn patterns(ws: &Workspace) -> Patterns {
 enum Target {
     Symbol(String),
     Module(usize),
+    /// A file Onus does not analyze, such as a `.svelte` component.
+    Asset,
     Npm(String),
 }
 
@@ -230,6 +247,7 @@ impl<'a> Linker<'a> {
     fn resolve_spec(&self, file: usize, spec: &str) -> Option<Target> {
         match self.resolver.resolve(&self.facts[file].path, spec) {
             Resolution::File(p) => self.by_path.get(p.as_str()).map(|&i| Target::Module(i)),
+            Resolution::Asset(_) => Some(Target::Asset),
             Resolution::Npm(p) => Some(Target::Npm(p)),
             Resolution::Unresolved => None,
         }
@@ -314,6 +332,7 @@ impl<'a> Linker<'a> {
                     Imported::Namespace => Some(Target::Module(t)),
                 }
             }
+            Resolution::Asset(_) => Some(Target::Asset),
             Resolution::Npm(p) => Some(Target::Npm(p.clone())),
             Resolution::Unresolved => None,
         }
@@ -439,12 +458,14 @@ impl<'a> Linker<'a> {
                 import_targets.push((
                     imp.line,
                     match res {
-                        Resolution::File(p) => p.clone(),
+                        Resolution::File(p) | Resolution::Asset(p) => p.clone(),
                         Resolution::Npm(p) => ids::npm_id(p),
                         Resolution::Unresolved => format!("?{}", imp.spec),
                     },
                 ));
                 match res {
+                    // Not analyzed, but present: nothing to link, nothing missing.
+                    Resolution::Asset(_) => {}
                     Resolution::Unresolved => diagnostics.push(MapDiagnostic {
                         kind: "unresolved-import".into(),
                         file: f.path.clone(),
@@ -462,6 +483,7 @@ impl<'a> Linker<'a> {
                             imp.line,
                         );
                         if imp.bindings.is_empty()
+                            && !f.is_test
                             && let Some(slug) = self.external_slug(p)
                         {
                             add(
@@ -476,6 +498,7 @@ impl<'a> Linker<'a> {
                     }
                     Resolution::File(_) => {
                         if imp.bindings.is_empty()
+                            && !f.is_test
                             && let Some(t) = self.file_of(res)
                         {
                             add(
@@ -489,6 +512,7 @@ impl<'a> Linker<'a> {
                         }
                         for b in &imp.bindings {
                             match self.resolve_binding(fi, ii, b, 0) {
+                                Some(Target::Asset) => {}
                                 Some(Target::Symbol(id)) => {
                                     exercised.insert(id.clone());
                                     add(
@@ -546,7 +570,7 @@ impl<'a> Linker<'a> {
                     import_targets.push((
                         *line,
                         match self.resolver.resolve(&f.path, spec) {
-                            Resolution::File(p) => p,
+                            Resolution::File(p) | Resolution::Asset(p) => p,
                             Resolution::Npm(p) => ids::npm_id(&p),
                             Resolution::Unresolved => format!("?{spec}"),
                         },
@@ -559,6 +583,7 @@ impl<'a> Linker<'a> {
                         line,
                         ..
                     } => match self.resolve_export(fi, exported, 0) {
+                        Some(Target::Asset) => {}
                         Some(Target::Symbol(id)) => add(
                             &module,
                             &id,
@@ -656,8 +681,9 @@ impl<'a> Linker<'a> {
                         }
                     }
                     Some(Target::Npm(p)) => {
-                        if (r.kind == RefKind::Call
-                            || (r.kind == RefKind::Value && r.member.is_some()))
+                        if !f.is_test
+                            && (r.kind == RefKind::Call
+                                || (r.kind == RefKind::Value && r.member.is_some()))
                             && let Some(slug) = self.external_slug(&p)
                         {
                             called_packages.insert(p.clone());
@@ -677,6 +703,7 @@ impl<'a> Linker<'a> {
             // Registered SDKs imported but never called in this file.
             for (ii, imp) in f.imports.iter().enumerate() {
                 if let Resolution::Npm(p) = &self.resolutions[fi][ii]
+                    && !f.is_test
                     && !imp.bindings.is_empty()
                     && !called_packages.contains(p)
                     && let Some(slug) = self.external_slug(p)
@@ -692,8 +719,11 @@ impl<'a> Linker<'a> {
                 }
             }
 
-            // Events.
-            for ev in &f.events {
+            // Events, data, config and outbound calls describe what the
+            // product does; a test that publishes an event or calls a host
+            // does not add a relationship.
+            let production = !f.is_test;
+            for ev in f.events.iter().filter(|_| production) {
                 let (name, conf) = self.event_name(fi, &ev.name);
                 if conf == Confidence::Low {
                     diagnostics.push(MapDiagnostic {
@@ -713,7 +743,7 @@ impl<'a> Linker<'a> {
                 };
                 add(&from_id(&ev.from), &id, kind, conf, &f.path, ev.line);
             }
-            for d in &f.data {
+            for d in f.data.iter().filter(|_| production) {
                 tables.insert(d.model.clone());
                 let kind = if d.write {
                     EdgeKind::Writes
@@ -729,7 +759,7 @@ impl<'a> Linker<'a> {
                     d.line,
                 );
             }
-            for e in &f.env {
+            for e in f.env.iter().filter(|_| production) {
                 config_keys.insert(e.value.clone());
                 add(
                     &from_id(&e.from),
@@ -740,7 +770,7 @@ impl<'a> Linker<'a> {
                     e.line,
                 );
             }
-            for h in &f.hosts {
+            for h in f.hosts.iter().filter(|_| production) {
                 let slug = self.host_slug(&h.value);
                 add(
                     &from_id(&h.from),
@@ -903,7 +933,7 @@ impl<'a> Linker<'a> {
                         _ => None,
                     };
                 }
-                Target::Npm(_) => return None,
+                Target::Npm(_) | Target::Asset => return None,
             }
         };
         let (tf, td) = self.symbols.get(&id)?;

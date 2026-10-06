@@ -142,16 +142,26 @@ impl<'a> Ctx<'a> {
     /// their components. For a component id, files in other components that
     /// depend on anything inside it.
     pub fn dependents(&self, subject: &str) -> (u32, BTreeSet<String>) {
+        self.dependents_in(self.head, subject)
+    }
+
+    /// The same, in the base map: for things the change removed.
+    pub fn base_dependents(&self, subject: &str) -> (u32, BTreeSet<String>) {
+        self.dependents_in(self.base, subject)
+    }
+
+    fn dependents_in(&self, map: &CodebaseMap, subject: &str) -> (u32, BTreeSet<String>) {
         let is_component = self.components.contains_key(subject) && !subject.contains(':');
-        let own_file = self
-            .head_syms
-            .get(subject)
+        let own_file = map
+            .symbols
+            .iter()
+            .find(|s| s.id == subject)
             .and_then(|s| s.loc.as_ref())
             .map(|l| l.file.clone());
         let class_prefix = format!("{subject}.");
         let mut files = BTreeSet::new();
         let mut comps = BTreeSet::new();
-        for e in &self.head.edges {
+        for e in &map.edges {
             let hit = if is_component {
                 ids::component_of(&e.to) == Some(subject)
                     && ids::component_of(&e.from) != Some(subject)
@@ -249,6 +259,14 @@ pub fn plural(n: u32, one: &str, many: &str) -> String {
     } else {
         format!("{} {many}", thousands(n))
     }
+}
+
+/// `a, b, c and 27 more`: lists stay readable in one table cell.
+pub fn join_some(items: &[String], max: usize) -> String {
+    if items.len() <= max {
+        return join_and(items);
+    }
+    format!("{} and {} more", items[..max].join(", "), items.len() - max)
 }
 
 /// `a`, `a and b`, `a, b and c`
