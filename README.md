@@ -44,7 +44,7 @@ cp -R fixtures/shop/scenarios/s1-sms-alerts/services /tmp/shop-head/
 
 Useful flags: `--format json` for the full machine-readable report, `--intent <file>` to check the change against a stated intent (a YAML file or a pull request body with an `onus-intent` block), and `--fail-on rule-violation,secrets` to exit with code 2 when a boundary rule is broken or a secret is committed. `onus init` writes a starter [`onus.yaml`](fixtures/shop/base/onus.yaml) inferred from your workspaces and `CODEOWNERS`, and `onus schema --out schemas` writes the JSON Schemas of every format.
 
-The [user guide](docs/guide.md) covers every command, how to read a report, every kind of change, the `onus.yaml` reference, the intent check and running Onus in CI. It also ships in the binary: run `onus help` for the list of topics and `onus help <topic>` to read one.
+Other languages and frameworks plug in through plugins, SCIP indexes and language servers (`onus help plugins`). The [user guide](docs/guide.md) covers every command, how to read a report, every kind of change, the `onus.yaml` reference, the intent check and running Onus in CI. It also ships in the binary: run `onus help` for the list of topics and `onus help <topic>` to read one.
 
 ## Roadmap
 

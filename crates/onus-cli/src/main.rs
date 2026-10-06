@@ -11,7 +11,7 @@ use onus_cli::{DiffOptions, EXIT_ERROR, EXIT_FAIL_ON, FailOn, Format};
 const AFTER_HELP: &str = "\
 Run `onus help <command>` for a command's flags and examples, and
 `onus help <topic>` for the guide: getting-started, commands, reports,
-changes, configuration, intent, ci, how-it-works, troubleshooting.";
+changes, configuration, intent, ci, plugins, how-it-works, troubleshooting.";
 
 /// The exit codes, shared by `onus help` and the commands that use them.
 macro_rules! exit_codes {

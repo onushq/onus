@@ -147,5 +147,5 @@ Grouped rows keep every file and line in their evidence.
 - `labels`: sensitivity labels of the component.
 - `blastRadius`: files in the new version (tests included) that depend on the subject, not counting the file that defines it.
 - `novelty`: `new-vendor:<vendor>`, `new-data-egress:<kind>`, `new-dependency:<package>`, `new-package:<package>`, `secret`.
-- `confidence`: `declared` (from onus.yaml), `static` (read from the code), `inferred` (from conventions) or `low` (Onus could not resolve something).
+- `confidence`: `declared` (from onus.yaml), `compiler` (confirmed by a compiler, indexer or language server), `static` (read from the code), `inferred` (from conventions) or `low` (Onus could not resolve something).
 - `rulesOfTheGame`, `intentMismatch`, `needsPerson`.

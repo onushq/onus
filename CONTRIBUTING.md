@@ -13,7 +13,7 @@ Good first tasks are labeled [`good first issue`](https://github.com/onushq/onus
 
 ## Development
 
-Onus is a Cargo workspace on stable Rust; `rust-toolchain.toml` pins the version, and `rustup` installs it on first use. The crates follow the pipeline: `onus-core` (types, ids, ranking, schemas), `onus-lang-ts` (the TypeScript adapter), `onus-map` (map building), `onus-diff` (the semantic diff), `onus-report` (renderers) and `onus-cli` (the `onus` binary).
+Onus is a Cargo workspace on stable Rust; `rust-toolchain.toml` pins the version, and `rustup` installs it on first use. The crates follow the pipeline: `onus-core` (types, ids, ranking, schemas, provider and plugin interfaces), `onus-lang-ts` (the TypeScript adapter), `onus-lang-scip` (SCIP import), `onus-lang-lsp` (the LSP bridge), `onus-map` (map building and plugins), `onus-diff` (the semantic diff), `onus-report` (renderers) and `onus-cli` (the `onus` binary). `onus-plugin-example` is a reference plugin and `onus-testkit` holds test doubles such as a fake language server.
 
 ```sh
 cargo build

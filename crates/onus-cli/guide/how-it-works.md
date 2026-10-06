@@ -9,6 +9,8 @@ Onus builds a map of each version of the code and compares the maps, not the tex
 
 ## 1. Building a map
 
+Map building is a pipeline of providers: discovery providers find components, language providers analyze files, and fact providers add relationships. The ones below are built in; plugins add more, including SCIP indexes and language servers (`onus help plugins`).
+
 **Files.** Onus walks the tree, skipping dependencies, build output and anything gitignored (see `onus help configuration`).
 
 **Components** come from onus.yaml, else from Nx projects and npm, pnpm or yarn workspaces, else from the folders under services/, packages/ and apps/. Owners come from onus.yaml or CODEOWNERS. Each component's entrypoint comes from its package.json, mapped from build output back to source.

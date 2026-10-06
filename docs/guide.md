@@ -11,6 +11,7 @@ The guide ships inside the `onus` binary: `onus help <topic>` prints any of thes
 | [configuration](../crates/onus-cli/guide/configuration.md) | The `onus.yaml` reference: components, rules, labels, extractors |
 | [intent](../crates/onus-cli/guide/intent.md) | Checking a change against its stated intent |
 | [ci](../crates/onus-cli/guide/ci.md) | Running Onus on every pull request |
+| [plugins](../crates/onus-cli/guide/plugins.md) | New languages and frameworks, SCIP indexes, language servers, trusted mode |
 | [how-it-works](../crates/onus-cli/guide/how-it-works.md) | How maps are built and compared |
 | [troubleshooting](../crates/onus-cli/guide/troubleshooting.md) | Map confidence notes, common questions and current limits |
 

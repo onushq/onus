@@ -15,6 +15,9 @@ These diagnostics mean Onus could not resolve something statically. Rows touchin
 | parse-error | The file has a syntax error; its facts may be incomplete. | Fix the syntax. |
 | no-entrypoint | A component has no entrypoint, so all its symbols are internal. | Add `main`, `types` or `exports` to its package.json, or `entrypoints` in onus.yaml. |
 | unknown-contract | A contract in onus.yaml names a symbol that is not in the map. | Fix the id; list ids with `onus map . --json`. |
+| provider-skipped | A plugin that may run repository code was not run, because trusted mode is off. | Run with `--trusted` where the code is trusted. |
+| provider-failed | A plugin failed, timed out, returned invalid JSON, or has no sandbox available. | Read the message; check the plugin's command and `sandbox`. |
+| plugin-output-dropped | A plugin returned paths outside the tree or ids of unknown components; those parts were ignored. | Fix the plugin. |
 
 ## Common questions
 
@@ -50,7 +53,7 @@ That is a bug: a wrong fact is worse than a missing one. Open an issue with the 
 
 ## Current limits
 
-- TypeScript and JavaScript only.
+- Built in: TypeScript and JavaScript. Other languages need a plugin, a SCIP index or a language server (`onus help plugins`).
 - CommonJS exports (`module.exports`, `exports.x`) are not modeled.
 - Data access is detected for Prisma only.
 - No runtime information: dependency injection, reflection and calls between services over the network are only visible through the patterns above.

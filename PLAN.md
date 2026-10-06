@@ -218,6 +218,7 @@ onus report --base <ref> --head <ref> [--format md|json] [--intent <file>] [--fa
   - *Config:* `process.env.X` → `reads-config`.
 - **Tests:** test files are matched by globs. For each, extract test cases, assertion counts, `.skip`/`.only`/`xit`/`todo` markers and snapshot usage. Static `exercises` edges are the symbols referenced from test files; real coverage arrives in Phase 5.
 - **Adapter trait** (`LanguageAdapter::build(&Workspace) -> PartialMap`) lives in `onus-core` from day one, so Python, Go and others plug in through their tree-sitter grammars without touching the diff engine.
+- **Pluggable providers** ([ADR 0006](docs/adr/0006-pluggable-map-building.md)): discovery, language and fact providers; external plugins over a JSON protocol; SCIP index import and an LSP bridge for compiler-backed facts, run only in trusted mode inside a sandbox when they may execute repository code.
 
 ### 5.3 Semantic diff engine (`crates/onus-diff`)
 
@@ -454,6 +455,10 @@ onus/
   crates/
     onus-core/       # map, change and report types; JSON Schema generation; ids; ranking
     onus-lang-ts/    # tree-sitter TypeScript/JavaScript adapter + extractors
+    onus-lang-scip/  # SCIP index import (compiler-backed facts)
+    onus-lang-lsp/   # LSP bridge for any language server
+    onus-plugin-example/  # reference plugin (not published)
+    onus-testkit/    # test doubles (not published)
     onus-map/        # workspace discovery, adapters + declared layer -> CodebaseMap; caching
     onus-diff/       # semantic diff, classification, rules, intent check
     onus-report/     # markdown and JSON renderers

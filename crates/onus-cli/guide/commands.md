@@ -12,6 +12,8 @@ Builds the map of a directory and prints a summary.
 
 - `--json`: print the whole map (format: schemas/codebase-map.schema.json).
 - `--config <file>`: use this onus.yaml instead of `<dir>/onus.yaml`.
+- `--scip <file>`: import a SCIP index of the directory (repeatable). Runs nothing.
+- `--plugins <file>`, `--trusted`, `--allow-unsandboxed`: see "Plugins" below.
 
 ## onus diff <base> <head>
 
@@ -25,6 +27,8 @@ Reports the changes in meaning between two directories.
 - `--intent <file>`: check the change against a stated intent: a YAML file, or Markdown (such as a pull request body) containing an `onus-intent` block. See `onus help intent`.
 - `--config <file>`: the onus.yaml used for both trees. By default Onus uses the base tree's onus.yaml for both, so a change cannot relax the rules it is checked against.
 - `--fail-on <what>`: exit with code 2 when `rule-violation` (a new boundary-rule violation) or `secrets` (a committed secret) is found. Repeat the flag or separate values with commas. `none` never fails.
+- `--base-scip <file>`, `--head-scip <file>`: import SCIP indexes of each tree (repeatable).
+- `--plugins <file>`, `--trusted`, `--allow-unsandboxed`: see "Plugins" below.
 
 ## onus report --base <ref> --head <ref>
 
@@ -34,9 +38,17 @@ The same report for two git refs. Each ref is extracted with `git archive` into 
     onus report --repo ../shop --base origin/main --head feature/sms --format json
 
 - `--repo <dir>`: the repository (default: the current directory).
-- `--format`, `--intent`, `--config`, `--fail-on`: as for `onus diff`.
+- `--format`, `--intent`, `--config`, `--fail-on`, `--plugins`, `--trusted`, `--allow-unsandboxed`: as for `onus diff`. SCIP indexes for `report` come from `scip` plugins, which index each ref in trusted mode.
 
 Any ref git understands works: branches, tags, `HEAD~3`, commit hashes. In JSON, `base` and `head` read like `main (abc1234)`.
+
+## Plugins
+
+- `--plugins <file>`: a plugins file listing language, framework, SCIP and LSP plugins (default: the file named by `ONUS_PLUGINS`). It is never read from the analyzed repository.
+- `--trusted`: allow plugins that may run code from the repository (indexers, language servers). They run in a sandbox with no network.
+- `--allow-unsandboxed`: with `--trusted`, allow them even where no sandbox is available.
+
+See `onus help plugins`.
 
 ## onus init [dir]
 

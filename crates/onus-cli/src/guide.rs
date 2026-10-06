@@ -46,6 +46,11 @@ pub const TOPICS: &[Topic] = &[
         text: include_str!("../guide/ci.md"),
     },
     Topic {
+        name: "plugins",
+        summary: "New languages and frameworks, SCIP indexes, language servers, trusted mode",
+        text: include_str!("../guide/plugins.md"),
+    },
+    Topic {
         name: "how-it-works",
         summary: "How maps are built and compared",
         text: include_str!("../guide/how-it-works.md"),
@@ -65,6 +70,8 @@ const ALIASES: &[(&str, &str)] = &[
     ("onus.yaml", "configuration"),
     ("kinds", "changes"),
     ("faq", "troubleshooting"),
+    ("scip", "plugins"),
+    ("lsp", "plugins"),
 ];
 
 pub fn find(name: &str) -> Option<&'static Topic> {
