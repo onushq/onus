@@ -60,6 +60,7 @@ pub fn init_config(root: &Path) -> String {
         "# Components and owners below were inferred from {} and CODEOWNERS.",
         match discovered.source {
             "nx" => "Nx projects and package workspaces",
+            "manifests" => "Cargo and Python project manifests",
             "workspaces" => "package workspaces",
             _ => "top-level folders",
         }

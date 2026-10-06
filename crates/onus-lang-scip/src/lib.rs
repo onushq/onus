@@ -215,6 +215,15 @@ fn import(index: &Index, ws: &Workspace, so_far: &PartialMap) -> PartialMap {
     let known_files: BTreeSet<&str> = ws.files.iter().map(|f| f.path.as_str()).collect();
     let covered: BTreeSet<&str> = so_far.files.iter().map(|f| f.path.as_str()).collect();
     let existing: BTreeSet<&str> = so_far.symbols.iter().map(|s| s.id.as_str()).collect();
+    // Import and re-export lines another provider found. Some indexers do
+    // not mark occurrences in `import`/`export ... from` with the Import
+    // role; there they are imports, not calls.
+    let import_lines: BTreeSet<(&str, u32)> = so_far
+        .edges
+        .iter()
+        .filter(|e| e.kind == EdgeKind::Imports)
+        .flat_map(|e| e.sites.iter().map(|s| (s.file.as_str(), s.line)))
+        .collect();
     // Symbols already in the map, by file, to attribute references.
     let mut enclosing: BTreeMap<&str, Vec<(u32, u32, &str)>> = BTreeMap::new();
     for s in &so_far.symbols {
@@ -317,11 +326,24 @@ fn import(index: &Index, ws: &Workspace, so_far: &PartialMap) -> PartialMap {
             match defs.get(&o.symbol) {
                 Some(def) => {
                     let to = target_id(def);
-                    if to == from {
+                    if to == from
+                        || to == ids.module(&def.file)
+                        || from.starts_with(&format!("{to}."))
+                    {
+                        // A symbol the map has no node for, inside a
+                        // declaration it does not model either.
                         continue;
                     }
-                    let kind = if has_role(o, SymbolRole::Import) {
+                    // A member the map does not model (an interface method,
+                    // a nested function) stands for its declaration: that is
+                    // a use of the declaration, not a call to it.
+                    let fell_back = to != ids.symbol(&def.file, &def.names.join("."));
+                    let kind = if has_role(o, SymbolRole::Import)
+                        || import_lines.contains(&(file, line))
+                    {
                         Some(EdgeKind::Imports)
+                    } else if fell_back {
+                        Some(EdgeKind::ReferencesType)
                     } else if is_callable(def.info.as_ref(), def.last) {
                         Some(EdgeKind::Calls)
                     } else if def.last == Suffix::Type {
@@ -544,6 +566,18 @@ mod tests {
             imports: vec![],
         };
         let so_far = PartialMap {
+            // The TypeScript adapter saw `import { Client } from "./client"`
+            // on line 1 of a.ts.
+            edges: vec![Edge {
+                from: "web:src/a.ts".into(),
+                to: "web:src/client.ts#Client".into(),
+                kind: EdgeKind::Imports,
+                confidence: Confidence::Static,
+                sites: vec![Site {
+                    file: "web/src/a.ts".into(),
+                    line: 1,
+                }],
+            }],
             files: vec![src("web/src/a.ts"), src("web/src/client.ts")],
             symbols: vec![
                 sym("web:src/a.ts#run", "web/src/a.ts", 1, 10),
@@ -585,7 +619,10 @@ mod tests {
             doc("web/src/client.ts", vec![occ(SEND, 2, def, None)]),
             // A method call through an instance, which syntax alone cannot
             // resolve.
-            doc("web/src/a.ts", vec![occ(SEND, 4, read, None)]),
+            doc(
+                "web/src/a.ts",
+                vec![occ(SEND, 0, read, None), occ(SEND, 4, read, None)],
+            ),
         ];
         (dir, ws, so_far, index)
     }
@@ -612,6 +649,13 @@ mod tests {
                     "app:main.py",
                     "lib:math.py#add",
                     EdgeKind::Calls,
+                    Confidence::Compiler
+                ),
+                // Line 1 is the import, not a call from the module.
+                (
+                    "web:src/a.ts",
+                    "web:src/client.ts#Client.send",
+                    EdgeKind::Imports,
                     Confidence::Compiler
                 ),
                 (
@@ -646,7 +690,7 @@ mod tests {
         std::fs::write(&path, index.write_to_bytes().unwrap()).unwrap();
         let p = ScipImport::new("scip:index.scip".into(), path);
         let m = p.facts(&ws, &so_far).unwrap();
-        assert_eq!(m.edges.len(), 3);
+        assert_eq!(m.edges.len(), 4);
         assert_eq!(p.version(), "test-indexer 1.0");
         let bad = ScipImport::new("x".into(), dir.path().join("lib/math.py"));
         assert!(matches!(

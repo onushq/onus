@@ -59,10 +59,31 @@ pub fn discover(root: &Path, files: &[String], config: Option<&OnusConfig>) -> D
             source: "onus.yaml",
         };
     }
-    let nx = nx_projects(root, files);
+    let nx_found = nx_projects(root, files);
+    let manifests = manifest_projects(root, files);
+    let mut nx = nx_found.clone();
+    for m in manifests.iter() {
+        if !nx.iter().any(|p| p.dir == m.dir) {
+            nx.push(m.clone());
+        }
+    }
+    let explicit = if !nx_found.is_empty() {
+        "nx"
+    } else if !manifests.is_empty() {
+        "manifests"
+    } else {
+        ""
+    };
     let (dirs, source) = match workspace_dirs(root, files) {
-        Some(d) if !d.is_empty() => (d, if nx.is_empty() { "workspaces" } else { "nx" }),
-        _ if !nx.is_empty() => (vec![], "nx"),
+        Some(d) if !d.is_empty() => (
+            d,
+            if explicit.is_empty() {
+                "workspaces"
+            } else {
+                explicit
+            },
+        ),
+        _ if !nx.is_empty() => (vec![], explicit),
         _ => (fallback_dirs(files), "folders"),
     };
     // Nx projects are the architectural units when present; workspace
@@ -113,13 +134,67 @@ pub fn discover(root: &Path, files: &[String], config: Option<&OnusConfig>) -> D
     Discovered { components, source }
 }
 
-/// An Nx project: a folder with a `project.json`, in a repository with an
-/// `nx.json` at its root.
+/// A project found from a manifest: an Nx `project.json` (with an `nx.json`
+/// at the root), a Cargo package or a Python project.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NxProject {
     pub dir: String,
     pub id: String,
     pub kind: ComponentKind,
+}
+
+/// Cargo packages (`Cargo.toml` with a `[package]`) and Python projects
+/// (`pyproject.toml` with a `[project]` or `[tool.poetry]` name), named
+/// after the package. The repository root itself is not a component.
+pub fn manifest_projects(root: &Path, files: &[String]) -> Vec<NxProject> {
+    let mut out: Vec<NxProject> = Vec::new();
+    for f in files {
+        let (dir, sections): (&str, &[&str]) = if let Some(d) = f.strip_suffix("/Cargo.toml") {
+            (d, &["[package]"])
+        } else if let Some(d) = f.strip_suffix("/pyproject.toml") {
+            (d, &["[project]", "[tool.poetry]"])
+        } else {
+            continue;
+        };
+        let text = std::fs::read_to_string(onus_core::paths::native(root, f)).unwrap_or_default();
+        let Some(name) = toml_name(&text, sections) else {
+            continue;
+        };
+        let mut id = onus_core::ids::slug(&name);
+        if id.is_empty() || out.iter().any(|p| p.id == id) {
+            id = onus_core::ids::slug(dir);
+        }
+        let has_main = files
+            .iter()
+            .any(|x| x == &format!("{dir}/src/main.rs") || x == &format!("{dir}/__main__.py"));
+        out.push(NxProject {
+            dir: dir.to_string(),
+            id,
+            kind: if has_main {
+                ComponentKind::Service
+            } else {
+                ComponentKind::Package
+            },
+        });
+    }
+    out
+}
+
+/// `name = "..."` inside one of the given TOML sections.
+fn toml_name(text: &str, sections: &[&str]) -> Option<String> {
+    let mut inside = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            inside = sections.contains(&line);
+            continue;
+        }
+        if inside && let Some(rest) = line.strip_prefix("name") {
+            let value = rest.trim_start().strip_prefix('=')?.trim();
+            return Some(value.trim_matches(|c| c == '"' || c == '\'').to_string());
+        }
+    }
+    None
 }
 
 pub fn nx_projects(root: &Path, files: &[String]) -> Vec<NxProject> {
@@ -739,6 +814,58 @@ mod tests {
             m.component_of("libs/network/domain/src/index.ts")
                 .as_deref(),
             Some("network-domain")
+        );
+    }
+
+    #[test]
+    fn cargo_and_python_projects_are_components() {
+        let tmp = tempfile::tempdir().unwrap();
+        let files: Vec<String> = [
+            "Cargo.toml",
+            "crates/core/Cargo.toml",
+            "crates/core/src/lib.rs",
+            "crates/cli/Cargo.toml",
+            "crates/cli/src/main.rs",
+            "py/tools/pyproject.toml",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        for (f, text) in [
+            ("Cargo.toml", "[workspace]\nmembers = [\"crates/*\"]\n"),
+            (
+                "crates/core/Cargo.toml",
+                "[package]\nname = \"my-core\"\nversion = \"0.1.0\"\n",
+            ),
+            ("crates/core/src/lib.rs", ""),
+            (
+                "crates/cli/Cargo.toml",
+                "[package]\nname = \"my-cli\"\n[dependencies]\nname = \"x\"\n",
+            ),
+            ("crates/cli/src/main.rs", ""),
+            (
+                "py/tools/pyproject.toml",
+                "[build-system]\n[project]\nname = 'shop_tools'\n",
+            ),
+        ] {
+            let p = tmp.path().join(f);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, text).unwrap();
+        }
+        let d = discover(tmp.path(), &files, None);
+        assert_eq!(d.source, "manifests");
+        let ids: Vec<(&str, ComponentKind)> = d
+            .components
+            .iter()
+            .map(|c| (c.id.as_str(), c.kind))
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                ("my-cli", ComponentKind::Service),
+                ("my-core", ComponentKind::Package),
+                ("shop-tools", ComponentKind::Package),
+            ]
         );
     }
 
