@@ -90,6 +90,11 @@
           "const": "auto"
         },
         {
+          "description": "A container with no network, the tree mounted read-only and `{out}`\nwritable; needs `image` (with the tools in it) and Docker or Podman.",
+          "type": "string",
+          "const": "container"
+        },
+        {
           "description": "No sandbox: plugins that run repository code then need\n`--allow-unsandboxed`.",
           "type": "string",
           "const": "none"
@@ -106,9 +111,23 @@
             "type": "string"
           }
         },
+        "image": {
+          "description": "For `container`: the image to run plugins in.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "preset": {
           "$ref": "#/$defs/SandboxPreset",
           "default": "auto"
+        },
+        "runtime": {
+          "description": "For `container`: `docker` or `podman` (default: whichever is on the\nPATH, Docker first).",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "additionalProperties": false

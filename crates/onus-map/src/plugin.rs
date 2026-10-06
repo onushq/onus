@@ -50,6 +50,11 @@ pub fn load_plugins_file(path: &Path) -> Result<PluginsFile, MapError> {
                 p.name
             )));
         }
+        if file.sandbox.preset == SandboxPreset::Container && file.sandbox.image.is_none() {
+            return Err(MapError::Config(
+                "sandbox preset `container` needs an `image`".into(),
+            ));
+        }
         if matches!(p.kind, SpecKind::Language | SpecKind::Lsp) && p.files.is_empty() {
             return Err(MapError::Config(format!(
                 "plugin `{}` needs `files` globs for the files it handles",
@@ -102,8 +107,13 @@ impl Runner {
                 "/dev",
                 "--proc",
                 "/proc",
+                // A fresh /tmp, then the tree (which may live in /tmp)
+                // read-only and {out} writable on top of it.
                 "--tmpfs",
                 "/tmp",
+                "--ro-bind",
+                "{root}",
+                "{root}",
                 "--bind",
                 "{out}",
                 "{out}",
@@ -119,11 +129,38 @@ impl Runner {
                 "-p",
                 "(version 1)(allow default)(deny network*)(allow network* (local unix))\
                  (deny file-write*)(allow file-write* (subpath \"{out}\") (subpath \"/dev\") \
-                 (subpath \"/private/var/folders\"))",
+                 (subpath \"/private/var/folders\"))\
+                 (deny file-write* (subpath \"{root}\"))",
             ])
+        };
+        let container = || -> Option<Vec<String>> {
+            let image = self.sandbox.image.clone()?;
+            let runtime = self.sandbox.runtime.clone().or_else(|| {
+                ["docker", "podman"]
+                    .into_iter()
+                    .find(|r| on_path(r))
+                    .map(str::to_string)
+            })?;
+            let mut argv = words(&[
+                "run",
+                "--rm",
+                "-i",
+                "--network",
+                "none",
+                "-v",
+                "{root}:{root}:ro",
+                "-v",
+                "{out}:{out}",
+                "-w",
+                "{root}",
+            ]);
+            argv.insert(0, runtime);
+            argv.push(image);
+            Some(argv)
         };
         match self.sandbox.preset {
             SandboxPreset::None => None,
+            SandboxPreset::Container => container(),
             SandboxPreset::Bwrap => Some(bwrap()),
             SandboxPreset::SandboxExec => Some(sandbox_exec()),
             SandboxPreset::Auto => {
@@ -147,8 +184,10 @@ impl Runner {
             .map_err(|e| {
                 ProviderError::Failed(format!("cannot create a temporary directory: {e}"))
             })?;
-        let root_s = root.to_string_lossy().into_owned();
-        let out_s = out.path().to_string_lossy().into_owned();
+        // Real paths: sandboxes match them (on macOS /var is /private/var).
+        let real = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+        let root_s = real(root).to_string_lossy().into_owned();
+        let out_s = real(out.path()).to_string_lossy().into_owned();
         let fill = |w: &str| w.replace("{root}", &root_s).replace("{out}", &out_s);
         let mut argv: Vec<String> = spec.command.iter().map(|w| fill(w)).collect();
         let mut sandboxed = false;
@@ -472,7 +511,7 @@ mod tests {
             trusted: true,
             sandbox: SandboxSpec {
                 preset: SandboxPreset::None,
-                command: vec![],
+                ..SandboxSpec::default()
             },
             ..Runner::default()
         };
@@ -485,6 +524,7 @@ mod tests {
             sandbox: SandboxSpec {
                 preset: SandboxPreset::None,
                 command: vec!["jail".into(), "--root={root}".into()],
+                ..SandboxSpec::default()
             },
             ..Runner::default()
         };
@@ -498,6 +538,35 @@ mod tests {
         let p = untrusted.prepare(&facts, root.path()).unwrap();
         assert!(!p.sandboxed);
         assert_eq!(p.argv, ["plugin"]);
+    }
+
+    #[test]
+    fn the_container_preset_runs_without_network_and_with_a_read_only_tree() {
+        let root = tempfile::tempdir().unwrap();
+        let runner = Runner {
+            trusted: true,
+            sandbox: SandboxSpec {
+                preset: SandboxPreset::Container,
+                command: vec![],
+                image: Some("ghcr.io/acme/indexers:1".into()),
+                runtime: Some("podman".into()),
+            },
+            ..Runner::default()
+        };
+        let p = runner
+            .prepare(&spec(SpecKind::Scip, &["indexer"]), root.path())
+            .unwrap();
+        let root_s = root.path().canonicalize().unwrap();
+        let root_s = root_s.to_string_lossy();
+        assert_eq!(
+            &p.argv[..6],
+            ["podman", "run", "--rm", "-i", "--network", "none"]
+        );
+        assert!(p.argv.contains(&format!("{root_s}:{root_s}:ro")));
+        assert_eq!(
+            &p.argv[p.argv.len() - 2..],
+            ["ghcr.io/acme/indexers:1", "indexer"]
+        );
     }
 
     #[test]

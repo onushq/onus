@@ -181,6 +181,12 @@ Examples:
         /// Exit with code 2 when this is found. Repeat the flag or separate values with commas.
         #[arg(long, value_enum, value_delimiter = ',', value_name = "WHAT")]
         fail_on: Vec<FailOn>,
+        /// Import a SCIP index of the base ref (repeatable). Runs nothing.
+        #[arg(long, value_name = "FILE")]
+        base_scip: Vec<PathBuf>,
+        /// Import a SCIP index of the head ref (repeatable). Runs nothing.
+        #[arg(long, value_name = "FILE")]
+        head_scip: Vec<PathBuf>,
         #[command(flatten)]
         providers: ProviderArgs,
     },
@@ -322,6 +328,8 @@ fn run(cli: Cli) -> Result<i32> {
             intent: intent_path,
             config,
             fail_on,
+            base_scip,
+            head_scip,
             providers,
         } => {
             let providers = providers.load()?;
@@ -335,8 +343,8 @@ fn run(cli: Cli) -> Result<i32> {
                 base_commit: Some(b.sha.clone()),
                 head_commit: Some(h.sha.clone()),
                 providers,
-                base_scip: vec![],
-                head_scip: vec![],
+                base_scip,
+                head_scip,
             };
             let outcome = onus_cli::diff_dirs(b.dir.path(), h.dir.path(), &opts)?;
             print!("{}", outcome.render(format));

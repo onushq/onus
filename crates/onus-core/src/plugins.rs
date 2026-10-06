@@ -79,6 +79,9 @@ pub enum SandboxPreset {
     Auto,
     Bwrap,
     SandboxExec,
+    /// A container with no network, the tree mounted read-only and `{out}`
+    /// writable; needs `image` (with the tools in it) and Docker or Podman.
+    Container,
     /// No sandbox: plugins that run repository code then need
     /// `--allow-unsandboxed`.
     None,
@@ -94,4 +97,11 @@ pub struct SandboxSpec {
     pub preset: SandboxPreset,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub command: Vec<String>,
+    /// For `container`: the image to run plugins in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    /// For `container`: `docker` or `podman` (default: whichever is on the
+    /// PATH, Docker first).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
 }
