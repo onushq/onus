@@ -39,6 +39,8 @@ The JSON Schemas under `schemas/` are generated from `onus-core`; a test fails w
 cargo run -p onus-cli -- schema --out schemas
 ```
 
+The user guide lives in `crates/onus-cli/guide/` and is compiled into the binary (`onus help <topic>`); `docs/guide.md` indexes it. When you change behavior a user can see, update the guide in the same pull request. Tests check that it still lists the built-in registry, the defaults and every kind of change the scenarios produce.
+
 To measure performance on a generated workspace of about 200,000 lines:
 
 ```sh

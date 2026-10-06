@@ -1,0 +1,23 @@
+# Onus user guide
+
+The guide ships inside the `onus` binary: `onus help <topic>` prints any of these pages in the terminal, offline. The source files live in [`crates/onus-cli/guide/`](../crates/onus-cli/guide/).
+
+| Topic | What it covers |
+| --- | --- |
+| [getting-started](../crates/onus-cli/guide/getting-started.md) | Install Onus, build a map and read your first report |
+| [commands](../crates/onus-cli/guide/commands.md) | Every command and flag, with examples and exit codes |
+| [reports](../crates/onus-cli/guide/reports.md) | Reading a report: rows, ranking, evidence and the JSON |
+| [changes](../crates/onus-cli/guide/changes.md) | Every kind and subkind of change Onus reports |
+| [configuration](../crates/onus-cli/guide/configuration.md) | The `onus.yaml` reference: components, rules, labels, extractors |
+| [intent](../crates/onus-cli/guide/intent.md) | Checking a change against its stated intent |
+| [ci](../crates/onus-cli/guide/ci.md) | Running Onus on every pull request |
+| [how-it-works](../crates/onus-cli/guide/how-it-works.md) | How maps are built and compared |
+| [troubleshooting](../crates/onus-cli/guide/troubleshooting.md) | Map confidence notes, common questions and current limits |
+
+In the terminal:
+
+```sh
+onus help                  # commands and guide topics
+onus help diff             # one command's flags and examples
+onus help configuration    # a guide topic
+```

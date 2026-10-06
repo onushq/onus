@@ -175,3 +175,55 @@ fn map_summary_and_json() {
     let map: onus_core::CodebaseMap = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(map.components.len(), 7);
 }
+
+fn stdout(args: &[&str]) -> (i32, String, String) {
+    let out = onus().args(args).output().unwrap();
+    (
+        out.status.code().unwrap(),
+        String::from_utf8(out.stdout).unwrap(),
+        String::from_utf8(out.stderr).unwrap(),
+    )
+}
+
+#[test]
+fn help_lists_commands_topics_and_exit_codes() {
+    let (code, text, _) = stdout(&["help"]);
+    assert_eq!(code, 0);
+    for command in ["map", "diff", "report", "init", "schema", "help"] {
+        assert!(text.contains(&format!("\n  {command} ")), "{command}");
+    }
+    for t in onus_cli::guide::TOPICS {
+        assert!(text.contains(t.name), "{}", t.name);
+    }
+    assert!(text.contains("2  a --fail-on condition was met"));
+}
+
+#[test]
+fn help_shows_one_command_with_examples() {
+    let (code, text, _) = stdout(&["help", "diff"]);
+    assert_eq!(code, 0);
+    assert!(text.contains("Usage: onus diff"));
+    assert!(text.contains("--fail-on"));
+    assert!(text.contains("Examples:"));
+    // The same text as `onus diff --help`.
+    assert_eq!(text, stdout(&["diff", "--help"]).1);
+}
+
+#[test]
+fn help_prints_every_guide_topic() {
+    for t in onus_cli::guide::TOPICS {
+        let (code, text, _) = stdout(&["help", t.name]);
+        assert_eq!(code, 0, "{}", t.name);
+        assert_eq!(text, t.text, "{}", t.name);
+    }
+    let (_, text, _) = stdout(&["help", "onus.yaml"]);
+    assert!(text.starts_with("# Configuration"));
+}
+
+#[test]
+fn help_for_an_unknown_name_fails_with_the_list() {
+    let (code, _, err) = stdout(&["help", "nope"]);
+    assert_eq!(code, 1);
+    assert!(err.contains("no command or guide topic named `nope`"));
+    assert!(err.contains("getting-started"));
+}

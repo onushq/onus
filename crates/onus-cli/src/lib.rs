@@ -1,5 +1,7 @@
 //! The pieces behind the `onus` command, shared by the binary and its tests.
 
+pub mod guide;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

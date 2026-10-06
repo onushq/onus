@@ -5,8 +5,45 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use onus_cli::{DiffOptions, EXIT_ERROR, EXIT_FAIL_ON, FailOn, Format};
+
+const AFTER_HELP: &str = "\
+Run `onus help <command>` for a command's flags and examples, and
+`onus help <topic>` for the guide: getting-started, commands, reports,
+changes, configuration, intent, ci, how-it-works, troubleshooting.";
+
+/// The exit codes, shared by `onus help` and the commands that use them.
+macro_rules! exit_codes {
+    () => {
+        "Exit codes:
+  0  success, including reports with findings
+  1  usage or runtime error
+  2  a --fail-on condition was met"
+    };
+}
+
+const EXIT_CODES: &str = exit_codes!();
+
+const DIFF_HELP: &str = concat!(
+    "Examples:
+  onus diff old new
+  onus diff old new --format json > report.json
+  onus diff old new --intent pr-body.md --fail-on rule-violation,secrets
+
+",
+    exit_codes!()
+);
+
+const REPORT_HELP: &str = concat!(
+    "Examples:
+  onus report --base main --head HEAD
+  onus report --repo ../shop --base origin/main --head feature/sms --format json
+  onus report --base \"$BASE_SHA\" --head \"$HEAD_SHA\" --intent pr-body.md --fail-on secrets
+
+",
+    exit_codes!()
+);
 
 #[derive(Debug, Parser)]
 #[command(
@@ -16,7 +53,9 @@ use onus_cli::{DiffOptions, EXIT_ERROR, EXIT_FAIL_ON, FailOn, Format};
     long_about = "Onus reads two versions of a codebase, builds a map of each and reports \
                   what changed in meaning: contracts, relationships, external services, \
                   tests and rules. It only reads files; it never installs or runs the \
-                  code it analyzes."
+                  code it analyzes.",
+    after_help = AFTER_HELP,
+    disable_help_subcommand = true
 )]
 struct Cli {
     #[command(subcommand)]
@@ -26,51 +65,97 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Cmd {
     /// Build the codebase map of a directory.
+    #[command(
+        long_about = "Build the codebase map of a directory: its components, public contracts, \
+                      relationships, events, data access, external services, tests and \
+                      anything Onus could not resolve. Prints a summary, or the whole map \
+                      with --json.",
+        after_long_help = "\
+Examples:
+  onus map .
+  onus map path/to/repo --json > map.json
+  onus map . --config other/onus.yaml"
+    )]
     Map {
+        /// The repository or directory to map.
         dir: PathBuf,
-        /// Print the full map as JSON.
+        /// Print the full map as JSON (schemas/codebase-map.schema.json).
         #[arg(long)]
         json: bool,
         /// Use this onus.yaml instead of the directory's own.
-        #[arg(long)]
+        #[arg(long, value_name = "FILE")]
         config: Option<PathBuf>,
     },
     /// Report the changes in meaning between two directories.
+    #[command(
+        long_about = "Report the changes in meaning between two directories: the base (before) \
+                      and the head (after). Both are mapped with the base directory's \
+                      onus.yaml, unless --config says otherwise.",
+        after_long_help = DIFF_HELP
+    )]
     Diff {
+        /// The directory before the change.
         base: PathBuf,
+        /// The directory after the change.
         head: PathBuf,
+        /// Markdown for people, or the full JSON report (schemas/semantic-report.schema.json).
         #[arg(long, value_enum, default_value = "md")]
         format: Format,
-        /// A YAML intent file, or Markdown containing an `onus-intent` block.
-        #[arg(long)]
+        /// A YAML intent file, or Markdown (such as a pull request body) containing an
+        /// `onus-intent` block. Changes outside it are ranked first. See `onus help intent`.
+        #[arg(long, value_name = "FILE")]
         intent: Option<PathBuf>,
         /// Use this onus.yaml for both trees (default: the base tree's).
-        #[arg(long)]
+        #[arg(long, value_name = "FILE")]
         config: Option<PathBuf>,
-        /// Exit with code 2 when this is found. Repeatable.
-        #[arg(long, value_enum, value_delimiter = ',')]
+        /// Exit with code 2 when this is found. Repeat the flag or separate values with commas.
+        #[arg(long, value_enum, value_delimiter = ',', value_name = "WHAT")]
         fail_on: Vec<FailOn>,
     },
     /// Report the changes in meaning between two git refs.
+    #[command(
+        long_about = "Report the changes in meaning between two git refs. Each ref is extracted \
+                      with `git archive` into a temporary directory that is removed afterwards; \
+                      the repository itself is never modified.",
+        after_long_help = REPORT_HELP
+    )]
     Report {
-        #[arg(long)]
+        /// The ref before the change: a branch, tag or commit.
+        #[arg(long, value_name = "REF")]
         base: String,
-        #[arg(long)]
+        /// The ref after the change: a branch, tag or commit.
+        #[arg(long, value_name = "REF")]
         head: String,
-        /// The git repository (default: the current directory).
-        #[arg(long, default_value = ".")]
+        /// The git repository.
+        #[arg(long, default_value = ".", value_name = "DIR")]
         repo: PathBuf,
+        /// Markdown for people, or the full JSON report (schemas/semantic-report.schema.json).
         #[arg(long, value_enum, default_value = "md")]
         format: Format,
-        #[arg(long)]
+        /// A YAML intent file, or Markdown (such as a pull request body) containing an
+        /// `onus-intent` block. Changes outside it are ranked first. See `onus help intent`.
+        #[arg(long, value_name = "FILE")]
         intent: Option<PathBuf>,
-        #[arg(long)]
+        /// Use this onus.yaml for both refs (default: the base ref's).
+        #[arg(long, value_name = "FILE")]
         config: Option<PathBuf>,
-        #[arg(long, value_enum, value_delimiter = ',')]
+        /// Exit with code 2 when this is found. Repeat the flag or separate values with commas.
+        #[arg(long, value_enum, value_delimiter = ',', value_name = "WHAT")]
         fail_on: Vec<FailOn>,
     },
     /// Write a starter onus.yaml inferred from the repository.
+    #[command(
+        long_about = "Write a starter onus.yaml inferred from workspaces and CODEOWNERS. \
+                      Sensitivity labels are only suggested, as comments, until you confirm \
+                      them. See `onus help configuration`.",
+        after_long_help = "\
+Examples:
+  onus init
+  onus init path/to/repo --stdout
+  onus init --force"
+    )]
     Init {
+        /// The repository to inspect and write onus.yaml into.
         #[arg(default_value = ".")]
         dir: PathBuf,
         /// Overwrite an existing onus.yaml.
@@ -81,10 +166,24 @@ enum Cmd {
         stdout: bool,
     },
     /// Write the JSON Schemas of the map, report and config formats.
+    #[command(after_long_help = "\
+Examples:
+  onus schema --out schemas
+  onus schema")]
     Schema {
         /// Directory to write the schema files into (default: print them).
-        #[arg(long)]
+        #[arg(long, value_name = "DIR")]
         out: Option<PathBuf>,
+    },
+    /// Show help for a command, or a topic from the guide.
+    #[command(after_long_help = "\
+Examples:
+  onus help
+  onus help diff
+  onus help configuration")]
+    Help {
+        /// A command (map, diff, report, init, schema) or a guide topic.
+        topic: Option<String>,
     },
 }
 
@@ -207,6 +306,7 @@ fn run(cli: Cli) -> Result<i32> {
             eprintln!("onus: wrote {}", path.display());
             Ok(0)
         }
+        Cmd::Help { topic } => help(topic.as_deref()),
         Cmd::Schema { out } => {
             let schemas = onus_core::schema::all_schemas();
             match out {
@@ -226,6 +326,36 @@ fn run(cli: Cli) -> Result<i32> {
             Ok(0)
         }
     }
+}
+
+/// `onus help [command | topic]`.
+fn help(topic: Option<&str>) -> Result<i32> {
+    let mut cmd = Cli::command();
+    cmd.build();
+    let Some(name) = topic else {
+        // The topic table below replaces the short pointer to it.
+        let mut top = cmd.clone().after_help(None::<&str>);
+        print!("{}", top.render_long_help());
+        println!("\n{}", onus_cli::guide::topic_list());
+        println!("{EXIT_CODES}");
+        return Ok(0);
+    };
+    if let Some(sub) = cmd.find_subcommand_mut(name) {
+        print!("{}", sub.render_long_help());
+        return Ok(0);
+    }
+    if let Some(t) = onus_cli::guide::find(name) {
+        print!("{}", t.text);
+        return Ok(0);
+    }
+    eprintln!("onus: no command or guide topic named `{name}`\n");
+    let commands: Vec<String> = cmd
+        .get_subcommands()
+        .map(|c| c.get_name().to_string())
+        .collect();
+    eprintln!("Commands: {}\n", commands.join(", "));
+    eprint!("{}", onus_cli::guide::topic_list());
+    Ok(EXIT_ERROR)
 }
 
 fn map_summary(map: &onus_core::CodebaseMap) -> String {
