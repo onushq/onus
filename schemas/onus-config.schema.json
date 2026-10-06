@@ -186,6 +186,13 @@
             "$ref": "#/$defs/ExternalSpec"
           }
         },
+        "packs": {
+          "description": "Framework packs: YAML files of tree-sitter queries, relative to\nonus.yaml (`onus help plugins`).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "prisma": {
           "anyOf": [
             {

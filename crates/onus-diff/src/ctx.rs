@@ -34,6 +34,8 @@ pub struct Ctx<'a> {
     pub moves: RefCell<BTreeMap<String, String>>,
     /// Files whose changes are fully explained without a line-level row.
     pub explained: RefCell<BTreeSet<String>>,
+    /// Framework packs listed in onus.yaml.
+    pub packs: BTreeSet<String>,
 }
 
 impl std::fmt::Debug for Ctx<'_> {
@@ -87,6 +89,15 @@ impl<'a> Ctx<'a> {
             matcher: ComponentMatcher::new(&all),
             moves: RefCell::new(text.renames()),
             explained: RefCell::new(BTreeSet::new()),
+            packs: config
+                .map(|c| {
+                    c.extractors
+                        .packs
+                        .iter()
+                        .map(|p| p.trim_start_matches("./").to_string())
+                        .collect()
+                })
+                .unwrap_or_default(),
         }
     }
 

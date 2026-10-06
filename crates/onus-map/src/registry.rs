@@ -160,7 +160,7 @@ pub const BUILT_IN: &[Entry] = &[
 ];
 
 /// Merges defaults, the built-in registry and `onus.yaml`.
-pub fn resolve_extractors(config: Option<&OnusConfig>) -> ResolvedExtractors {
+pub fn resolve_extractors(config: Option<&OnusConfig>, packs: Vec<String>) -> ResolvedExtractors {
     let mut externals = BTreeMap::new();
     for (pkg, s, vendor, category, egress, hosts) in BUILT_IN {
         externals.insert(
@@ -215,5 +215,6 @@ pub fn resolve_extractors(config: Option<&OnusConfig>) -> ResolvedExtractors {
         subscribe_patterns: subscribe,
         externals,
         prisma_clients,
+        packs,
     }
 }

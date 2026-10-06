@@ -8,6 +8,49 @@ Onus builds a map with *providers*:
 
 Plugins add providers without changing Onus. They are listed in a *plugins file* that you pass with `--plugins <file>` (or `ONUS_PLUGINS`). The plugins file belongs to whoever runs Onus: Onus never reads plugins from the analyzed repository, so a pull request cannot make CI run new code.
 
+## Framework packs: no code at all
+
+Most framework knowledge is a pattern in the code: a decorator, a method on a known client, a call with a literal argument. A *pack* is a YAML file of tree-sitter queries and what a match means. Packs never run code, so they may be listed in the analyzed repository's `onus.yaml` (`extractors.packs`) as well as in the plugins file (`packs`). Like the rest of `onus.yaml`, packs are read from the base version of a change: a pull request cannot edit a pack to hide what it adds, and editing one is reported as a rules-of-the-game change.
+
+    pack: nestjs
+    rules:
+      - id: route
+        query: |
+          ((decorator (call_expression
+             function: (identifier) @method
+             arguments: (arguments . (string) @path)))
+           (#match? @method "^(Get|Post|Put|Patch|Delete)$"))
+        emit: { route: "{method|upper} {path}" }
+      - id: on-event
+        query: |
+          ((decorator (call_expression
+             function: (identifier) @fn
+             arguments: (arguments . (_) @name)))
+           (#eq? @fn "OnEvent"))
+        emit: { event: consumes, name: "@name" }
+      - id: cache-write
+        query: |
+          ((call_expression function: (member_expression
+             object: (identifier) @c property: (property_identifier) @op))
+           (#eq? @c "redis") (#eq? @op "set"))
+        emit: { edge: writes, to: "db-table:redis-cache" }
+
+Each rule has an `id`, a tree-sitter `query` over the TypeScript grammar (the same query runs on TSX and JavaScript), and one `emit`:
+
+| Emit | Means |
+|---|---|
+| `event: publishes` or `consumes`, `name: "@capture"` | An event, named by the capture; literals, constants and enum members are resolved |
+| `data: reads` or `writes`, `table: "<template>"` | A table read or written |
+| `config: "<template>"` | A configuration key read |
+| `host: "@capture"` | An outbound call to the host of the captured literal URL |
+| `route: "<template>"` | An HTTP route served here: a public contract, so an added or removed route is a contract change |
+| `edge: <kind>`, `to: "<template>"` | Any other relationship (`calls`, `reads`, `writes`, `publishes`, `consumes`, `calls-external`, `reads-config`, ...) |
+| `diagnostic: <kind>`, `message: "<text>"` | A map confidence note |
+
+Templates replace `{capture}` with the captured text (a string literal without its quotes) and accept `{capture|upper}` and `{capture|lower}`. Facts are attributed to the innermost declaration containing the match. Query predicates (`#eq?`, `#match?`, `#any-of?`) work as in tree-sitter.
+
+Onus's own framework knowledge ships as packs too: Prisma reads and writes, `process.env` reads, `fetch`/`axios`/`got`/`ky` hosts, and the event patterns from `onus.yaml` (`crates/onus-lang-ts/packs/` in the repository). An invalid pack is a configuration error that names the pack and rule.
+
 ## The plugins file
 
     plugins:
@@ -33,8 +76,10 @@ Plugins add providers without changing Onus. They are listed in a *plugins file*
         files: ["**/*.py"]
         language_id: python
 
+    packs: [packs/nestjs.yaml]   # framework packs, relative to this file
+
     sandbox:
-      preset: auto        # auto | bwrap | sandbox-exec | none
+      preset: auto        # auto | bwrap | sandbox-exec | container | none
       # command: [docker, run, --rm, -i, --network, none, -v, "{root}:{root}:ro", -v, "{out}:{out}", -w, "{root}", my-image]
 
 Each plugin has:
@@ -57,8 +102,11 @@ So a plugin with `runs_repo_code: true` runs only with `--trusted`, and only ins
 
 - `auto`: bubblewrap (`bwrap`) on Linux, `sandbox-exec` on macOS;
 - `bwrap` or `sandbox-exec`: that one;
-- a custom `command` prefix, such as a container runtime;
+- `container`: Docker or Podman (`runtime`) running `image`, with no network, the tree read-only and `{out}` writable; the tools must be in the image. With Docker Desktop or Colima, the tree and the temporary folder (`TMPDIR`) must be in a shared folder. This is the option on Windows;
+- a custom `command` prefix;
 - `none`: no sandbox; such plugins then also need `--allow-unsandboxed`.
+
+In every case the tree is read-only and the network is unreachable; only `{out}` and the system's temporary folders are writable.
 
 Without `--trusted` they are skipped, and both the map and the report say so ("provider `rust` skipped: ... runs only with --trusted"). Use trusted mode where the code is already trusted, for example on the main branch, and keep pull requests from forks on the default providers, which only read files.
 
@@ -88,7 +136,7 @@ What an index adds:
 
 ## Language servers
 
-For languages without an indexer, the LSP bridge starts the server, opens each file it handles, and asks for document symbols and, where the server supports it, the call hierarchy. Symbols become map symbols (their detail, usually the signature, is the shape); outgoing calls become `calls` edges with confidence `compiler`. Language servers answer one request at a time, so this is slower than an index on large repositories.
+For languages without an indexer, the LSP bridge starts the server, opens each file it handles, waits until the server has finished loading the project (it follows the server's progress reports), and asks for document symbols and, where the server supports it, the call hierarchy. Symbols become map symbols (their detail, usually the signature, is the shape); outgoing calls become `calls` edges with confidence `compiler`. Language servers answer one request at a time, so this is slower than an index on large repositories. Tried with rust-analyzer (`rust-analyzer`, language id `rust`) and pyright (`pyright-langserver --stdio`, language id `python`).
 
 ## Writing a plugin
 

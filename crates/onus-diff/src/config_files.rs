@@ -188,8 +188,20 @@ pub fn rows(ctx: &Ctx) -> Vec<SemanticChange> {
         if f.status == Status::Renamed {
             continue;
         }
-        let Some(class) = classify(&f.path) else {
-            continue;
+        let class = if ctx.packs.contains(&f.path)
+            || f.old_path.as_ref().is_some_and(|p| ctx.packs.contains(p))
+        {
+            Class {
+                subkind: "onus-pack-changed",
+                label: "Onus pack",
+                rules_of_the_game: true,
+                why: "Changes what Onus sees in the code (this report used the base version); needs a person",
+            }
+        } else {
+            let Some(class) = classify(&f.path) else {
+                continue;
+            };
+            class
         };
         if class.subkind == "lockfile-changed" && ctx.explained.borrow().contains(&f.path) {
             continue;

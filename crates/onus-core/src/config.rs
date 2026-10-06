@@ -107,6 +107,10 @@ pub struct ExtractorsConfig {
     pub externals: BTreeMap<String, ExternalSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prisma: Option<PrismaConfig>,
+    /// Framework packs: YAML files of tree-sitter queries, relative to
+    /// onus.yaml (`onus help plugins`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub packs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -157,6 +161,10 @@ pub struct ResolvedExtractors {
     /// npm package name → service.
     pub externals: BTreeMap<String, ResolvedExternal>,
     pub prisma_clients: Vec<String>,
+    /// Framework packs (YAML texts) from onus.yaml and the plugins file,
+    /// on top of the built-in ones.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub packs: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

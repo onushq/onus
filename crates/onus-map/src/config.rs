@@ -14,7 +14,11 @@ pub const CONFIG_FILE: &str = "onus.yaml";
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoadedConfig {
     pub config: OnusConfig,
+    /// sha256 of the config and every pack it lists.
     pub hash: String,
+    /// The texts of the packs listed in `extractors.packs`, read when the
+    /// config is loaded, so both trees of a diff use the same packs.
+    pub packs: Vec<String>,
 }
 
 pub fn parse(text: &str) -> Result<LoadedConfig, MapError> {
@@ -24,16 +28,29 @@ pub fn parse(text: &str) -> Result<LoadedConfig, MapError> {
     Ok(LoadedConfig {
         config,
         hash: sha256_hex(text.as_bytes()),
+        packs: vec![],
     })
 }
 
 pub fn load(path: &Path) -> Result<LoadedConfig, MapError> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| MapError::Io(format!("{}: {e}", path.display())))?;
-    parse(&text).map_err(|e| match e {
+    let mut loaded = parse(&text).map_err(|e| match e {
         MapError::Config(msg) => MapError::Config(format!("{}: {msg}", path.display())),
         other => other,
-    })
+    })?;
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let mut hashed = text.clone();
+    for pack in &loaded.config.extractors.packs {
+        let pack_path = onus_core::paths::native(dir, pack);
+        let pack_text = std::fs::read_to_string(&pack_path)
+            .map_err(|e| MapError::Config(format!("{}: pack `{pack}`: {e}", path.display())))?;
+        hashed.push('\0');
+        hashed.push_str(&pack_text);
+        loaded.packs.push(pack_text);
+    }
+    loaded.hash = sha256_hex(hashed.as_bytes());
+    Ok(loaded)
 }
 
 /// Loads `<root>/onus.yaml` if it exists.

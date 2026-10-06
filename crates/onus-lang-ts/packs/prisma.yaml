@@ -1,0 +1,36 @@
+# Prisma data access: <client>.<model>.<operation>(...). `{{prisma_clients}}`
+# is replaced with a pattern of the client names from onus.yaml (default:
+# prisma).
+pack: prisma
+rules:
+  - id: write
+    query: |
+      ((call_expression
+         function: (member_expression
+           object: (member_expression
+             object: (_) @client
+             property: (property_identifier) @table)
+           property: (property_identifier) @op))
+       (#match? @client "{{prisma_clients}}")
+       (#match? @op "^(create|createMany|createManyAndReturn|update|updateMany|upsert|delete|deleteMany)$"))
+    emit: { data: writes, table: "{table}" }
+  - id: read
+    query: |
+      ((call_expression
+         function: (member_expression
+           object: (member_expression
+             object: (_) @client
+             property: (property_identifier) @table)
+           property: (property_identifier) @op))
+       (#match? @client "{{prisma_clients}}")
+       (#match? @op "^(findUnique|findUniqueOrThrow|findFirst|findFirstOrThrow|findMany|count|aggregate|groupBy)$"))
+    emit: { data: reads, table: "{table}" }
+  - id: raw-query
+    query: |
+      ((call_expression
+         function: (member_expression
+           object: (_) @client
+           property: (property_identifier) @op))
+       (#match? @client "{{prisma_clients}}")
+       (#match? @op "^\\$(queryRaw|executeRaw|queryRawUnsafe|executeRawUnsafe)$"))
+    emit: { diagnostic: raw-query, message: "raw SQL query; the tables it reads or writes are unknown" }

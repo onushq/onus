@@ -52,6 +52,7 @@ A map from component id to its settings. Ids may not be empty or contain `:`, `#
 
 Without a `components` section, Onus finds components itself:
 
+- Cargo packages (`Cargo.toml` with a `[package]`) and Python projects (`pyproject.toml` with a project name) are components named after the package.
 - In an Nx repository (an `nx.json` at the root), every folder with a `project.json` is a component, named after the project. `projectType: application` is a service and `library` a package.
 - npm, pnpm or yarn workspace packages are components too; where a workspace package contains Nx projects, each file belongs to the most specific one.
 - Failing both, every folder under services/, packages/ and apps/.
@@ -128,6 +129,15 @@ Built-in registry:
 | braintree | Braintree | payments | payment |
 
 An SDK counts as called when a function calls something imported from it, including through a class field declared with the SDK's type (`private readonly client: AcmeSmsClient` and then `this.client.send(...)`).
+
+## extractors.packs
+
+Framework packs: YAML files of tree-sitter queries that say what a pattern in the code means (routes, events, data access, other relationships), relative to onus.yaml. See `onus help plugins`.
+
+    extractors:
+      packs: [onus/packs/nestjs.yaml]
+
+Packs are read from the base version of a change, like this file.
 
 ## extractors.prisma
 

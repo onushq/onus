@@ -54,6 +54,7 @@ fn the_platform_sandbox_allows_reading_and_denies_writes_and_network() {
             ),
         ],
         sandbox: SandboxSpec::default(),
+        ..PluginsFile::default()
     };
     // Network works outside the sandbox, so a failure inside means it was
     // blocked, not that the machine is offline.

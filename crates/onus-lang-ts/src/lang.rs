@@ -18,6 +18,11 @@ pub fn is_source(path: &str) -> bool {
     extension(path).is_some()
 }
 
+/// Whether the file is parsed with the TSX grammar.
+pub fn is_tsx(path: &str) -> bool {
+    !matches!(extension(path), Some("ts" | "mts" | "cts"))
+}
+
 fn language_for(path: &str) -> Language {
     match extension(path) {
         // Plain TypeScript allows `<T>value` casts, which TSX does not.

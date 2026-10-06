@@ -194,7 +194,9 @@ pub fn build_map(root: &Path, opts: &BuildOptions) -> Result<CodebaseMap, MapErr
             ))
         })
         .collect();
-    let extractors = resolve_extractors(cfg);
+    let mut pack_texts: Vec<String> = loaded.as_ref().map(|l| l.packs.clone()).unwrap_or_default();
+    pack_texts.extend(opts.plugins.pack_texts.iter().cloned());
+    let extractors = resolve_extractors(cfg, pack_texts);
     let workspace = Workspace {
         root: root.to_path_buf(),
         files: ws_files,
@@ -202,6 +204,8 @@ pub fn build_map(root: &Path, opts: &BuildOptions) -> Result<CodebaseMap, MapErr
         packages,
         extractors: extractors.clone(),
     };
+    // A broken pack is a configuration error, not a quiet loss of facts.
+    onus_lang_ts::patterns(&workspace).map_err(MapError::Config)?;
     let mut partial = PartialMap::default();
     let mut claimed: BTreeSet<String> = BTreeSet::new();
     for (lang, external) in &languages {

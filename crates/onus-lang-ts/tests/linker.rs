@@ -74,6 +74,7 @@ fn build(root: &Path, files: &[(&str, &str)]) -> PartialMap {
             subscribe_patterns: vec!["bus.subscribe($EVENT, ...)".into()],
             externals: BTreeMap::new(),
             prisma_clients: vec!["prisma".into()],
+            packs: vec![],
         },
     };
     TypeScriptAdapter.build(&ws).unwrap()

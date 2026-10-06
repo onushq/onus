@@ -610,6 +610,13 @@
             "$ref": "#/$defs/ResolvedExternal"
           }
         },
+        "packs": {
+          "description": "Framework packs (YAML texts) from onus.yaml and the plugins file,\non top of the built-in ones.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "prismaClients": {
           "type": "array",
           "items": {

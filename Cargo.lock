@@ -643,7 +643,9 @@ version = "0.1.0"
 dependencies = [
  "onus-core",
  "rayon",
+ "serde",
  "serde_json",
+ "serde_yaml_ng",
  "tempfile",
  "tree-sitter",
  "tree-sitter-typescript",

@@ -1,7 +1,7 @@
 //! Per-file extraction: everything Onus reads from one file's syntax tree,
 //! before names are resolved across files.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use onus_core::hash::short_hash;
 use onus_core::secrets;
@@ -13,13 +13,35 @@ use tree_sitter::Node;
 
 use crate::lang;
 use crate::norm::{end_line, line, norm, norm_type, string_value, text};
+use crate::packs::Emit;
+use tree_sitter::{QueryCursor, StreamingIterator};
 
-/// What to look for, from `onus.yaml` and defaults.
-#[derive(Debug, Clone, Default)]
+/// What to look for: the built-in packs, the event patterns and any
+/// extra packs, compiled once per map.
+#[derive(Debug, Default)]
 pub struct Patterns {
-    pub publish: Vec<CallPattern>,
-    pub subscribe: Vec<CallPattern>,
-    pub prisma_clients: Vec<String>,
+    pub packs: crate::packs::Compiled,
+}
+
+impl Patterns {
+    pub fn new(
+        publish: &[String],
+        subscribe: &[String],
+        prisma_clients: &[String],
+        extra_packs: &[String],
+    ) -> Result<Self, String> {
+        let parse = |list: &[String]| -> Vec<CallPattern> {
+            list.iter().filter_map(|p| CallPattern::parse(p)).collect()
+        };
+        Ok(Patterns {
+            packs: crate::packs::compile(
+                &parse(publish),
+                &parse(subscribe),
+                prisma_clients,
+                extra_packs,
+            )?,
+        })
+    }
 }
 
 /// A parsed call pattern such as `bus.publish($EVENT, ...)` or
@@ -46,11 +68,6 @@ impl CallPattern {
             decorator,
             event_arg,
         })
-    }
-
-    fn matches(&self, callee: &str) -> bool {
-        let callee = callee.strip_prefix("this.").unwrap_or(callee);
-        callee == self.callee || callee.ends_with(&format!(".{}", self.callee))
     }
 }
 
@@ -173,37 +190,16 @@ pub struct FileFacts {
     pub data: Vec<DataUse>,
     pub env: Vec<SiteUse>,
     pub hosts: Vec<SiteUse>,
+    /// HTTP routes served here, from packs.
+    pub routes: Vec<SiteUse>,
+    /// Other relationships from packs: `(from, kind, to, line)`.
+    pub edges: Vec<(Option<String>, onus_core::EdgeKind, String, u32)>,
     pub diagnostics: Vec<MapDiagnostic>,
     pub test_cases: Vec<TestCase>,
     pub literals: Vec<String>,
 }
 
-const PRISMA_READS: &[&str] = &[
-    "findUnique",
-    "findUniqueOrThrow",
-    "findFirst",
-    "findFirstOrThrow",
-    "findMany",
-    "count",
-    "aggregate",
-    "groupBy",
-];
-const PRISMA_WRITES: &[&str] = &[
-    "create",
-    "createMany",
-    "createManyAndReturn",
-    "update",
-    "updateMany",
-    "upsert",
-    "delete",
-    "deleteMany",
-];
 const COMPARISON_OPS: &[&str] = &["<", "<=", ">", ">=", "==", "===", "!=", "!=="];
-const HTTP_CLIENTS: &[&str] = &["fetch", "got", "ky", "axios"];
-const AXIOS_METHODS: &[&str] = &[
-    "get", "post", "put", "patch", "delete", "head", "options", "request",
-];
-
 pub fn extract(path: &str, src: &str, is_test: bool, patterns: &Patterns) -> FileFacts {
     let mut facts = FileFacts {
         path: path.to_string(),
@@ -242,6 +238,7 @@ pub fn extract(path: &str, src: &str, is_test: bool, patterns: &Patterns) -> Fil
     } else {
         x.extract_module(root);
     }
+    x.apply_packs(root);
     facts.refs.sort();
     facts.refs.dedup();
     facts.diagnostics.sort();
@@ -835,7 +832,6 @@ impl Extractor<'_> {
                         let mut bound: Vec<String> = bound.into_iter().collect();
                         bound.sort();
                         if let Some(value) = declarator.child_by_field_name("value") {
-                            self.env_destructure(name_node, value, None);
                             self.scan(value, None, &HashSet::new());
                         }
                         for b in bound {
@@ -924,9 +920,6 @@ impl Extractor<'_> {
         locals.remove(name);
         let own = declarator.child_by_field_name("name");
         let fp = fingerprint(value.unwrap_or(declarator), self.src, own, &locals);
-        if let (Some(n), Some(v)) = (own, value) {
-            self.env_destructure(n, v, Some(name));
-        }
         if let Some(t) = ty {
             self.scan(t, Some(name), &locals);
         }
@@ -1435,7 +1428,6 @@ impl Extractor<'_> {
                     self.push_ref(from, root, member, RefKind::Call, node);
                 }
             }
-            "decorator" => self.decorator(node, from),
             "type_identifier" => {
                 if !is_declaration_name(node) {
                     let name = self.t(node);
@@ -1468,14 +1460,6 @@ impl Extractor<'_> {
                 return;
             }
             "member_expression" => {
-                if let Some(key) = env_key(node, self.src) {
-                    self.facts.env.push(SiteUse {
-                        from: from.map(str::to_string),
-                        value: key,
-                        line: line(node),
-                    });
-                    return;
-                }
                 if let (Some(obj), Some(prop)) = (
                     node.child_by_field_name("object"),
                     node.child_by_field_name("property"),
@@ -1485,27 +1469,6 @@ impl Extractor<'_> {
                     let name = self.t(obj);
                     if !locals.contains(&name) {
                         self.push_ref(from, name, Some(self.t(prop)), RefKind::Value, node);
-                    }
-                    return;
-                }
-            }
-            "subscript_expression" => {
-                if let Some(obj) = node.child_by_field_name("object")
-                    && norm(obj, self.src) == "process.env"
-                {
-                    let idx = node.child_by_field_name("index");
-                    match idx.and_then(|i| string_value(i, self.src)) {
-                        Some(key) => self.facts.env.push(SiteUse {
-                            from: from.map(str::to_string),
-                            value: key,
-                            line: line(node),
-                        }),
-                        None => self.facts.diagnostics.push(diag(
-                            "dynamic-config-key",
-                            self.path,
-                            line(node),
-                            "process.env is read with a computed key",
-                        )),
                     }
                     return;
                 }
@@ -1564,98 +1527,6 @@ impl Extractor<'_> {
             }
         }
 
-        // Events.
-        for (publish, patterns) in [
-            (true, &self.patterns.publish),
-            (false, &self.patterns.subscribe),
-        ] {
-            for p in patterns.iter().filter(|p| !p.decorator) {
-                if p.matches(&callee) {
-                    let name = args
-                        .get(p.event_arg)
-                        .map(|a| self.event_expr(*a))
-                        .unwrap_or_else(|| EventExpr::Dynamic(String::new()));
-                    self.facts.events.push(EventUse {
-                        from: from.map(str::to_string),
-                        publish,
-                        name,
-                        line: line(node),
-                    });
-                }
-            }
-        }
-
-        // Prisma: <client>.<model>.<operation>(...)
-        if func.kind() == "member_expression"
-            && let (Some(obj), Some(op)) = (
-                func.child_by_field_name("object"),
-                func.child_by_field_name("property"),
-            )
-        {
-            let op = self.t(op);
-            if obj.kind() == "member_expression" {
-                if let (Some(client), Some(model)) = (
-                    obj.child_by_field_name("object"),
-                    obj.child_by_field_name("property"),
-                ) {
-                    let client_text = norm(client, self.src);
-                    let client_last = client_text.rsplit('.').next().unwrap_or("");
-                    if self
-                        .patterns
-                        .prisma_clients
-                        .iter()
-                        .any(|c| c == client_last)
-                    {
-                        let model = self.t(model);
-                        let write = PRISMA_WRITES.contains(&op.as_str());
-                        if write || PRISMA_READS.contains(&op.as_str()) {
-                            self.facts.data.push(DataUse {
-                                from: from.map(str::to_string),
-                                model,
-                                write,
-                                line: line(node),
-                            });
-                        }
-                    }
-                }
-            } else {
-                let client_last = callee.split('.').rev().nth(1).unwrap_or("");
-                if self
-                    .patterns
-                    .prisma_clients
-                    .iter()
-                    .any(|c| c == client_last)
-                    && matches!(
-                        op.as_str(),
-                        "$queryRaw" | "$executeRaw" | "$queryRawUnsafe" | "$executeRawUnsafe"
-                    )
-                {
-                    self.facts.diagnostics.push(diag(
-                        "raw-query",
-                        self.path,
-                        line(node),
-                        "raw SQL query; the tables it reads or writes are unknown",
-                    ));
-                }
-            }
-        }
-
-        // Outbound HTTP with a literal host.
-        let root_name = callee.split('.').next().unwrap_or("");
-        let is_http = (HTTP_CLIENTS.contains(&callee.as_str()))
-            || (root_name == "axios"
-                && callee
-                    .split('.')
-                    .nth(1)
-                    .is_some_and(|m| AXIOS_METHODS.contains(&m)));
-        if is_http && let Some(host) = args.first().and_then(|a| self.literal_host(*a)) {
-            self.facts.hosts.push(SiteUse {
-                from: from.map(str::to_string),
-                value: host,
-                line: line(node),
-            });
-        }
-
         // Calls on a typed field: `this.provider.messages.create()` is a call
         // on the field's declared type.
         if let Some(field) = this_field(func, self.src)
@@ -1685,42 +1556,6 @@ impl Extractor<'_> {
         }
         if let Some(a) = node.child_by_field_name("arguments") {
             self.scan(a, from, locals);
-        }
-    }
-
-    fn decorator(&mut self, node: Node, from: Option<&str>) {
-        let Some(call) = named_children(node)
-            .into_iter()
-            .find(|c| c.kind() == "call_expression")
-        else {
-            return;
-        };
-        let Some(func) = call.child_by_field_name("function") else {
-            return;
-        };
-        let callee = norm(func, self.src);
-        let args: Vec<Node> = call
-            .child_by_field_name("arguments")
-            .map(named_children)
-            .unwrap_or_default();
-        for (publish, patterns) in [
-            (true, &self.patterns.publish),
-            (false, &self.patterns.subscribe),
-        ] {
-            for p in patterns.iter().filter(|p| p.decorator) {
-                if p.matches(&callee) {
-                    let name = args
-                        .get(p.event_arg)
-                        .map(|a| self.event_expr(*a))
-                        .unwrap_or_else(|| EventExpr::Dynamic(String::new()));
-                    self.facts.events.push(EventUse {
-                        from: from.map(str::to_string),
-                        publish,
-                        name,
-                        line: line(node),
-                    });
-                }
-            }
         }
     }
 
@@ -1765,23 +1600,149 @@ impl Extractor<'_> {
         (!host.is_empty() && host.contains('.') && !is_local_host(&host)).then_some(host)
     }
 
-    fn env_destructure(&mut self, pattern: Node, value: Node, from: Option<&str>) {
-        if pattern.kind() != "object_pattern" || norm(value, self.src) != "process.env" {
-            return;
+    // ---- packs ----
+
+    /// The innermost declaration containing `line`.
+    fn enclosing(&self, line: u32) -> Option<String> {
+        self.facts
+            .decls
+            .iter()
+            .filter(|d| d.start <= line && line <= d.end)
+            .min_by_key(|d| d.end - d.start)
+            .map(|d| d.name.clone())
+    }
+
+    fn capture_text(&self, node: Node) -> Option<String> {
+        if matches!(node.kind(), "string" | "template_string") {
+            string_value(node, self.src)
+        } else {
+            Some(self.t(node))
         }
-        for child in named_children(pattern) {
-            let key = match child.kind() {
-                "shorthand_property_identifier_pattern" => Some(self.t(child)),
-                "pair_pattern" => child.child_by_field_name("key").map(|k| self.t(k)),
-                "object_assignment_pattern" => child.child_by_field_name("left").map(|k| self.t(k)),
-                _ => None,
-            };
-            if let Some(key) = key {
-                self.facts.env.push(SiteUse {
-                    from: from.map(str::to_string),
-                    value: key,
-                    line: line(child),
-                });
+    }
+
+    /// `{capture}`, `{capture|upper}` and `{capture|lower}` replaced with
+    /// captured text; `None` if a capture is missing.
+    fn fill(&self, template: &str, captures: &BTreeMap<&str, Node>) -> Option<String> {
+        let mut out = String::new();
+        let mut rest = template;
+        while let Some(open) = rest.find('{') {
+            out.push_str(&rest[..open]);
+            let close = rest[open..].find('}')? + open;
+            let spec = &rest[open + 1..close];
+            let (name, transform) = spec.split_once('|').unwrap_or((spec, ""));
+            let value = self.capture_text(*captures.get(name)?)?;
+            out.push_str(&match transform {
+                "upper" => value.to_uppercase(),
+                "lower" => value.to_lowercase(),
+                _ => value,
+            });
+            rest = &rest[close + 1..];
+        }
+        out.push_str(rest);
+        Some(out)
+    }
+
+    fn apply_packs(&mut self, root: Node) {
+        // The patterns outlive this extractor: borrow them apart from self.
+        let patterns: &Patterns = self.patterns;
+        let set = if lang::is_tsx(self.path) {
+            &patterns.packs.tsx
+        } else {
+            &patterns.packs.typescript
+        };
+        let Some(set) = set else {
+            return;
+        };
+        let names = set.query.capture_names();
+        let mut cursor = QueryCursor::new();
+        let mut matches = cursor.matches(&set.query, root, self.src);
+        {
+            while let Some(m) = matches.next() {
+                let rule = &set.rules[set.pattern_rule[m.pattern_index]];
+                let mut captures: BTreeMap<&str, Node> = BTreeMap::new();
+                for c in m.captures() {
+                    captures.entry(names[c.index as usize]).or_insert(c.node);
+                }
+                let Some(anchor) = m.captures().first().map(|c| c.node) else {
+                    continue;
+                };
+                // The whole match: the outermost captured node's parent
+                // chain is not needed, its line is.
+                let at = m
+                    .captures()
+                    .iter()
+                    .map(|c| line(c.node))
+                    .min()
+                    .unwrap_or_else(|| line(anchor));
+                let from = if self.facts.is_test {
+                    None
+                } else {
+                    self.enclosing(at)
+                };
+                match &rule.emit {
+                    Emit::Event { publish, capture } => {
+                        let Some(node) = captures.get(capture.as_str()) else {
+                            continue;
+                        };
+                        let name = self.event_expr(*node);
+                        self.facts.events.push(EventUse {
+                            from,
+                            publish: *publish,
+                            name,
+                            line: at,
+                        });
+                    }
+                    Emit::Data { write, table } => {
+                        if let Some(model) = self.fill(table, &captures) {
+                            self.facts.data.push(DataUse {
+                                from,
+                                model,
+                                write: *write,
+                                line: at,
+                            });
+                        }
+                    }
+                    Emit::Config { key } => {
+                        if let Some(value) = self.fill(key, &captures) {
+                            self.facts.env.push(SiteUse {
+                                from,
+                                value,
+                                line: at,
+                            });
+                        }
+                    }
+                    Emit::Host { capture } => {
+                        if let Some(host) = captures
+                            .get(capture.as_str())
+                            .and_then(|n| self.literal_host(*n))
+                        {
+                            self.facts.hosts.push(SiteUse {
+                                from,
+                                value: host,
+                                line: at,
+                            });
+                        }
+                    }
+                    Emit::Route { name } => {
+                        if let Some(value) = self.fill(name, &captures) {
+                            self.facts.routes.push(SiteUse {
+                                from,
+                                value,
+                                line: at,
+                            });
+                        }
+                    }
+                    Emit::Edge { kind, to } => {
+                        if let Some(to) = self.fill(to, &captures) {
+                            self.facts.edges.push((from, *kind, to, at));
+                        }
+                    }
+                    Emit::Diagnostic { kind, message } => {
+                        self.facts
+                            .diagnostics
+                            .push(diag(kind, self.path, at, message));
+                    }
+                }
             }
         }
     }
@@ -2208,14 +2169,6 @@ fn this_field(node: Node, src: &[u8]) -> Option<String> {
     None
 }
 
-fn env_key(node: Node, src: &[u8]) -> Option<String> {
-    let obj = node.child_by_field_name("object")?;
-    if norm(obj, src) != "process.env" {
-        return None;
-    }
-    Some(text(node.child_by_field_name("property")?, src).to_string())
-}
-
 fn is_call_function(node: Node) -> bool {
     node.parent().is_some_and(|p| {
         matches!(p.kind(), "call_expression" | "new_expression")
@@ -2275,14 +2228,16 @@ mod tests {
     use super::*;
 
     fn patterns() -> Patterns {
-        Patterns {
-            publish: vec![CallPattern::parse("bus.publish($EVENT, ...)").unwrap()],
-            subscribe: vec![
-                CallPattern::parse("bus.subscribe($EVENT, ...)").unwrap(),
-                CallPattern::parse("@OnEvent($EVENT)").unwrap(),
+        Patterns::new(
+            &["bus.publish($EVENT, ...)".into()],
+            &[
+                "bus.subscribe($EVENT, ...)".into(),
+                "@OnEvent($EVENT)".into(),
             ],
-            prisma_clients: vec!["prisma".into()],
-        }
+            &["prisma".into()],
+            &[],
+        )
+        .unwrap()
     }
 
     fn decl<'a>(f: &'a FileFacts, name: &str) -> &'a Decl {
@@ -2302,8 +2257,6 @@ mod tests {
         let p = CallPattern::parse("emit(topic, $EVENT)").unwrap();
         assert_eq!(p.event_arg, 1);
         assert!(CallPattern::parse("@OnEvent($EVENT)").unwrap().decorator);
-        assert!(p.matches("this.emit"));
-        assert!(!p.matches("submit"));
     }
 
     #[test]

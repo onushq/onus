@@ -10,6 +10,7 @@ pub mod extract;
 pub mod jsonc;
 pub mod lang;
 pub mod norm;
+pub mod packs;
 pub mod resolve;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -21,9 +22,7 @@ use onus_core::{
 };
 use rayon::prelude::*;
 
-use crate::extract::{
-    Binding, CallPattern, EventExpr, Export, FileFacts, Imported, Patterns, RefKind,
-};
+use crate::extract::{Binding, EventExpr, Export, FileFacts, Imported, Patterns, RefKind};
 use crate::resolve::{Resolution, Resolver};
 
 /// Stack size of the threads that walk syntax trees.
@@ -52,7 +51,7 @@ impl LanguageAdapter for TypeScriptAdapter {
     }
 
     fn build(&self, ws: &Workspace) -> Result<PartialMap, onus_core::ProviderError> {
-        let patterns = patterns(ws);
+        let patterns = patterns(ws).map_err(onus_core::ProviderError::Failed)?;
         let sources: Vec<&onus_core::WorkspaceFile> =
             ws.files.iter().filter(|f| self.handles(&f.path)).collect();
         let extract_all = || -> Vec<FileFacts> {
@@ -85,22 +84,14 @@ impl LanguageAdapter for TypeScriptAdapter {
     }
 }
 
-fn patterns(ws: &Workspace) -> Patterns {
-    Patterns {
-        publish: ws
-            .extractors
-            .publish_patterns
-            .iter()
-            .filter_map(|p| CallPattern::parse(p))
-            .collect(),
-        subscribe: ws
-            .extractors
-            .subscribe_patterns
-            .iter()
-            .filter_map(|p| CallPattern::parse(p))
-            .collect(),
-        prisma_clients: ws.extractors.prisma_clients.clone(),
-    }
+/// The compiled packs for a workspace.
+pub fn patterns(ws: &Workspace) -> Result<Patterns, String> {
+    Patterns::new(
+        &ws.extractors.publish_patterns,
+        &ws.extractors.subscribe_patterns,
+        &ws.extractors.prisma_clients,
+        &ws.extractors.packs,
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -440,6 +431,7 @@ impl<'a> Linker<'a> {
         let mut events = BTreeSet::new();
         let mut tables = BTreeSet::new();
         let mut config_keys = BTreeSet::new();
+        let mut routes: Vec<(usize, String, u32)> = Vec::new();
 
         for (fi, f) in self.facts.iter().enumerate() {
             let module = self.module_id(fi);
@@ -770,6 +762,19 @@ impl<'a> Linker<'a> {
                     e.line,
                 );
             }
+            for r in f.routes.iter().filter(|_| production) {
+                routes.push((fi, r.value.clone(), r.line));
+            }
+            for (from, kind, to, line) in f.edges.iter().filter(|_| production) {
+                add(
+                    &from_id(from),
+                    to,
+                    *kind,
+                    Confidence::Static,
+                    &f.path,
+                    *line,
+                );
+            }
             for h in f.hosts.iter().filter(|_| production) {
                 let slug = self.host_slug(&h.value);
                 add(
@@ -842,6 +847,35 @@ impl<'a> Linker<'a> {
                     literal: d.literal.clone(),
                 });
             }
+        }
+        // HTTP routes from packs: public contracts of their component.
+        for (fi, name, line) in &routes {
+            symbols.push(SymbolNode {
+                id: self.symbol_id(*fi, name),
+                component_id: Some(self.info[*fi].component.clone()),
+                kind: SymbolKind::HttpRoute,
+                name: name.clone(),
+                visibility: Visibility::Public,
+                shape: Some(onus_core::ContractShape {
+                    kind: onus_core::ShapeKind::Alias,
+                    type_params: None,
+                    params: vec![],
+                    returns: None,
+                    members: vec![],
+                    type_text: Some(name.clone()),
+                    unverified: false,
+                }),
+                body_fingerprint: None,
+                invariants: vec![],
+                loc: Some(Loc {
+                    file: self.facts[*fi].path.clone(),
+                    start: *line,
+                    end: *line,
+                    signature_end: None,
+                }),
+                facts: None,
+                literal: None,
+            });
         }
         for (prefix, kind, names) in [
             ("event", SymbolKind::Event, &events),

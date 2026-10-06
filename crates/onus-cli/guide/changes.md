@@ -85,6 +85,7 @@ Workspace packages (your own `@scope/...` packages) are not third-party: dependi
 |---|---|---|---|
 | ci-changed | config | yes | .github/workflows/*, .gitlab-ci.yml, .circleci/, .buildkite/, Jenkinsfile |
 | onus-config-changed | config | yes | onus.yaml (the report used the base version) |
+| onus-pack-changed | config | yes | a framework pack listed in onus.yaml (the report used the base version) |
 | codeowners-changed | config | yes | CODEOWNERS |
 | policy-changed | config | yes | *.rego, policy/, policies/ |
 | test-config-changed | config | yes | jest, vitest, playwright, cypress, karma and mocha configs |

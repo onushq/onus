@@ -15,6 +15,14 @@ pub struct PluginsFile {
     pub plugins: Vec<PluginSpec>,
     #[serde(default)]
     pub sandbox: SandboxSpec,
+    /// Framework packs (YAML files of tree-sitter queries), relative to the
+    /// plugins file.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub packs: Vec<String>,
+    /// The packs' texts, read when the file is loaded.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub pack_texts: Vec<String>,
 }
 
 #[derive(

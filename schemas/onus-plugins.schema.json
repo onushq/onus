@@ -4,6 +4,13 @@
   "description": "The plugins file.",
   "type": "object",
   "properties": {
+    "packs": {
+      "description": "Framework packs (YAML files of tree-sitter queries), relative to the\nplugins file.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
     "plugins": {
       "type": "array",
       "default": [],

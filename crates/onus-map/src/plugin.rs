@@ -34,8 +34,14 @@ pub fn file_globs(spec: &PluginSpec) -> Result<GlobSet, MapError> {
 pub fn load_plugins_file(path: &Path) -> Result<PluginsFile, MapError> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| MapError::Io(format!("{}: {e}", path.display())))?;
-    let file: PluginsFile = serde_yaml_ng::from_str(&text)
+    let mut file: PluginsFile = serde_yaml_ng::from_str(&text)
         .map_err(|e| MapError::Config(format!("{}: {e}", path.display())))?;
+    let dir = path.parent().unwrap_or(Path::new("."));
+    for pack in file.packs.clone() {
+        let pack_text = std::fs::read_to_string(onus_core::paths::native(dir, &pack))
+            .map_err(|e| MapError::Config(format!("{}: pack `{pack}`: {e}", path.display())))?;
+        file.pack_texts.push(pack_text);
+    }
     let mut names = std::collections::BTreeSet::new();
     for p in &file.plugins {
         if p.command.is_empty() {
