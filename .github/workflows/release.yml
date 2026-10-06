@@ -1,0 +1,172 @@
+name: Release
+
+# Pushing a tag such as v0.1.0 builds the binaries, attests where they were
+# built and publishes them as a GitHub release. Tags with a hyphen
+# (v0.2.0-rc.1) become prereleases.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Check the tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: The tag matches the workspace version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)
+          if [ "v$version" != "${TAG%%-*}" ] && [ "v$version" != "$TAG" ]; then
+            echo "::error::Tag $TAG does not match the workspace version $version"
+            exit 1
+          fi
+
+  build:
+    name: Build (${{ matrix.target }})
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Keep line endings as committed
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v5
+      - name: Install the toolchain
+        shell: bash
+        run: |
+          rustup toolchain install
+          rustup target add ${{ matrix.target }}
+      - name: Install musl
+        if: contains(matrix.target, 'musl')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+      - name: Build
+        shell: bash
+        env:
+          # Static, and without paths of the build machine in the binary.
+          RUSTFLAGS: >-
+            ${{ contains(matrix.target, 'musl') && '-C target-feature=+crt-static' || '' }}
+            --remap-path-prefix=${{ github.workspace }}=.
+        run: cargo build --release --locked --target ${{ matrix.target }} -p onus-cli -p onus-plugin-svelte
+      - name: Smoke test
+        # The Intel macOS binary is cross-built on an Apple silicon runner.
+        if: matrix.target != 'x86_64-apple-darwin'
+        shell: bash
+        run: |
+          bin=target/${{ matrix.target }}/release
+          "$bin/onus" --version
+          "$bin/onus" map fixtures/shop/base > /dev/null
+      - name: Package
+        id: package
+        shell: bash
+        run: |
+          name=onus-${{ matrix.target }}
+          mkdir -p "dist/$name"
+          ext=""
+          case "${{ matrix.target }}" in *windows*) ext=".exe" ;; esac
+          for bin in onus onus-plugin-svelte; do
+            cp "target/${{ matrix.target }}/release/$bin$ext" "dist/$name/"
+          done
+          cp LICENSE NOTICE README.md CHANGELOG.md "dist/$name/"
+          cd dist
+          case "${{ matrix.target }}" in
+            *windows*)
+              7z a -tzip "$name.zip" "$name" > /dev/null
+              archive="$name.zip"
+              ;;
+            *)
+              tar -czf "$name.tar.gz" "$name"
+              archive="$name.tar.gz"
+              ;;
+          esac
+          if command -v sha256sum > /dev/null; then
+            sha256sum "$archive" > "$archive.sha256"
+          else
+            shasum -a 256 "$archive" > "$archive.sha256"
+          fi
+          echo "archive=dist/$archive" >> "$GITHUB_OUTPUT"
+      - uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: ${{ steps.package.outputs.archive }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: onus-${{ matrix.target }}
+          path: |
+            ${{ steps.package.outputs.archive }}
+            ${{ steps.package.outputs.archive }}.sha256
+          if-no-files-found: error
+
+  publish:
+    name: Publish the release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v5
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums and the installer
+        run: |
+          cp scripts/install.sh dist/install.sh
+          cd dist
+          sha256sum onus-*.tar.gz onus-*.zip install.sh > SHA256SUMS
+          cat SHA256SUMS
+      - name: Release notes from the changelog
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="${TAG#v}"
+          awk -v v="$version" '
+            /^## / { if (found) exit; if (index($0, "[" v "]") || index($0, " " v)) { found = 1; next } }
+            found { print }
+          ' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then
+            awk '/^## / { n++ } n == 1 && !/^## / { print }' CHANGELOG.md > notes.md
+          fi
+          {
+            echo
+            echo "### Install"
+            echo
+            echo '```sh'
+            echo "curl -fsSL https://onushq.com/install.sh | sh"
+            echo '```'
+            echo
+            echo "Or in a workflow: \`uses: onushq/onus/action@$TAG\`. Each archive is attested: \`gh attestation verify <archive> --repo onushq/onus\`."
+          } >> notes.md
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          flags=()
+          case "$TAG" in *-*) flags+=(--prerelease) ;; esac
+          gh release create "$TAG" dist/* --title "Onus $TAG" --notes-file notes.md --verify-tag "${flags[@]}"
