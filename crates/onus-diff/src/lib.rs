@@ -144,7 +144,7 @@ pub fn diff(input: &DiffInput) -> SemanticReport {
         .head_map
         .diagnostics
         .iter()
-        .filter(|d| changed.contains(d.file.as_str()))
+        .filter(|d| changed.contains(d.file.as_str()) || d.kind.starts_with("provider-"))
         .cloned()
         .collect();
     map_diagnostics.sort();

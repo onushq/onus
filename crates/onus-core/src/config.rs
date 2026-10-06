@@ -149,7 +149,8 @@ pub struct TestsConfig {
 
 /// The extractor settings handed to language adapters, with defaults and the
 /// built-in registry already merged in.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct ResolvedExtractors {
     pub publish_patterns: Vec<String>,
     pub subscribe_patterns: Vec<String>,
@@ -158,7 +159,8 @@ pub struct ResolvedExtractors {
     pub prisma_clients: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct ResolvedExternal {
     pub slug: String,
     pub spec: ExternalSpec,

@@ -1,90 +1,19 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "CodebaseMap",
-  "description": "The map of one tree of source files.",
+  "title": "PluginProtocol",
+  "description": "The request and response together, for schema generation.",
   "type": "object",
   "properties": {
-    "builtWith": {
-      "$ref": "#/$defs/BuiltWith"
+    "request": {
+      "$ref": "#/$defs/PluginRequest"
     },
-    "commit": {
-      "description": "The commit the map was built from, or a label such as `worktree`.",
-      "type": "string"
-    },
-    "components": {
-      "type": "array",
-      "items": {
-        "$ref": "#/$defs/Component"
-      }
-    },
-    "diagnostics": {
-      "type": "array",
-      "items": {
-        "$ref": "#/$defs/MapDiagnostic"
-      }
-    },
-    "edges": {
-      "type": "array",
-      "items": {
-        "$ref": "#/$defs/Edge"
-      }
-    },
-    "externals": {
-      "type": "array",
-      "items": {
-        "$ref": "#/$defs/ExternalService"
-      }
-    },
-    "files": {
-      "description": "Every analyzed source file, with the facts needed to tell formatting\nand moves apart from real edits.",
-      "type": "array",
-      "items": {
-        "$ref": "#/$defs/SourceFile"
-      }
-    },
-    "packages": {
-      "type": "array",
-      "items": {
-        "$ref": "#/$defs/PackageDep"
-      }
-    },
-    "rules": {
-      "type": "array",
-      "items": {
-        "$ref": "#/$defs/BoundaryRule"
-      }
-    },
-    "schemaVersion": {
-      "type": "integer",
-      "format": "uint32",
-      "minimum": 0
-    },
-    "symbols": {
-      "type": "array",
-      "items": {
-        "$ref": "#/$defs/SymbolNode"
-      }
-    },
-    "tests": {
-      "type": "array",
-      "items": {
-        "$ref": "#/$defs/TestNode"
-      }
+    "response": {
+      "$ref": "#/$defs/PluginResponse"
     }
   },
   "required": [
-    "schemaVersion",
-    "commit",
-    "builtWith",
-    "components",
-    "files",
-    "symbols",
-    "edges",
-    "externals",
-    "packages",
-    "tests",
-    "rules",
-    "diagnostics"
+    "request",
+    "response"
   ],
   "$defs": {
     "BodyFacts": {
@@ -124,49 +53,6 @@
           }
         }
       }
-    },
-    "BoundaryRule": {
-      "type": "object",
-      "properties": {
-        "confidence": {
-          "$ref": "#/$defs/Confidence"
-        },
-        "deny": {
-          "$ref": "#/$defs/RuleEndpoints"
-        },
-        "id": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "id",
-        "deny",
-        "confidence"
-      ]
-    },
-    "BuiltWith": {
-      "type": "object",
-      "properties": {
-        "configHash": {
-          "description": "sha256 of the `onus.yaml` used, or `inferred` when there was none.",
-          "type": "string"
-        },
-        "onus": {
-          "type": "string"
-        },
-        "providers": {
-          "description": "Every provider that contributed, with its version.",
-          "type": "object",
-          "additionalProperties": {
-            "type": "string"
-          }
-        }
-      },
-      "required": [
-        "onus",
-        "providers",
-        "configHash"
-      ]
     },
     "Comparison": {
       "type": "object",
@@ -386,19 +272,15 @@
         "reads-config"
       ]
     },
-    "ExternalService": {
+    "ExternalSpec": {
       "type": "object",
       "properties": {
         "category": {
-          "description": "`sms`, `email`, `payments`, `http`, …",
           "type": "string"
         },
-        "confidence": {
-          "$ref": "#/$defs/Confidence"
-        },
         "egress": {
-          "description": "Kinds of data that leave the system through this service.",
           "type": "array",
+          "default": [],
           "items": {
             "type": "string"
           }
@@ -409,51 +291,14 @@
             "type": "string"
           }
         },
-        "id": {
-          "description": "`external:<slug>`.",
-          "type": "string"
-        },
-        "packages": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "source": {
-          "$ref": "#/$defs/ExternalSource"
-        },
         "vendor": {
           "type": "string"
         }
       },
+      "additionalProperties": false,
       "required": [
-        "id",
         "vendor",
-        "category",
-        "egress",
-        "packages",
-        "hosts",
-        "source",
-        "confidence"
-      ]
-    },
-    "ExternalSource": {
-      "oneOf": [
-        {
-          "description": "From Onus's built-in registry of SDKs.",
-          "type": "string",
-          "const": "built-in"
-        },
-        {
-          "description": "From `extractors.externals` in `onus.yaml`.",
-          "type": "string",
-          "const": "declared"
-        },
-        {
-          "description": "Seen as a literal host in a `fetch`/`axios`/`got` call.",
-          "type": "string",
-          "const": "observed"
-        }
+        "category"
       ]
     },
     "FactSite": {
@@ -580,41 +425,6 @@
         "enum-member"
       ]
     },
-    "PackageDep": {
-      "type": "object",
-      "properties": {
-        "componentId": {
-          "type": "string"
-        },
-        "file": {
-          "description": "The `package.json` that declares it.",
-          "type": "string"
-        },
-        "line": {
-          "type": "integer",
-          "format": "uint32",
-          "minimum": 0
-        },
-        "name": {
-          "type": "string"
-        },
-        "section": {
-          "description": "`dependencies`, `devDependencies`, `peerDependencies` or\n`optionalDependencies`.",
-          "type": "string"
-        },
-        "version": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "componentId",
-        "name",
-        "version",
-        "section",
-        "file",
-        "line"
-      ]
-    },
     "Param": {
       "type": "object",
       "properties": {
@@ -639,21 +449,191 @@
         "optional"
       ]
     },
-    "RuleEndpoints": {
+    "PartialMap": {
+      "description": "The part of the map one provider contributes.",
       "type": "object",
       "properties": {
-        "from": {
-          "description": "A component id.",
-          "type": "string"
+        "diagnostics": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/MapDiagnostic"
+          }
         },
-        "to": {
-          "description": "A component id, or `<component>.internal` for its internal symbols.",
-          "type": "string"
+        "edges": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Edge"
+          }
+        },
+        "files": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/SourceFile"
+          }
+        },
+        "symbols": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/SymbolNode"
+          }
+        },
+        "tests": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/TestNode"
+          }
+        }
+      }
+    },
+    "PluginKind": {
+      "oneOf": [
+        {
+          "description": "Finds components.",
+          "type": "string",
+          "const": "discovery"
+        },
+        {
+          "description": "Turns the files it handles into symbols, references and tests.",
+          "type": "string",
+          "const": "language"
+        },
+        {
+          "description": "Adds facts to the map built so far.",
+          "type": "string",
+          "const": "facts"
+        }
+      ]
+    },
+    "PluginRequest": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/PluginKind"
+        },
+        "map": {
+          "description": "For `facts`: the map built so far.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PartialMap"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "protocol": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "workspace": {
+          "description": "For `language`, `files` lists only the files this plugin handles;\nevery file under `root` can still be read.",
+          "$ref": "#/$defs/Workspace"
         }
       },
       "required": [
-        "from",
-        "to"
+        "protocol",
+        "kind",
+        "workspace"
+      ]
+    },
+    "PluginResponse": {
+      "type": "object",
+      "properties": {
+        "components": {
+          "description": "For `discovery`.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Component"
+          }
+        },
+        "map": {
+          "description": "For `language` and `facts`.",
+          "$ref": "#/$defs/PartialMap",
+          "default": {
+            "diagnostics": [],
+            "edges": [],
+            "files": [],
+            "symbols": [],
+            "tests": []
+          }
+        },
+        "protocol": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "version": {
+          "description": "The plugin's own version, recorded in the map's `builtWith`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "protocol"
+      ]
+    },
+    "ResolvedExternal": {
+      "type": "object",
+      "properties": {
+        "declared": {
+          "type": "boolean"
+        },
+        "slug": {
+          "type": "string"
+        },
+        "spec": {
+          "$ref": "#/$defs/ExternalSpec"
+        }
+      },
+      "required": [
+        "slug",
+        "spec",
+        "declared"
+      ]
+    },
+    "ResolvedExtractors": {
+      "description": "The extractor settings handed to language adapters, with defaults and the\nbuilt-in registry already merged in.",
+      "type": "object",
+      "properties": {
+        "externals": {
+          "description": "npm package name → service.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ResolvedExternal"
+          }
+        },
+        "prismaClients": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "publishPatterns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "subscribePatterns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "publishPatterns",
+        "subscribePatterns",
+        "externals",
+        "prismaClients"
       ]
     },
     "ShapeKind": {
@@ -933,6 +913,95 @@
       "enum": [
         "public",
         "internal"
+      ]
+    },
+    "Workspace": {
+      "description": "Everything a provider needs to know about the tree it analyzes.",
+      "type": "object",
+      "properties": {
+        "components": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Component"
+          }
+        },
+        "extractors": {
+          "$ref": "#/$defs/ResolvedExtractors"
+        },
+        "files": {
+          "description": "Files to analyze, sorted by path. Paths are relative with `/`.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WorkspaceFile"
+          }
+        },
+        "packages": {
+          "description": "Workspace packages by name, so imports of `@shop/events` resolve to\nsource instead of third-party nodes.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/WorkspacePackage"
+          }
+        },
+        "root": {
+          "description": "Root of the tree. Providers read files below it and never write.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "root",
+        "files",
+        "components",
+        "packages",
+        "extractors"
+      ]
+    },
+    "WorkspaceFile": {
+      "type": "object",
+      "properties": {
+        "component": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "isTest": {
+          "type": "boolean"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "isTest"
+      ]
+    },
+    "WorkspacePackage": {
+      "type": "object",
+      "properties": {
+        "component": {
+          "type": "string"
+        },
+        "dir": {
+          "description": "Directory of the package, relative to the root.",
+          "type": "string"
+        },
+        "entrypoints": {
+          "description": "Source entrypoints, relative to the root.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "component",
+        "dir",
+        "entrypoints"
       ]
     }
   }

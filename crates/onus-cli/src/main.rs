@@ -62,6 +62,32 @@ struct Cli {
     command: Cmd,
 }
 
+/// Plugins and trusted mode (`onus help plugins`).
+#[derive(Debug, Clone, clap::Args)]
+struct ProviderArgs {
+    /// A plugins file listing language, framework, SCIP and LSP plugins
+    /// (default: $ONUS_PLUGINS). Never read from the analyzed repository.
+    #[arg(long, value_name = "FILE")]
+    plugins: Option<PathBuf>,
+    /// Allow plugins that may run code from the repository (indexers,
+    /// language servers). They run in a sandbox.
+    #[arg(long)]
+    trusted: bool,
+    /// With --trusted: allow them even when no sandbox is available.
+    #[arg(long, requires = "trusted")]
+    allow_unsandboxed: bool,
+}
+
+impl ProviderArgs {
+    fn load(&self) -> Result<onus_cli::Providers> {
+        onus_cli::Providers::load(
+            self.plugins.as_deref(),
+            self.trusted,
+            self.allow_unsandboxed,
+        )
+    }
+}
+
 #[derive(Debug, Subcommand)]
 enum Cmd {
     /// Build the codebase map of a directory.
@@ -85,6 +111,11 @@ Examples:
         /// Use this onus.yaml instead of the directory's own.
         #[arg(long, value_name = "FILE")]
         config: Option<PathBuf>,
+        /// Import a SCIP index of this directory (repeatable). Runs nothing.
+        #[arg(long, value_name = "FILE")]
+        scip: Vec<PathBuf>,
+        #[command(flatten)]
+        providers: ProviderArgs,
     },
     /// Report the changes in meaning between two directories.
     #[command(
@@ -111,6 +142,14 @@ Examples:
         /// Exit with code 2 when this is found. Repeat the flag or separate values with commas.
         #[arg(long, value_enum, value_delimiter = ',', value_name = "WHAT")]
         fail_on: Vec<FailOn>,
+        /// Import a SCIP index of the base directory (repeatable).
+        #[arg(long, value_name = "FILE")]
+        base_scip: Vec<PathBuf>,
+        /// Import a SCIP index of the head directory (repeatable).
+        #[arg(long, value_name = "FILE")]
+        head_scip: Vec<PathBuf>,
+        #[command(flatten)]
+        providers: ProviderArgs,
     },
     /// Report the changes in meaning between two git refs.
     #[command(
@@ -142,6 +181,8 @@ Examples:
         /// Exit with code 2 when this is found. Repeat the flag or separate values with commas.
         #[arg(long, value_enum, value_delimiter = ',', value_name = "WHAT")]
         fail_on: Vec<FailOn>,
+        #[command(flatten)]
+        providers: ProviderArgs,
     },
     /// Write a starter onus.yaml inferred from the repository.
     #[command(
@@ -221,7 +262,13 @@ fn intent(path: Option<&PathBuf>) -> Result<Option<onus_diff::Intent>> {
 
 fn run(cli: Cli) -> Result<i32> {
     match cli.command {
-        Cmd::Map { dir, json, config } => {
+        Cmd::Map {
+            dir,
+            json,
+            config,
+            scip,
+            providers,
+        } => {
             if !dir.is_dir() {
                 bail!("{} is not a directory", dir.display());
             }
@@ -229,7 +276,7 @@ fn run(cli: Cli) -> Result<i32> {
                 Some(p) => Some(onus_map::config::load(&p)?),
                 None => onus_map::config::load_from_tree(&dir)?,
             };
-            let map = onus_cli::build(&dir, cfg, None)?;
+            let map = onus_cli::build_with(&dir, cfg, None, &providers.load()?, &scip)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&map)?);
             } else {
@@ -244,6 +291,9 @@ fn run(cli: Cli) -> Result<i32> {
             intent: intent_path,
             config,
             fail_on,
+            base_scip,
+            head_scip,
+            providers,
         } => {
             let opts = DiffOptions {
                 config,
@@ -252,6 +302,9 @@ fn run(cli: Cli) -> Result<i32> {
                 head_label: "head".into(),
                 base_commit: None,
                 head_commit: None,
+                providers: providers.load()?,
+                base_scip,
+                head_scip,
             };
             let outcome = onus_cli::diff_dirs(&base, &head, &opts)?;
             print!("{}", outcome.render(format));
@@ -269,7 +322,9 @@ fn run(cli: Cli) -> Result<i32> {
             intent: intent_path,
             config,
             fail_on,
+            providers,
         } => {
+            let providers = providers.load()?;
             let b = onus_cli::materialize(&repo, &base)?;
             let h = onus_cli::materialize(&repo, &head)?;
             let opts = DiffOptions {
@@ -279,6 +334,9 @@ fn run(cli: Cli) -> Result<i32> {
                 head_label: onus_cli::ref_label(&head, &h.sha),
                 base_commit: Some(b.sha.clone()),
                 head_commit: Some(h.sha.clone()),
+                providers,
+                base_scip: vec![],
+                head_scip: vec![],
             };
             let outcome = onus_cli::diff_dirs(b.dir.path(), h.dir.path(), &opts)?;
             print!("{}", outcome.render(format));

@@ -76,7 +76,7 @@ fn build(root: &Path, files: &[(&str, &str)]) -> PartialMap {
             prisma_clients: vec!["prisma".into()],
         },
     };
-    TypeScriptAdapter.build(&ws)
+    TypeScriptAdapter.build(&ws).unwrap()
 }
 
 fn has_edge(m: &PartialMap, from: &str, to: &str, kind: EdgeKind) -> bool {

@@ -97,6 +97,11 @@
           "const": "declared"
         },
         {
+          "description": "Confirmed by the language's own compiler, indexer or language server.",
+          "type": "string",
+          "const": "compiler"
+        },
+        {
           "description": "Read directly from the syntax.",
           "type": "string",
           "const": "static"

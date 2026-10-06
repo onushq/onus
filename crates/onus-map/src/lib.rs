@@ -7,6 +7,8 @@ pub mod build;
 pub mod config;
 pub mod discover;
 pub mod init;
+pub mod merge;
+pub mod plugin;
 pub mod registry;
 pub mod walk;
 

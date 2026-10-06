@@ -26,6 +26,8 @@ tempfile.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
+protobuf.workspace = true
+scip.workspace = true
 
 [lints]
 workspace = true

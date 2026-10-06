@@ -5,6 +5,8 @@ use schemars::schema_for;
 use crate::change::SemanticReport;
 use crate::config::OnusConfig;
 use crate::map::CodebaseMap;
+use crate::plugins::PluginsFile;
+use crate::protocol::PluginProtocol;
 
 /// `(file name, pretty JSON)` for every published schema, in a fixed order.
 pub fn all_schemas() -> Vec<(&'static str, String)> {
@@ -20,6 +22,14 @@ pub fn all_schemas() -> Vec<(&'static str, String)> {
         (
             "onus-config.schema.json",
             serde_json::to_string_pretty(&schema_for!(OnusConfig)),
+        ),
+        (
+            "onus-plugins.schema.json",
+            serde_json::to_string_pretty(&schema_for!(PluginsFile)),
+        ),
+        (
+            "plugin-protocol.schema.json",
+            serde_json::to_string_pretty(&schema_for!(PluginProtocol)),
         ),
     ]
     .into_iter()

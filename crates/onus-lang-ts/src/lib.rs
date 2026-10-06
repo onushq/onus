@@ -36,7 +36,7 @@ pub const ROOT_COMPONENT: &str = "root";
 pub struct TypeScriptAdapter;
 
 impl LanguageAdapter for TypeScriptAdapter {
-    fn id(&self) -> &'static str {
+    fn id(&self) -> &str {
         "typescript"
     }
 
@@ -51,7 +51,7 @@ impl LanguageAdapter for TypeScriptAdapter {
         lang::is_source(path)
     }
 
-    fn build(&self, ws: &Workspace) -> PartialMap {
+    fn build(&self, ws: &Workspace) -> Result<PartialMap, onus_core::ProviderError> {
         let patterns = patterns(ws);
         let sources: Vec<&onus_core::WorkspaceFile> =
             ws.files.iter().filter(|f| self.handles(&f.path)).collect();
@@ -81,7 +81,7 @@ impl LanguageAdapter for TypeScriptAdapter {
             ws.files.iter().map(|f| f.path.clone()),
             ws.packages.clone(),
         );
-        Linker::new(ws, &facts, &resolver).link()
+        Ok(Linker::new(ws, &facts, &resolver).link())
     }
 }
 

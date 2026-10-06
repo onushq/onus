@@ -336,10 +336,17 @@ pub fn rows(ctx: &Ctx, pairs: &Pairs) -> Vec<SemanticChange> {
         }
         let deltas = vec![Delta::breaking(
             "export-removed",
-            format!(
-                "is removed from `{}`",
-                r.component_id.as_deref().unwrap_or("")
-            ),
+            if r.kind == SymbolKind::HttpRoute {
+                format!(
+                    "is no longer served by `{}`",
+                    r.component_id.as_deref().unwrap_or("")
+                )
+            } else {
+                format!(
+                    "is removed from `{}`",
+                    r.component_id.as_deref().unwrap_or("")
+                )
+            },
         )];
         rows.push(contract_row(
             ctx,
@@ -362,7 +369,11 @@ pub fn rows(ctx: &Ctx, pairs: &Pairs) -> Vec<SemanticChange> {
         if let [a] = symbols.as_slice() {
             let deltas = vec![Delta::additive(
                 "export-added",
-                format!("is a new export of `{component}`"),
+                if a.kind == SymbolKind::HttpRoute {
+                    format!("is a new HTTP route of `{component}`")
+                } else {
+                    format!("is a new export of `{component}`")
+                },
             )];
             rows.push(contract_row(
                 ctx,

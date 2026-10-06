@@ -13,14 +13,17 @@ authors.workspace = true
 globset.workspace = true
 ignore.workspace = true
 onus-core.workspace = true
+onus-lang-lsp.workspace = true
+onus-lang-scip.workspace = true
 onus-lang-ts.workspace = true
+schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml_ng.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-tempfile.workspace = true
 
 [lints]
 workspace = true

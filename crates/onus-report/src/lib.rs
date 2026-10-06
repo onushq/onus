@@ -265,6 +265,10 @@ pub fn to_markdown(report: &SemanticReport, rules_declared: bool) -> String {
         );
     } else {
         for d in &report.map_diagnostics {
+            if d.file.is_empty() {
+                let _ = writeln!(out, "- {}: {}", d.kind, d.message);
+                continue;
+            }
             let _ = writeln!(
                 out,
                 "- `{}:{}` {}: {} (confidence `{}`)",

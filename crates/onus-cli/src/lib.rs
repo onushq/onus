@@ -40,6 +40,34 @@ pub struct DiffOptions {
     pub head_label: String,
     pub base_commit: Option<String>,
     pub head_commit: Option<String>,
+    pub providers: Providers,
+    /// SCIP indexes of each tree, produced elsewhere.
+    pub base_scip: Vec<PathBuf>,
+    pub head_scip: Vec<PathBuf>,
+}
+
+/// Plugins and trusted mode (ADR 0006), the same for every tree.
+#[derive(Debug, Clone, Default)]
+pub struct Providers {
+    pub plugins: onus_map::plugin::PluginsFile,
+    pub trusted: bool,
+    pub allow_unsandboxed: bool,
+}
+
+impl Providers {
+    /// The plugins file from `--plugins`, else `ONUS_PLUGINS`, else none.
+    pub fn load(path: Option<&Path>, trusted: bool, allow_unsandboxed: bool) -> Result<Self> {
+        let from_env = std::env::var_os("ONUS_PLUGINS").map(PathBuf::from);
+        let plugins = match path.map(Path::to_path_buf).or(from_env) {
+            Some(p) => onus_map::plugin::load_plugins_file(&p)?,
+            None => Default::default(),
+        };
+        Ok(Providers {
+            plugins,
+            trusted,
+            allow_unsandboxed,
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -73,12 +101,26 @@ pub fn build(
     config: Option<LoadedConfig>,
     commit: Option<String>,
 ) -> Result<CodebaseMap> {
+    build_with(root, config, commit, &Providers::default(), &[])
+}
+
+pub fn build_with(
+    root: &Path,
+    config: Option<LoadedConfig>,
+    commit: Option<String>,
+    providers: &Providers,
+    scip: &[PathBuf],
+) -> Result<CodebaseMap> {
     Ok(onus_map::build_map(
         root,
         &BuildOptions {
             config,
             ignore_tree_config: true,
             commit,
+            plugins: providers.plugins.clone(),
+            trusted: providers.trusted,
+            allow_unsandboxed: providers.allow_unsandboxed,
+            scip_indexes: scip.to_vec(),
         },
     )?)
 }
@@ -92,8 +134,20 @@ pub fn diff_dirs(base: &Path, head: &Path, opts: &DiffOptions) -> Result<Outcome
         bail!("head directory {} does not exist", head.display());
     }
     let config = diff_config(base, opts.config.as_deref())?;
-    let base_map = build(base, config.clone(), opts.base_commit.clone())?;
-    let head_map = build(head, config.clone(), opts.head_commit.clone())?;
+    let base_map = build_with(
+        base,
+        config.clone(),
+        opts.base_commit.clone(),
+        &opts.providers,
+        &opts.base_scip,
+    )?;
+    let head_map = build_with(
+        head,
+        config.clone(),
+        opts.head_commit.clone(),
+        &opts.providers,
+        &opts.head_scip,
+    )?;
     let report = onus_diff::diff(&DiffInput {
         base_root: base,
         head_root: head,

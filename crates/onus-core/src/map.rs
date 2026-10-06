@@ -20,6 +20,8 @@ pub const SCHEMA_VERSION: u32 = 1;
 pub enum Confidence {
     /// Written down by a person in `onus.yaml`.
     Declared,
+    /// Confirmed by the language's own compiler, indexer or language server.
+    Compiler,
     /// Read directly from the syntax.
     Static,
     /// Observed at runtime (later phases).
@@ -34,6 +36,7 @@ impl Confidence {
     pub fn as_str(self) -> &'static str {
         match self {
             Confidence::Declared => "declared",
+            Confidence::Compiler => "compiler",
             Confidence::Static => "static",
             Confidence::Traced => "traced",
             Confidence::Inferred => "inferred",
@@ -67,7 +70,8 @@ pub struct CodebaseMap {
 #[serde(rename_all = "camelCase")]
 pub struct BuiltWith {
     pub onus: String,
-    pub adapters: BTreeMap<String, String>,
+    /// Every provider that contributed, with its version.
+    pub providers: BTreeMap<String, String>,
     /// sha256 of the `onus.yaml` used, or `inferred` when there was none.
     pub config_hash: String,
 }
