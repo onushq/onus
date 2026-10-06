@@ -458,6 +458,7 @@ onus/
     onus-lang-scip/  # SCIP index import (compiler-backed facts)
     onus-lang-lsp/   # LSP bridge for any language server
     onus-plugin-example/  # reference plugin (not published)
+    onus-plugin-svelte/   # Svelte components, as a language plugin
     onus-testkit/    # test doubles (not published)
     onus-map/        # workspace discovery, adapters + declared layer -> CodebaseMap; caching
     onus-diff/       # semantic diff, classification, rules, intent check

@@ -140,6 +140,15 @@ What an index adds:
 
 For languages without an indexer, the LSP bridge starts the server, opens each file it handles, waits until the server has finished loading the project (it follows the server's progress reports), and asks for document symbols and, where the server supports it, the call hierarchy. Symbols become map symbols (their detail, usually the signature, is the shape); outgoing calls become `calls` edges with confidence `compiler`. Language servers answer one request at a time, so an index is faster on large repositories. Measured: the bridge itself handles about 15,000 requests a second, so the server sets the pace; pyright (`pyright-langserver --stdio`, language id `python`) mapped a generated 500-file, 35,000-line project in 2.6 seconds, and rust-analyzer (`rust-analyzer`, language id `rust`) mapped one Rust crate in 4.5 seconds, most of it loading the Cargo workspace.
 
+## Svelte
+
+Svelte components are supported by a plugin that ships with Onus, `onus-plugin-svelte`:
+
+    plugins:
+      - { name: svelte, kind: language, command: [onus-plugin-svelte], files: ["**/*.svelte"] }
+
+It analyzes each component's `<script>` blocks with the TypeScript adapter, together with the repository's TypeScript files, so imports such as `$lib/api` resolve and line numbers are exact. Expressions in the markup are not analyzed, but a change to the markup is still a change: components are compared whole. It reads files only, so it needs no trusted mode.
+
 ## Writing a plugin
 
 A plugin is any program. Onus starts its command, writes one JSON request to its stdin and reads one JSON response from its stdout; anything on stderr is shown if the plugin fails. The protocol is versioned and published as schemas/plugin-protocol.schema.json.
