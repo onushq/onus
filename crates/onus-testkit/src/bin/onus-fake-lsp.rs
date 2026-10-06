@@ -64,6 +64,8 @@ fn main() {
     let stdin = std::io::stdin();
     let mut reader = BufReader::new(stdin.lock());
     let mut docs: BTreeMap<String, String> = BTreeMap::new();
+    // Function name → (uri, line), so call hierarchy answers are instant.
+    let mut index: BTreeMap<String, (String, u64)> = BTreeMap::new();
     let mut loaded_at: Option<std::time::Instant> = None;
     while let Some(msg) = read(&mut reader) {
         let loaded =
@@ -96,10 +98,12 @@ fn main() {
             }
             "textDocument/didOpen" => {
                 let d = &msg["params"]["textDocument"];
-                docs.insert(
-                    d["uri"].as_str().unwrap_or("").into(),
-                    d["text"].as_str().unwrap_or("").into(),
-                );
+                let uri: String = d["uri"].as_str().unwrap_or("").into();
+                let text: String = d["text"].as_str().unwrap_or("").into();
+                for (name, line, _) in functions(&text) {
+                    index.insert(name, (uri.clone(), line));
+                }
+                docs.insert(uri, text);
                 continue;
             }
             "textDocument/documentSymbol" => {
@@ -148,13 +152,11 @@ fn main() {
                     .unwrap_or_default();
                 let mut out = Vec::new();
                 for (target, at) in calls {
-                    for (turi, ttext) in &docs {
-                        if let Some(f) = functions(ttext).into_iter().find(|f| f.0 == target) {
-                            out.push(json!({
-                                "to": { "name": target, "kind": 12, "uri": turi, "range": range(f.1), "selectionRange": range(f.1) },
-                                "fromRanges": [range(at)],
-                            }));
-                        }
+                    if let Some((turi, line)) = index.get(&target) {
+                        out.push(json!({
+                            "to": { "name": target, "kind": 12, "uri": turi, "range": range(*line), "selectionRange": range(*line) },
+                            "fromRanges": [range(at)],
+                        }));
                     }
                 }
                 Value::Array(out)

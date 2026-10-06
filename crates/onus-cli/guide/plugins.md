@@ -129,6 +129,8 @@ SCIP indexers index a whole repository in one pass:
 
 Flags change between releases; check each indexer's documentation for the current ones.
 
+Tried: rust-analyzer indexed the Onus repository in about 3.5 seconds inside the macOS sandbox, and scip-typescript indexed an 8,500-file TypeScript monorepo in about 20 seconds, adding 10,600 compiler-confirmed references.
+
 What an index adds:
 
 - for files another provider analyzed: references that provider missed, such as a method call through a variable, and confirmation of the ones it found (confidence `compiler`);
@@ -136,7 +138,7 @@ What an index adds:
 
 ## Language servers
 
-For languages without an indexer, the LSP bridge starts the server, opens each file it handles, waits until the server has finished loading the project (it follows the server's progress reports), and asks for document symbols and, where the server supports it, the call hierarchy. Symbols become map symbols (their detail, usually the signature, is the shape); outgoing calls become `calls` edges with confidence `compiler`. Language servers answer one request at a time, so this is slower than an index on large repositories. Tried with rust-analyzer (`rust-analyzer`, language id `rust`) and pyright (`pyright-langserver --stdio`, language id `python`).
+For languages without an indexer, the LSP bridge starts the server, opens each file it handles, waits until the server has finished loading the project (it follows the server's progress reports), and asks for document symbols and, where the server supports it, the call hierarchy. Symbols become map symbols (their detail, usually the signature, is the shape); outgoing calls become `calls` edges with confidence `compiler`. Language servers answer one request at a time, so an index is faster on large repositories. Measured: the bridge itself handles about 15,000 requests a second, so the server sets the pace; pyright (`pyright-langserver --stdio`, language id `python`) mapped a generated 500-file, 35,000-line project in 2.6 seconds, and rust-analyzer (`rust-analyzer`, language id `rust`) mapped one Rust crate in 4.5 seconds, most of it loading the Cargo workspace.
 
 ## Writing a plugin
 
