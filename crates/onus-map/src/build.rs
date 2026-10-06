@@ -380,7 +380,14 @@ pub fn build_map(root: &Path, opts: &BuildOptions) -> Result<CodebaseMap, MapErr
         c.owners.sort();
         // Applications have no public surface by design; only libraries
         // without an entrypoint are worth a note.
-        if c.public_entrypoints.is_empty() && c.kind == onus_core::ComponentKind::Package {
+        let js_package = file_set.contains(&discover::join_dir(
+            &component_dir(&c.roots),
+            "package.json",
+        ));
+        if c.public_entrypoints.is_empty()
+            && c.kind == onus_core::ComponentKind::Package
+            && js_package
+        {
             diagnostics.push(MapDiagnostic {
                 kind: "no-entrypoint".into(),
                 file: component_dir(&c.roots),

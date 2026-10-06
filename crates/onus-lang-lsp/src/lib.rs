@@ -82,6 +82,11 @@ struct Session {
     deadline: Instant,
     root: PathBuf,
     root_canonical: PathBuf,
+    /// Work-done progress the server has begun and not yet ended.
+    busy: BTreeSet<String>,
+    /// rust-analyzer's `experimental/serverStatus`: quiescent or not.
+    quiescent: Option<bool>,
+    last_activity: Instant,
 }
 
 impl Session {
@@ -123,6 +128,9 @@ impl Session {
             deadline: Instant::now() + timeout,
             root: root.to_path_buf(),
             root_canonical,
+            busy: BTreeSet::new(),
+            quiescent: None,
+            last_activity: Instant::now(),
         })
     }
 
@@ -135,6 +143,67 @@ impl Session {
 
     fn notify(&mut self, method: &str, params: Value) -> Result<(), ProviderError> {
         self.send(&json!({ "jsonrpc": "2.0", "method": method, "params": params }))
+    }
+
+    /// Notes progress and answers the server's own requests, so it never
+    /// stalls waiting for the client.
+    fn handle(&mut self, msg: &Value) -> Result<(), ProviderError> {
+        match msg.get("method").and_then(Value::as_str) {
+            Some("$/progress") => {
+                let token = msg["params"]["token"].to_string();
+                match msg["params"]["value"]["kind"].as_str() {
+                    Some("begin") => {
+                        self.busy.insert(token);
+                    }
+                    Some("end") => {
+                        self.busy.remove(&token);
+                    }
+                    _ => {}
+                }
+                self.last_activity = Instant::now();
+            }
+            Some("experimental/serverStatus") => {
+                self.quiescent = msg["params"]["quiescent"].as_bool();
+                self.last_activity = Instant::now();
+            }
+            _ => {}
+        }
+        if let (Some(server_id), Some(server_method)) = (msg.get("id"), msg.get("method")) {
+            let result = if server_method == "workspace/configuration" {
+                let n = msg["params"]["items"].as_array().map_or(0, Vec::len);
+                Value::Array(vec![Value::Null; n])
+            } else {
+                Value::Null
+            };
+            self.send(&json!({ "jsonrpc": "2.0", "id": server_id, "result": result }))?;
+        }
+        Ok(())
+    }
+
+    /// Waits until the server has finished loading the project: no
+    /// progress under way, and quiet for a moment. Servers that report no
+    /// progress are given `min`.
+    fn wait_until_idle(&mut self, min: Duration, settle: Duration) -> Result<(), ProviderError> {
+        let start = Instant::now();
+        loop {
+            let now = Instant::now();
+            if now >= self.deadline {
+                return Err(ProviderError::Failed(
+                    "language server did not finish loading the project in time".into(),
+                ));
+            }
+            let busy = !self.busy.is_empty() || self.quiescent == Some(false);
+            if !busy && now - start >= min && now - self.last_activity >= settle {
+                return Ok(());
+            }
+            match self.messages.recv_timeout(Duration::from_millis(50)) {
+                Ok(msg) => self.handle(&msg)?,
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(ProviderError::Failed("language server exited".into()));
+                }
+            }
+        }
     }
 
     /// Sends a request and waits for its response, answering the server's
@@ -160,16 +229,7 @@ impl Session {
                 }
                 return Ok(msg.get("result").cloned().unwrap_or(Value::Null));
             }
-            if let (Some(server_id), Some(server_method)) = (msg.get("id"), msg.get("method")) {
-                // The server asks something of the client: answer neutrally.
-                let result = if server_method == "workspace/configuration" {
-                    let n = msg["params"]["items"].as_array().map_or(0, Vec::len);
-                    Value::Array(vec![Value::Null; n])
-                } else {
-                    Value::Null
-                };
-                self.send(&json!({ "jsonrpc": "2.0", "id": server_id, "result": result }))?;
-            }
+            self.handle(&msg)?;
         }
     }
 
@@ -353,7 +413,9 @@ fn map_files(
                 "textDocument": {
                     "documentSymbol": { "hierarchicalDocumentSymbolSupport": true },
                     "callHierarchy": {}
-                }
+                },
+                "window": { "workDoneProgress": true },
+                "experimental": { "serverStatusNotification": true }
             }
         }),
     )?;
@@ -379,8 +441,8 @@ fn map_files(
         }
     };
 
-    let mut out = PartialMap::default();
-    let mut found: BTreeMap<String, Vec<Found>> = BTreeMap::new();
+    // Open every file, let the server load the project, then ask.
+    let mut texts: BTreeMap<String, (Vec<u8>, String)> = BTreeMap::new();
     for f in &ws.files {
         let bytes = std::fs::read(onus_core::paths::native(&ws.root, &f.path)).unwrap_or_default();
         let text = String::from_utf8_lossy(&bytes).into_owned();
@@ -389,6 +451,15 @@ fn map_files(
             "textDocument/didOpen",
             json!({ "textDocument": { "uri": uri, "languageId": language_id, "version": 1, "text": text } }),
         )?;
+        texts.insert(f.path.clone(), (bytes, text));
+    }
+    s.wait_until_idle(Duration::from_millis(500), Duration::from_millis(300))?;
+
+    let mut out = PartialMap::default();
+    let mut found: BTreeMap<String, Vec<Found>> = BTreeMap::new();
+    for f in &ws.files {
+        let (bytes, text) = texts.remove(&f.path).unwrap_or_default();
+        let uri = s.uri(&f.path);
         let result = s.request(
             "textDocument/documentSymbol",
             json!({ "textDocument": { "uri": uri } }),

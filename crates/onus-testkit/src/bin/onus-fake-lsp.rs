@@ -2,7 +2,9 @@
 //! language where `fn name` starts a function and `call target` inside it
 //! calls another function, and it answers `documentSymbol`,
 //! `prepareCallHierarchy` and `callHierarchy/outgoingCalls`. It also asks
-//! the client one question of its own, as real servers do.
+//! the client one question of its own, and, like real servers, reports
+//! loading the project as work-done progress; until loading ends it knows
+//! no calls.
 #![allow(clippy::print_stdout)]
 
 use std::collections::BTreeMap;
@@ -32,7 +34,7 @@ fn read(reader: &mut impl BufRead) -> Option<Value> {
 
 fn send(v: &Value) {
     let body = v.to_string();
-    let mut out = std::io::stdout();
+    let mut out = std::io::stdout().lock();
     let _ = write!(out, "Content-Length: {}\r\n\r\n{body}", body.len());
     let _ = out.flush();
 }
@@ -62,7 +64,10 @@ fn main() {
     let stdin = std::io::stdin();
     let mut reader = BufReader::new(stdin.lock());
     let mut docs: BTreeMap<String, String> = BTreeMap::new();
+    let mut loaded_at: Option<std::time::Instant> = None;
     while let Some(msg) = read(&mut reader) {
+        let loaded =
+            loaded_at.is_some_and(|t| t.elapsed() >= std::time::Duration::from_millis(300));
         let method = msg["method"].as_str().unwrap_or("");
         let id = msg.get("id").cloned();
         let result = match method {
@@ -73,6 +78,20 @@ fn main() {
                 send(
                     &json!({ "jsonrpc": "2.0", "id": 9000, "method": "workspace/configuration", "params": { "items": [{}] } }),
                 );
+                send(
+                    &json!({ "jsonrpc": "2.0", "id": 9001, "method": "window/workDoneProgress/create", "params": { "token": "load" } }),
+                );
+                send(
+                    &json!({ "jsonrpc": "2.0", "method": "$/progress", "params": { "token": "load", "value": { "kind": "begin", "title": "Loading" } } }),
+                );
+                loaded_at = Some(std::time::Instant::now());
+                // Report the end of loading from another thread, later.
+                std::thread::spawn(|| {
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    send(
+                        &json!({ "jsonrpc": "2.0", "method": "$/progress", "params": { "token": "load", "value": { "kind": "end" } } }),
+                    );
+                });
                 continue;
             }
             "textDocument/didOpen" => {
@@ -114,6 +133,7 @@ fn main() {
                     None => json!([]),
                 }
             }
+            "callHierarchy/outgoingCalls" if !loaded => json!([]),
             "callHierarchy/outgoingCalls" => {
                 let item = &msg["params"]["item"];
                 let uri = item["uri"].as_str().unwrap_or("");
