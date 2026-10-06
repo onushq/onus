@@ -247,7 +247,10 @@ impl Runner {
         let out = reader.join().unwrap_or_default();
         let err = err_reader.join().unwrap_or_default();
         if !status.success() {
-            let msg = String::from_utf8_lossy(&err);
+            // Keep machine-specific paths out of the map.
+            let msg = String::from_utf8_lossy(&err)
+                .replace(&*prepared.out.path().to_string_lossy(), "{out}")
+                .replace(&*root.to_string_lossy(), "{root}");
             let msg = msg.trim();
             return Err(ProviderError::Failed(format!(
                 "`{program}` exited with {status}{}",

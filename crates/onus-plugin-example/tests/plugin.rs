@@ -121,3 +121,30 @@ fn plugins_that_run_repo_code_are_skipped_without_trusted_mode() {
         .expect("a note that the plugin was skipped");
     assert!(note.message.contains("--trusted"), "{}", note.message);
 }
+
+#[test]
+fn plugins_get_an_absolute_root_when_onus_is_given_a_relative_one() {
+    // Tests run in the package directory; make the path relative to it.
+    let work = tempfile::tempdir_in(".").unwrap();
+    let cwd = std::env::current_dir().unwrap().canonicalize().unwrap();
+    let absolute = work.path().canonicalize().unwrap().join("repo");
+    let root = absolute.strip_prefix(&cwd).unwrap().to_path_buf();
+    assert!(root.is_relative());
+    tree(&root);
+    let plugins = load_plugins_file(&plugins_file(work.path(), "")).unwrap();
+    let map = onus_map::build_map(
+        &root,
+        &BuildOptions {
+            plugins,
+            ..BuildOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        map.symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::HttpRoute)
+            .count(),
+        2
+    );
+}

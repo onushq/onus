@@ -65,6 +65,11 @@ fn provider_note(id: &str, err: &ProviderError) -> MapDiagnostic {
 /// Builds the map of the tree at `root`. Built-in providers only read
 /// files; plugins run only as `opts` allows (ADR 0006).
 pub fn build_map(root: &Path, opts: &BuildOptions) -> Result<CodebaseMap, MapError> {
+    // Providers and plugins get an absolute root: plugins run inside it, and
+    // language servers need file URIs. Nothing absolute reaches the map.
+    let absolute =
+        std::path::absolute(root).map_err(|e| MapError::Io(format!("{}: {e}", root.display())))?;
+    let root = absolute.as_path();
     let loaded = match &opts.config {
         Some(c) => Some(c.clone()),
         None if opts.ignore_tree_config => None,
