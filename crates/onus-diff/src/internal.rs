@@ -92,6 +92,17 @@ struct Bucket {
     base_lines: BTreeMap<String, BTreeSet<u32>>,
     tests: bool,
     code: bool,
+    docs: bool,
+}
+
+/// Prose rather than code: Markdown, text and files under `docs/`.
+pub fn is_docs(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    [".md", ".mdx", ".markdown", ".txt", ".rst", ".adoc"]
+        .iter()
+        .any(|e| lower.ends_with(e))
+        || lower.starts_with("docs/")
+        || lower.contains("/docs/")
 }
 
 pub fn rows(
@@ -191,6 +202,8 @@ pub fn rows(
         }
         if ctx.is_test_file(&f.path) {
             b.tests = true;
+        } else if is_docs(&f.path) {
+            b.docs = true;
         } else {
             b.code = true;
         }
@@ -216,10 +229,15 @@ pub fn rows(
     let mut rows = Vec::new();
     for (comp, b) in buckets {
         let total = b.added + b.removed;
-        let what = match (b.code, b.tests) {
-            (true, true) => "code and tests",
-            (false, true) => "tests",
-            _ => "code",
+        let kinds: Vec<String> = [(b.code, "code"), (b.tests, "tests"), (b.docs, "docs")]
+            .iter()
+            .filter(|(present, _)| *present)
+            .map(|(_, name)| name.to_string())
+            .collect();
+        let what = if kinds.is_empty() {
+            "code".to_string()
+        } else {
+            join_and(&kinds)
         };
         let place = if comp == "root" {
             "at the repository root".to_string()

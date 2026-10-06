@@ -290,6 +290,61 @@ pub fn ranges(lines: &BTreeSet<u32>) -> Vec<(u32, u32)> {
     out
 }
 
+/// Merges rows that share a component and subkind into one row when there
+/// are at least two: `title` gets the count and the component, `items` the
+/// per-row detail shown in the "why".
+pub fn group_rows(
+    rows: Vec<SemanticChange>,
+    groupable: impl Fn(&SemanticChange) -> bool,
+    title: impl Fn(&SemanticChange, usize, &str) -> String,
+    item: impl Fn(&SemanticChange) -> String,
+    why: impl Fn(&SemanticChange, &str) -> String,
+) -> Vec<SemanticChange> {
+    let mut out = Vec::new();
+    let mut groups: BTreeMap<(Option<String>, String), Vec<SemanticChange>> = BTreeMap::new();
+    for r in rows {
+        if groupable(&r) {
+            groups
+                .entry((r.component.clone(), r.subkind.clone()))
+                .or_default()
+                .push(r);
+        } else {
+            out.push(r);
+        }
+    }
+    for ((component, subkind), mut members) in groups {
+        if members.len() == 1 {
+            out.extend(members);
+            continue;
+        }
+        members.sort_by(|a, b| a.id.cmp(&b.id));
+        let place = match component.as_deref() {
+            Some(c) if c != "root" => format!("in `{c}`"),
+            _ => "at the repository root".to_string(),
+        };
+        let items: Vec<String> = members.iter().map(&item).collect();
+        let first = &members[0];
+        let mut row = first.clone();
+        row.title = title(first, members.len(), &place);
+        row.why_it_matters = why(first, &join_some(&items, 4));
+        row.subject = component.clone().unwrap_or_else(|| "root".into());
+        row.id = format!("{subkind}:{}", row.subject);
+        row.locations = members.iter().flat_map(|m| m.locations.clone()).collect();
+        row.locations.sort();
+        row.locations.dedup();
+        row.hints.novelty = members
+            .iter()
+            .flat_map(|m| m.hints.novelty.clone())
+            .collect();
+        row.hints.novelty.sort();
+        row.hints.novelty.dedup();
+        row.hints.rules_of_the_game = members.iter().any(|m| m.hints.rules_of_the_game);
+        row.hints.needs_person = members.iter().any(|m| m.hints.needs_person);
+        out.push(row);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

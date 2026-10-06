@@ -173,7 +173,9 @@ pub fn build_map(root: &Path, opts: &BuildOptions) -> Result<CodebaseMap, MapErr
     let mut diagnostics = partial.diagnostics;
     for c in &mut components {
         c.owners.sort();
-        if c.public_entrypoints.is_empty() {
+        // Applications have no public surface by design; only libraries
+        // without an entrypoint are worth a note.
+        if c.public_entrypoints.is_empty() && c.kind == onus_core::ComponentKind::Package {
             diagnostics.push(MapDiagnostic {
                 kind: "no-entrypoint".into(),
                 file: component_dir(&c.roots),

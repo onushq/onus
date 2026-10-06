@@ -59,22 +59,50 @@ pub fn discover(root: &Path, files: &[String], config: Option<&OnusConfig>) -> D
             source: "onus.yaml",
         };
     }
+    let nx = nx_projects(root, files);
     let (dirs, source) = match workspace_dirs(root, files) {
-        Some(d) if !d.is_empty() => (d, "workspaces"),
+        Some(d) if !d.is_empty() => (d, if nx.is_empty() { "workspaces" } else { "nx" }),
+        _ if !nx.is_empty() => (vec![], "nx"),
         _ => (fallback_dirs(files), "folders"),
     };
-    let ids = component_ids(&dirs);
-    let mut components: Vec<Component> = dirs
+    // Nx projects are the architectural units when present; workspace
+    // packages that are not also Nx projects stay as coarser components.
+    // For any file, the most specific component wins.
+    let nx_dirs: BTreeSet<&str> = nx.iter().map(|p| p.dir.as_str()).collect();
+    let mut taken: BTreeSet<String> = nx.iter().map(|p| p.id.clone()).collect();
+    let rest: Vec<String> = dirs
+        .into_iter()
+        .filter(|d| !nx_dirs.contains(d.as_str()))
+        .collect();
+    let rest_ids: Vec<String> = component_ids(&rest)
+        .into_iter()
+        .zip(&rest)
+        .map(|(id, dir)| {
+            if taken.contains(&id) {
+                onus_core::ids::slug(dir)
+            } else {
+                id
+            }
+        })
+        .collect();
+    let mut all: Vec<(String, String, ComponentKind)> = nx
         .iter()
-        .zip(ids)
-        .map(|(dir, id)| {
-            let pkg = read_package_json(root, dir);
+        .map(|p| (p.dir.clone(), p.id.clone(), p.kind))
+        .collect();
+    for (dir, id) in rest.iter().zip(rest_ids) {
+        taken.insert(id.clone());
+        all.push((dir.clone(), id, kind_for(dir)));
+    }
+    let mut components: Vec<Component> = all
+        .into_iter()
+        .map(|(dir, id, kind)| {
+            let pkg = read_package_json(root, &dir);
             Component {
                 id,
-                kind: kind_for(dir),
+                kind,
                 roots: vec![format!("{dir}/**")],
-                public_entrypoints: infer_entrypoints(dir, pkg.as_ref(), files),
-                owners: owners.owners_of(dir),
+                public_entrypoints: infer_entrypoints(&dir, pkg.as_ref(), files),
+                owners: owners.owners_of(&dir),
                 labels: vec![],
                 package_name: pkg.as_ref().and_then(package_name),
                 confidence: Confidence::Inferred,
@@ -83,6 +111,60 @@ pub fn discover(root: &Path, files: &[String], config: Option<&OnusConfig>) -> D
         .collect();
     components.sort_by(|a, b| a.id.cmp(&b.id));
     Discovered { components, source }
+}
+
+/// An Nx project: a folder with a `project.json`, in a repository with an
+/// `nx.json` at its root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NxProject {
+    pub dir: String,
+    pub id: String,
+    pub kind: ComponentKind,
+}
+
+pub fn nx_projects(root: &Path, files: &[String]) -> Vec<NxProject> {
+    if !files.iter().any(|f| f == "nx.json") {
+        return vec![];
+    }
+    let mut out: Vec<NxProject> = Vec::new();
+    let mut seen = BTreeSet::new();
+    for f in files {
+        let Some(dir) = f.strip_suffix("/project.json") else {
+            continue;
+        };
+        let json = read_json(root, f);
+        let name = json
+            .as_ref()
+            .and_then(|j| j.get("name"))
+            .and_then(|n| n.as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| dir.rsplit('/').next().unwrap_or(dir).to_string());
+        // Component ids may not contain `:`, `#`, `/` or spaces.
+        let mut id = if name.is_empty() || name.contains([':', '#', '/', ' ']) {
+            onus_core::ids::slug(&name)
+        } else {
+            name
+        };
+        if id.is_empty() || !seen.insert(id.clone()) {
+            id = onus_core::ids::slug(dir);
+            seen.insert(id.clone());
+        }
+        let kind = match json
+            .as_ref()
+            .and_then(|j| j.get("projectType"))
+            .and_then(|t| t.as_str())
+        {
+            Some("application") => ComponentKind::Service,
+            Some("library") => ComponentKind::Package,
+            _ => kind_for(dir),
+        };
+        out.push(NxProject {
+            dir: dir.to_string(),
+            id,
+            kind,
+        });
+    }
+    out
 }
 
 fn sorted(mut v: Vec<String>) -> Vec<String> {
@@ -592,6 +674,72 @@ mod tests {
         );
         assert_eq!(resolve_catalog(&c, "react", "catalog:"), None);
         assert_eq!(resolve_catalog(&c, "zod", "^3.0.0"), None);
+    }
+
+    #[test]
+    fn nx_projects_become_components_inside_workspace_packages() {
+        let tmp = tempfile::tempdir().unwrap();
+        let files: Vec<String> = [
+            "nx.json",
+            "package.json",
+            "libs/network/package.json",
+            "libs/network/domain/project.json",
+            "libs/network/domain/src/index.ts",
+            "apps/agent/desktop/project.json",
+            "apps/agent/desktop/src/main.ts",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        for f in &files {
+            let p = tmp.path().join(f);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, "{}").unwrap();
+        }
+        std::fs::write(
+            tmp.path().join("package.json"),
+            r#"{"workspaces":["libs/*"]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("libs/network/domain/project.json"),
+            r#"{"name":"network-domain","projectType":"library"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("apps/agent/desktop/project.json"),
+            r#"{"name":"agent-desktop","projectType":"application"}"#,
+        )
+        .unwrap();
+        let d = discover(tmp.path(), &files, None);
+        assert_eq!(d.source, "nx");
+        let ids: Vec<(&str, ComponentKind, &str)> = d
+            .components
+            .iter()
+            .map(|c| (c.id.as_str(), c.kind, c.roots[0].as_str()))
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                (
+                    "agent-desktop",
+                    ComponentKind::Service,
+                    "apps/agent/desktop/**"
+                ),
+                ("network", ComponentKind::Package, "libs/network/**"),
+                (
+                    "network-domain",
+                    ComponentKind::Package,
+                    "libs/network/domain/**"
+                ),
+            ]
+        );
+        let m = ComponentMatcher::new(&d.components);
+        assert_eq!(
+            m.component_of("libs/network/domain/src/index.ts")
+                .as_deref(),
+            Some("network-domain")
+        );
     }
 
     #[test]

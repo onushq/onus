@@ -63,8 +63,10 @@ Renaming a parameter is not a contract change. When a contract declared in onus.
 |---|---|---|
 | rename | internal | A symbol is renamed with an identical body. The row counts the call sites and files updated. |
 | rename-incomplete | breaking | The same, but some references still use the old name. |
+| moved-between-components | internal or breaking | Symbols moved from one component to another: one row per pair of components ("17 symbols moved from `meeting-abstractions` to `infrastructure-gemini-live`"). Symbols edited while moving (same name and kind, most members in common) are included, and their contract changes are listed in the row; breaking when any of those changes is breaking. The row also says when the old component no longer exports them. |
+| moved-incomplete | breaking | The same, but some references still point at the old place. |
 
-A symbol or file that moved without other changes, and a file whose only changes are formatting, comments or import paths, is not a row: it is listed under "Structure only".
+A symbol or file that moved inside one component without other changes, and a file whose only changes are formatting, comments or import paths, is not a row: it is listed under "Structure only".
 
 ## Dependencies
 
@@ -126,7 +128,19 @@ Found in functions and methods that exist on both sides. Security-sensitive in a
 
 | Subkind | Kind | When |
 |---|---|---|
-| internal-changes | internal | The changed lines of a component that no other row explains, with their count. |
+| internal-changes | internal | The changed lines of a component that no other row explains, with their count, labeled as code, tests or docs. |
+
+## Grouped rows
+
+To keep large changes readable, Onus merges rows that say the same thing:
+
+- Several config files of one kind in one component are one row ("Build config: 3 files changed in `infrastructure-gemini-live`").
+- Packages already used elsewhere in the repository, dropped packages and version changes are one row per component ("2 npm packages already used in this repository added in `c`"). A package new to the repository always keeps its own row.
+- When the same kind of config or dependency change appears in more than 5 components, it is one row for all of them ("Build config: changes in 269 components (506 files)").
+- When more than 10 components have internal changes, the 10 largest keep their rows and the rest are summarized in one ("1,490 changed lines inside 106 other components").
+- Several new exports of one component are one row.
+
+Grouped rows keep every file and line in their evidence.
 
 ## Hints on every row
 

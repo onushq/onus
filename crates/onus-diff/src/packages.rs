@@ -134,6 +134,29 @@ pub fn rows(ctx: &Ctx, rows: &mut Vec<SemanticChange>) {
         new_rows.push(row);
     }
     let any_dependency_change = !touched_manifests.is_empty();
+    // Packages already in the repository (a migration moving dependencies
+    // into each package) and bulk removals or upgrades read as one row per
+    // component. A package new to the repository keeps its own row.
+    let new_rows = crate::ctx::group_rows(
+        new_rows,
+        |r| r.hints.novelty.is_empty(),
+        |r, n, place| match r.subkind.as_str() {
+            "new-dependency" => {
+                format!("{n} npm packages already used in this repository added {place}")
+            }
+            "dependency-removed" => format!("{n} npm packages dropped {place}"),
+            _ => format!("{n} npm package versions changed {place}"),
+        },
+        |r| {
+            let name = onus_core::ids::name_of(&r.subject);
+            format!("`{name}`")
+        },
+        |r, items| match r.subkind.as_str() {
+            "new-dependency" => format!("{items}; no new third-party code enters the repository"),
+            "dependency-removed" => format!("{items}; less third-party code in the supply chain"),
+            _ => format!("{items}; different third-party code runs after this change"),
+        },
+    );
     rows.extend(new_rows);
     // Lockfiles only record what the manifests already say.
     if any_dependency_change {

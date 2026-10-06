@@ -241,7 +241,23 @@ pub fn rows(ctx: &Ctx) -> Vec<SemanticChange> {
         row.hints.needs_person = class.rules_of_the_game;
         rows.push(row);
     }
-    rows
+    // Many files of one kind in one component (a new library's tsconfig
+    // files, a migration) read as one row.
+    crate::ctx::group_rows(
+        rows,
+        |_| true,
+        |r, n, place| format!("{}: {n} files changed {place}", r.kind_label),
+        |r| format!("`{}`", r.locations.first().map_or("", |l| l.file.as_str())),
+        |r, items| format!("{items}; {}", lower_first(&r.why_it_matters)),
+    )
+}
+
+fn lower_first(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_lowercase().collect::<String>() + c.as_str(),
+        None => String::new(),
+    }
 }
 
 #[cfg(test)]

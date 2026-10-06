@@ -22,6 +22,17 @@ Status: Proposed (2026-10-05)
 12. **Line counts come from an in-process text diff** (the `similar` crate, Myers) of the two trees rather than `git diff --numstat`, so `onus diff` works on plain directories. `onus report` extracts each ref with `git archive` into a temporary directory that is removed afterwards, instead of using worktrees, so the repository's metadata is never touched.
 13. **Crate versions.** `tree-sitter` 0.27 with `tree-sitter-typescript` 0.23.2 (they are compatible through `tree-sitter-language`).
 
+## Amendments after the first field run (2026-10-06)
+
+Running Onus on a large Nx and pnpm monorepo (about 8,500 files, 300 projects) led to these changes:
+
+- **Nx projects are components.** With an `nx.json` at the root, every `project.json` folder is a component; workspace packages remain, and the most specific component owns each file.
+- **Moves between components are one row**, including symbols edited while moving (same name and kind, at least half their members in common, unambiguous). Their contract changes are folded into that row.
+- **Grouping.** Config files of one kind per component, dependencies already in the repository per component, and any config or dependency change spread over more than 5 components are single rows; beyond 10 internal rows, the rest are summarized. Every location stays in the evidence.
+- **pnpm `catalog:` versions are resolved** before dependencies are compared.
+- **Tests do not create relationships**: events, data access, config reads and external calls are only taken from non-test code, and loopback, private, `.local`, `.internal` and `example.*` hosts are never external services.
+- **Imports of files Onus does not analyze** (`.svelte`, `.graphql`, `.json`, ...) resolve as assets, and SvelteKit's `$lib` alias is understood.
+
 ## Consequences
 
 - All nine golden scenarios produce the expected rows and nothing else.

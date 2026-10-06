@@ -113,7 +113,7 @@ pub fn rows(ctx: &Ctx, pairs: &Pairs) -> Vec<SemanticChange> {
         let mut locations = Vec::new();
         let mut count = 0u32;
         for (to, sites) in &hits {
-            targets.insert(format!("`{}`", ids::name_of(to)));
+            targets.insert(format!("`{}`", ids::display_name(to)));
             for s in *sites {
                 count += 1;
                 locations.push(Location::head(&s.file, s.line, s.line));

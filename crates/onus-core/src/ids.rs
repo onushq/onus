@@ -70,6 +70,16 @@ pub fn name_of(id: &str) -> &str {
     id
 }
 
+/// A short name for display: the symbol name, or the file of a module id
+/// (`meeting-domain:src/lib/session/index.ts` → `src/lib/session/index.ts`).
+pub fn display_name(id: &str) -> &str {
+    if id.contains('#') || is_global(id) {
+        name_of(id)
+    } else {
+        path_of(id).unwrap_or(id)
+    }
+}
+
 /// The module id a symbol id lives in.
 pub fn module_of(id: &str) -> &str {
     id.split_once('#').map_or(id, |(m, _)| m)
@@ -106,6 +116,13 @@ mod tests {
         assert_eq!(path_of(&id), Some("src/types.ts"));
         assert_eq!(name_of(&id), "UserPreferences");
         assert_eq!(module_of(&id), "user-preferences:src/types.ts");
+    }
+
+    #[test]
+    fn display_names() {
+        assert_eq!(display_name("a:src/x.ts#Foo"), "Foo");
+        assert_eq!(display_name("a:src/x.ts"), "src/x.ts");
+        assert_eq!(display_name("event:Paid"), "Paid");
     }
 
     #[test]

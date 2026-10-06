@@ -13,7 +13,7 @@ use onus_core::{
 };
 
 use crate::ctx::{Ctx, change, join_and, plural};
-use crate::matching::Pairs;
+use crate::matching::{PairKind, Pairs};
 
 #[derive(Debug, Clone)]
 struct Delta {
@@ -236,6 +236,18 @@ fn diff_shapes(kind: SymbolKind, b: &ContractShape, h: &ContractShape) -> Vec<De
     out
 }
 
+/// `(breaking, phrase)` for each difference between two shapes.
+pub(crate) fn shape_changes(
+    kind: SymbolKind,
+    b: &ContractShape,
+    h: &ContractShape,
+) -> Vec<(bool, String)> {
+    diff_shapes(kind, b, h)
+        .into_iter()
+        .map(|d| (d.breaking, d.phrase))
+        .collect()
+}
+
 fn shape_noun(k: ShapeKind) -> &'static str {
     match k {
         ShapeKind::Function => "a function",
@@ -262,8 +274,15 @@ fn signature_location(s: &SymbolNode, head: bool) -> Option<Location> {
 
 pub fn rows(ctx: &Ctx, pairs: &Pairs) -> Vec<SemanticChange> {
     let mut rows = Vec::new();
-    for (b, h, _) in &pairs.pairs {
+    for (b, h, kind) in &pairs.pairs {
         if h.kind == SymbolKind::Method {
+            continue;
+        }
+        // Moves between components are reported, with their contract
+        // changes, by the move row.
+        if matches!(kind, PairKind::Move | PairKind::MoveWithChanges)
+            && b.component_id != h.component_id
+        {
             continue;
         }
         let mut deltas = Vec::new();
@@ -272,7 +291,7 @@ pub fn rows(ctx: &Ctx, pairs: &Pairs) -> Vec<SemanticChange> {
                 "export-removed",
                 format!(
                     "is no longer exported by `{}`",
-                    h.component_id.as_deref().unwrap_or("")
+                    b.component_id.as_deref().unwrap_or("")
                 ),
             )),
             (Visibility::Internal, Visibility::Public) => deltas.push(Delta::additive(

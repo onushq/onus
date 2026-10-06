@@ -11,7 +11,7 @@ Onus builds a map of each version of the code and compares the maps, not the tex
 
 **Files.** Onus walks the tree, skipping dependencies, build output and anything gitignored (see `onus help configuration`).
 
-**Components** come from onus.yaml, else from npm, pnpm or yarn workspaces, else from the folders under services/, packages/ and apps/. Owners come from onus.yaml or CODEOWNERS. Each component's entrypoint comes from its package.json, mapped from build output back to source.
+**Components** come from onus.yaml, else from Nx projects and npm, pnpm or yarn workspaces, else from the folders under services/, packages/ and apps/. Owners come from onus.yaml or CODEOWNERS. Each component's entrypoint comes from its package.json, mapped from build output back to source.
 
 **Parsing.** Every .ts, .tsx, .js, .jsx, .mts and .cts file is parsed in parallel with tree-sitter. From each file Onus records:
 
@@ -32,8 +32,8 @@ Onus builds a map of each version of the code and compares the maps, not the tex
 
 The passes run in this order:
 
-1. **Matching.** Symbols with the same id are the same symbol. Of the rest, a removed and an added symbol with the same fingerprint are the same code: a move (same name) or a rename (new name). Files that moved with identical content, or with only formatting and import-path changes, are matched too.
-2. **Renames** become one row with the number of call sites updated.
+1. **Matching.** Symbols with the same id are the same symbol. Of the rest, a removed and an added symbol with the same fingerprint are the same code: a move (same name, possibly into another component) or a rename (new name). A symbol with the same name and kind in another file whose members mostly overlap was moved and edited at once. Files that moved with identical content, or with only formatting and import-path changes, are matched too.
+2. **Renames** become one row with the number of call sites updated; moves between components become one row per pair of components.
 3. **Contracts.** Shapes of public symbols are compared: optional additions are additive; removals, new required members and unprovable type changes are breaking.
 4. **Boundary rules** from onus.yaml are checked on the new map; violations that already existed are dropped.
 5. **Relationships** are compared per component: events published and consumed, tables read and written, external services called, and dependencies between components. A new vendor or a new kind of data leaving the system is security-sensitive.
@@ -44,7 +44,7 @@ The passes run in this order:
 10. **Secrets** in added lines.
 11. **Internal rows.** Every row lists the lines it explains; changed lines no row explains collapse into one internal row per component.
 
-Then hints are filled in (labels, blast radius, confidence), the intent check marks mismatches, and the rows are ranked (`onus help reports`).
+Then rows that say the same thing are grouped (`onus help changes`), hints are filled in (labels, blast radius, confidence), the intent check marks mismatches, and the rows are ranked (`onus help reports`).
 
 ## Why it is built this way
 

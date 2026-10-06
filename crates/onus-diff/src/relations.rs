@@ -525,7 +525,7 @@ fn cross_component(ctx: &Ctx, violations: &[SemanticChange], rows: &mut Vec<Sema
         }
         let targets: BTreeSet<String> = edges
             .iter()
-            .map(|e| format!("`{}`", ids::name_of(&e.to)))
+            .map(|e| format!("`{}`", ids::display_name(&e.to)))
             .collect();
         let internal: BTreeSet<String> = edges
             .iter()
@@ -534,7 +534,7 @@ fn cross_component(ctx: &Ctx, violations: &[SemanticChange], rows: &mut Vec<Sema
                     .get(e.to.as_str())
                     .is_some_and(|s| s.visibility == Visibility::Internal)
             })
-            .map(|e| format!("`{}`", ids::name_of(&e.to)))
+            .map(|e| format!("`{}`", ids::display_name(&e.to)))
             .collect();
         let targets: Vec<String> = targets.into_iter().take(4).collect();
         let mut why = format!("`{from}` now uses {} from `{to}`", join_and(&targets));

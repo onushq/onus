@@ -5,6 +5,7 @@
 //! changed lines. Every row comes from deterministic analysis and fixed
 //! templates; nothing is generated.
 
+mod collapse;
 pub mod config_files;
 mod contracts;
 mod ctx;
@@ -62,6 +63,7 @@ pub fn diff(input: &DiffInput) -> SemanticReport {
 
     let mut rows = Vec::new();
     rows.extend(matching::rename_rows(&ctx, &pairs));
+    rows.extend(matching::move_rows(&ctx, &pairs));
     rows.extend(contracts::rows(&ctx, &pairs));
     let violations = rules::rows(&ctx, &pairs);
     rows.extend(relations::rows(&ctx, &violations));
@@ -74,6 +76,7 @@ pub fn diff(input: &DiffInput) -> SemanticReport {
     rows.extend(violations);
     let (internal_rows, structure) = internal::rows(&ctx, &rows, &tests);
     rows.extend(internal_rows);
+    let mut rows = collapse::widespread(rows);
 
     // Hints that depend on the whole picture.
     let changed: BTreeSet<&str> = text.files.iter().map(|f| f.path.as_str()).collect();

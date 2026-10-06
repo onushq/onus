@@ -50,9 +50,15 @@ A map from component id to its settings. Ids may not be empty or contain `:`, `#
 - `labels`: sensitivity labels, such as `payments`, `auth`, `pii` or your own.
 - `entrypoints`: source files that define the public surface, relative to the component folder. Default: from package.json `exports`, `types`, `module` or `main`, mapped from build output back to source (`dist/index.js` → `src/index.ts`), else `src/index.*` or `index.*`.
 
-Without a `components` section, Onus uses npm, pnpm or yarn workspaces, and failing that every folder under services/, packages/ and apps/. Files outside every component belong to `root`.
+Without a `components` section, Onus finds components itself:
 
-Only symbols reachable from an entrypoint (through exports and re-exports) are public contracts. A component with no entrypoint has no public surface; Onus notes it in the map.
+- In an Nx repository (an `nx.json` at the root), every folder with a `project.json` is a component, named after the project. `projectType: application` is a service and `library` a package.
+- npm, pnpm or yarn workspace packages are components too; where a workspace package contains Nx projects, each file belongs to the most specific one.
+- Failing both, every folder under services/, packages/ and apps/.
+
+Files outside every component belong to `root`.
+
+Only symbols reachable from an entrypoint (through exports and re-exports) are public contracts. A component with no entrypoint has no public surface; for libraries Onus notes it in the map, while applications are expected to have none.
 
 ## contracts
 
