@@ -201,13 +201,25 @@ pub struct FileFacts {
 
 const COMPARISON_OPS: &[&str] = &["<", "<=", ">", ">=", "==", "===", "!=", "!=="];
 pub fn extract(path: &str, src: &str, is_test: bool, patterns: &Patterns) -> FileFacts {
+    extract_as(path, src, is_test, patterns, lang::is_tsx(path))
+}
+
+/// Like [`extract`], choosing the grammar explicitly: for script blocks
+/// taken out of other files, such as Svelte components.
+pub fn extract_as(
+    path: &str,
+    src: &str,
+    is_test: bool,
+    patterns: &Patterns,
+    tsx: bool,
+) -> FileFacts {
     let mut facts = FileFacts {
         path: path.to_string(),
         is_test,
         lines: count_lines(src),
         ..FileFacts::default()
     };
-    let Some(tree) = lang::parse(path, src) else {
+    let Some(tree) = lang::parse_as(src, tsx) else {
         facts
             .diagnostics
             .push(diag("parse-error", path, 1, "file could not be parsed"));
@@ -228,6 +240,7 @@ pub fn extract(path: &str, src: &str, is_test: bool, patterns: &Patterns) -> Fil
 
     let mut x = Extractor {
         path,
+        tsx,
         src: bytes,
         patterns,
         facts: &mut facts,
@@ -461,6 +474,7 @@ fn fp_tokens(
 
 struct Extractor<'a> {
     path: &'a str,
+    tsx: bool,
     src: &'a [u8],
     patterns: &'a Patterns,
     facts: &'a mut FileFacts,
@@ -1645,7 +1659,7 @@ impl Extractor<'_> {
     fn apply_packs(&mut self, root: Node) {
         // The patterns outlive this extractor: borrow them apart from self.
         let patterns: &Patterns = self.patterns;
-        let set = if lang::is_tsx(self.path) {
+        let set = if self.tsx {
             &patterns.packs.tsx
         } else {
             &patterns.packs.typescript

@@ -51,17 +51,44 @@ impl LanguageAdapter for TypeScriptAdapter {
     }
 
     fn build(&self, ws: &Workspace) -> Result<PartialMap, onus_core::ProviderError> {
+        analyze(ws, &BTreeMap::new())
+    }
+}
+
+/// Source text standing in for a file, such as the script blocks of a
+/// Svelte component with everything else blanked out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceOverride {
+    pub text: String,
+    /// Parse with the TSX grammar (JavaScript) rather than TypeScript.
+    pub tsx: bool,
+}
+
+/// Analyzes the TypeScript and JavaScript files of `ws`, plus the files in
+/// `overrides`, whose text is taken from there instead of from disk. Plugins
+/// for languages that embed TypeScript use this.
+pub fn analyze(
+    ws: &Workspace,
+    overrides: &BTreeMap<String, SourceOverride>,
+) -> Result<PartialMap, onus_core::ProviderError> {
+    {
         let patterns = patterns(ws).map_err(onus_core::ProviderError::Failed)?;
-        let sources: Vec<&onus_core::WorkspaceFile> =
-            ws.files.iter().filter(|f| self.handles(&f.path)).collect();
+        let sources: Vec<&onus_core::WorkspaceFile> = ws
+            .files
+            .iter()
+            .filter(|f| lang::is_source(&f.path) || overrides.contains_key(&f.path))
+            .collect();
         let extract_all = || -> Vec<FileFacts> {
             sources
                 .par_iter()
-                .map(|f| {
-                    let text = std::fs::read(onus_core::paths::native(&ws.root, &f.path))
-                        .map(|b| String::from_utf8_lossy(&b).into_owned())
-                        .unwrap_or_default();
-                    extract::extract(&f.path, &text, f.is_test, &patterns)
+                .map(|f| match overrides.get(&f.path) {
+                    Some(o) => extract::extract_as(&f.path, &o.text, f.is_test, &patterns, o.tsx),
+                    None => {
+                        let text = std::fs::read(onus_core::paths::native(&ws.root, &f.path))
+                            .map(|b| String::from_utf8_lossy(&b).into_owned())
+                            .unwrap_or_default();
+                        extract::extract(&f.path, &text, f.is_test, &patterns)
+                    }
                 })
                 .collect()
         };
