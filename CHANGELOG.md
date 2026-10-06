@@ -4,6 +4,10 @@ All notable changes to Onus are recorded here. The format follows [Keep a Change
 
 ## Unreleased
 
+## [0.1.0] - 2026-10-07
+
+- Release binaries for Linux (static, x86_64 and ARM64), macOS (Apple silicon and Intel) and Windows, with SHA-256 checksums and build attestations; a shell installer (`curl -fsSL https://onushq.com/install.sh | sh`).
+- The GitHub Action (`onushq/onus/action`): downloads the release, writes the report to the job summary, keeps one pull request comment up to date, checks the pull request body's intent and fails on `fail-on` findings. Onus reports on its own pull requests with it.
 - Project plan, open source setup and decision records.
 - First version of Phase 1 (milestones M0 to M5):
   - Cargo workspace with `onus-core`, `onus-lang-ts`, `onus-map`, `onus-diff`, `onus-report` and `onus-cli`; CI on Linux, macOS and Windows; `cargo deny` license checks.

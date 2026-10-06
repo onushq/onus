@@ -6,7 +6,13 @@ Onus only reads files. It never installs dependencies or runs the code it analyz
 
 ## Install
 
-There are no release binaries yet; build from source with Rust (https://rustup.rs):
+On macOS and Linux, the installer downloads the binary for your system from the latest GitHub release, checks its SHA-256 and puts it in ~/.local/bin:
+
+    curl -fsSL https://onushq.com/install.sh | sh
+
+Set ONUS_VERSION=v0.1.0 to pin a version and ONUS_INSTALL_DIR to install elsewhere. Archives for every platform, including Windows, are at https://github.com/onushq/onus/releases.
+
+Or build from source with Rust (https://rustup.rs):
 
     git clone https://github.com/onushq/onus && cd onus
     cargo build --release          # the binary is target/release/onus

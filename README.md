@@ -21,9 +21,36 @@ Given a pull request, Onus describes it as a few changes in meaning instead of t
 
 The first row is the one that deserves a person's attention, so it comes first. Every row is computed from the code by deterministic analysis and fixed templates, never generated, and each one links to the files and lines behind it. Onus only reads files: it never installs or runs the code it analyzes.
 
+## Install
+
+On macOS and Linux:
+
+```sh
+curl -fsSL https://onushq.com/install.sh | sh     # installs onus to ~/.local/bin
+```
+
+The script picks the archive for your system from the [latest release](https://github.com/onushq/onus/releases/latest) and checks its SHA-256 before installing ([source](scripts/install.sh)). Archives for macOS, Linux (static, x86_64 and ARM64) and Windows are on the release page; each one carries a build attestation (`gh attestation verify <archive> --repo onushq/onus`).
+
+On pull requests, use the GitHub Action. It posts the report as one comment, updated on each push:
+
+```yaml
+permissions:
+  contents: read
+  pull-requests: write
+steps:
+  - uses: actions/checkout@v5
+    with:
+      fetch-depth: 0
+  - uses: onushq/onus/action@v0.1.0
+    with:
+      fail-on: secrets          # optional: rule-violation, secrets
+```
+
+See [the CI guide](crates/onus-cli/guide/ci.md) for every input and output.
+
 ## Quick start
 
-Onus is a Rust workspace. With [Rust](https://rustup.rs) installed:
+To build from source, with [Rust](https://rustup.rs) installed:
 
 ```sh
 git clone https://github.com/onushq/onus && cd onus
