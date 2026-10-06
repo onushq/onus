@@ -76,3 +76,15 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
       - name: Plugins run sandboxed, without writes to the tree or network
         run: cargo test --locked -p onus-plugin-example --test sandbox -- --ignored
+
+  scripts:
+    name: Installer and action scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: shellcheck the installer
+        run: shellcheck scripts/install.sh
+      - name: Lint the workflows
+        run: |
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.7/scripts/download-actionlint.bash) 1.7.7
+          ./actionlint -color

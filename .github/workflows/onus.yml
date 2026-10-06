@@ -1,0 +1,34 @@
+name: Onus
+
+# Onus reports on its own pull requests, using the action in this repository
+# with a binary built from the pull request.
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  report:
+    name: Onus report
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Build onus
+        run: cargo build --release --locked -p onus-cli
+      - id: onus
+        uses: ./action
+        with:
+          onus-path: target/release/onus
+          fail-on: secrets
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.onus.outputs.report
+        with:
+          name: onus-report
+          path: ${{ steps.onus.outputs.report }}
