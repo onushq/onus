@@ -1,0 +1,27 @@
+A guard is removed whose early exit returned exactly what the code after it
+returns. Every input still gets the same result, so nothing now reaches code
+it did not reach before.
+
+=== both package.json
+{ "name": "web", "private": true, "main": "src/index.ts" }
+=== base src/index.ts
+export async function load(fetchQueue: () => Promise<string[]>) {
+  try {
+    return { reports: await fetchQueue(), authorized: true };
+  } catch (e) {
+    if (e instanceof Error && /moderator/i.test(e.message)) {
+      return { reports: [] as string[], authorized: false };
+    }
+    return { reports: [] as string[], authorized: false };
+  }
+}
+=== head src/index.ts
+export async function load(fetchQueue: () => Promise<string[]>) {
+  try {
+    return { reports: await fetchQueue(), authorized: true };
+  } catch {
+    return { reports: [] as string[], authorized: false };
+  }
+}
+=== expect
+no guard-removed

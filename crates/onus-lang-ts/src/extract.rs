@@ -1367,6 +1367,7 @@ impl Extractor<'_> {
                 if node.child_by_field_name("alternative").is_none()
                     && let Some(cons) = node.child_by_field_name("consequence")
                     && exits(cons)
+                    && !redundant_guard(node, cons, self.src)
                 {
                     let cond = node
                         .child_by_field_name("condition")
@@ -2027,6 +2028,34 @@ fn exits(node: Node) -> bool {
     }
 }
 
+/// `if (x) return a; return a;`: the early exit returns exactly what the
+/// next statement returns, so both paths do the same and it guards nothing.
+fn redundant_guard(if_node: Node, consequence: Node, src: &[u8]) -> bool {
+    let early = if consequence.kind() == "statement_block" {
+        let stmts: Vec<Node> = named_children(consequence)
+            .into_iter()
+            .filter(|c| c.kind() != "comment")
+            .collect();
+        match stmts.as_slice() {
+            [only] => *only,
+            _ => return false,
+        }
+    } else {
+        consequence
+    };
+    if early.kind() != "return_statement" {
+        return false;
+    }
+    let mut next = if_node.next_named_sibling();
+    while let Some(n) = next {
+        if n.kind() != "comment" {
+            break;
+        }
+        next = n.next_named_sibling();
+    }
+    next.is_some_and(|n| n.kind() == "return_statement" && norm(n, src) == norm(early, src))
+}
+
 /// The line where a function's body starts, i.e. the end of its signature.
 fn signature_end(node: Node) -> Option<u32> {
     node.child_by_field_name("body").map(line)
@@ -2553,6 +2582,20 @@ export async function ship(id: string, total: number): Promise<void> {
         assert_eq!(facts.awaits.len(), 4);
         assert_eq!(facts.empty_catches.len(), 1);
         assert!(f.diagnostics.iter().any(|d| d.kind == "dynamic-access"));
+    }
+
+    #[test]
+    fn a_guard_that_returns_what_follows_is_no_guard() {
+        let src = "export function load(e: unknown) {\n  if (e instanceof Error) {\n    return { ok: false };\n  }\n  return { ok: false };\n}\nexport function check(e: unknown) {\n  if (!e) return null;\n  return e;\n}\n";
+        let f = extract("src/a.ts", src, false, &patterns());
+        let guards = |name: &str| {
+            decl(&f, name)
+                .facts
+                .as_ref()
+                .map_or(0, |facts| facts.guards.len())
+        };
+        assert_eq!(guards("load"), 0);
+        assert_eq!(guards("check"), 1);
     }
 
     #[test]
