@@ -1,6 +1,6 @@
 # 0007. An in-memory map server for agents, without a graph database
 
-Status: Proposed (2026-10-07)
+Status: Proposed (2026-10-07); amended the same day after an evaluation (see the end)
 
 ## Context
 
@@ -33,3 +33,23 @@ On the monorepo above (Apple M-series laptop), after the optimizations this work
 - A rebuild after an edit still links the whole workspace (about 0.3 s of the 0.7 s here). Incremental linking (re-linking only changed files and the files whose imports reach them) is the next step if rebuilds become the bottleneck.
 - If a hosted, multi-repository service ever outgrows memory, an embedded engine can replace the index behind the same queries; only embeddable engines under permissive licenses fit Onus's single binary.
 - The server is read-only and runs nothing from the repository. A socket readable only by the user is the access control until Phase 3 adds scoped tokens.
+
+## Amendment: evaluation with coding agents (2026-10-07)
+
+We tested whether the map helps coding agents, in [an A/B evaluation](../evaluation/2026-10-07-map-for-agents.md): Claude Code (Sonnet) implemented two real features, one in a private 8,600-file monorepo and one in Twenty (31,000 TypeScript files), with and without `onus mcp`. A blind reviewer graded the results against the shipped commits.
+
+- **No measurable gain in speed, cost or quality.** On Twenty, the baseline averaged 235 s, $1.40 and a score of 7.8/10; Onus averaged 231 s, $1.49 and 7.5/10. The spread within each condition was larger than the gap between them.
+- **Agents did not use the navigation tools**, even when the prompt asked them to: at most one `onus_find` per run, and never `dependents`, `dependencies`, `file` or `tests_for`. Text search finds code just as well in well-named repositories.
+- **`onus_check` was the tool agents used unprompted**, and once it changed the outcome (an interface with 36 users sent the agent back to its test doubles). Its output was otherwise too noisy or too coarse to act on.
+
+This changes what Phase 2 is for, not how the server works:
+
+1. The server and the facts cache stay, for `onus_check` and later verification tools. The faster map building stays too, and speeds up `onus report` for everyone.
+2. The navigation tools (`onus_find`, `onus_symbol`, `onus_dependents`, `onus_dependencies`, `onus_tests_for`, `onus_owners`, `onus_component`, `onus_file`) are **experimental**. They are kept for people and for later tests, but Phase 2 is not built around them.
+3. Phase 2 focuses on **verification**, meaning facts an agent cannot get from text search, delivered through `onus_check` and the Phase 1 report. The next steps:
+   - drop unverified "inferred type" rows;
+   - flag external APIs the repository has never used, with the pinned version;
+   - list every implementer and test double of a changed interface;
+   - split large packages into components by module.
+4. The gate for Phase 2 becomes a repeat of this evaluation, with at least three runs per condition, on tasks where verification is the hard part (reviewing or extending an existing change). Onus must show a measurable gain in correctness to proceed.
+

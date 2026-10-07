@@ -74,9 +74,9 @@ Useful flags: `--format json` for the full machine-readable report, `--intent <f
 
 Other languages and frameworks plug in through plugins, SCIP indexes and language servers (`onus help plugins`). The [user guide](docs/guide.md) covers every command, how to read a report, every kind of change, the `onus.yaml` reference, the intent check and running Onus in CI. It also ships in the binary: run `onus help` for the list of topics and `onus help <topic>` to read one.
 
-## For coding agents (preview)
+## For coding agents (experimental)
 
-`onus mcp` gives coding agents the map as MCP tools: find symbols, walk what depends on what, the tests and owners of a change, and `onus_check`, which reports the changes in meaning of the work in progress before it is committed.
+`onus mcp` gives coding agents `onus_check`, which reports the changes in meaning of the work in progress before it is committed, plus experimental tools to navigate the map. In [our evaluation](docs/evaluation/2026-10-07-map-for-agents.md) the navigation tools did not make agents faster or more correct; agents did use `onus_check`, which is where Phase 2 is heading.
 
 ```sh
 claude mcp add onus -- onus mcp

@@ -378,7 +378,7 @@ Runtime traces, running tests, LLM-written report rows, GitHub App hosting, lang
 
 ### Phase 2: The map as a service
 
-**Status (2026-10-07): prototype.** `onus-index`, `onus mcp`, `onus query` and a per-repository map server are built (ADR 0007): in memory, no graph database, facts cached by file content and shared across worktrees. `impact` and the benchmark gate are not built yet.
+**Status (2026-10-07): prototype, refocused on verification.** `onus-index`, `onus mcp`, `onus query` and a per-repository map server are built (ADR 0007): in memory, no graph database, facts cached by file content and shared across worktrees. An [A/B evaluation](docs/evaluation/2026-10-07-map-for-agents.md) with coding agents on two real features found no measurable gain in speed, cost or quality from the navigation tools; agents found code with text search and rarely called them, but did call `onus_check`. Phase 2 therefore focuses on verification through `onus_check` (no unverified type rows, unprecedented external API use with the pinned version, every implementer and test double of a changed interface, components split by module); the navigation queries below are experimental. The gate is a repeat evaluation on verification-heavy tasks, three or more runs per condition, showing a measurable gain in correctness.
 
 - **Store:** ~~SQLite (`rusqlite`) behind the same map interface~~ an in-memory index per worktree in a per-repository server, with per-file facts cached by content hash in memory and in `.git/onus/facts` (ADR 0007). Only changed files are re-parsed; linking still covers the whole workspace. Built per commit, with the PR head map built in CI.
 - **Queries** (CLI `onus map …` and MCP tools on one shared implementation):

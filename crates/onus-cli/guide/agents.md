@@ -2,7 +2,9 @@
 
 `onus mcp` gives a coding agent the codebase map as MCP tools: where things are, what depends on what, which tests cover what, who owns it, and what a change means before it is committed. Every answer is computed from the code, never generated, and carries the file and line it comes from.
 
-This is a preview of Phase 2 ("the map as a service"). The tools are read-only.
+This is a preview of Phase 2. The tools are read-only.
+
+**What helps agents today is `onus_check`.** We tested whether the map makes coding agents faster or more correct when they implement a feature ([evaluation](https://github.com/onushq/onus/blob/main/docs/evaluation/2026-10-07-map-for-agents.md)). It did not, measurably: agents found code with text search just as well and rarely called the navigation tools. They did call `onus_check` before finishing, and Phase 2 now focuses on making it precise. The navigation tools below are experimental.
 
 ## Connect an agent
 
@@ -14,8 +16,14 @@ Any MCP client that starts servers over stdio: run `onus mcp` in the repository 
 
 ## Tools
 
+The check:
+
+- `onus_check`: the changes in meaning between a commit (default `HEAD`) and the worktree now: the same rows as a pull request report. Run it before finishing a task.
+
+Navigation (experimental):
+
 - `onus_status`: what the map holds (components, files, symbols, edges, tests). Start here.
-- `onus_find`: symbols by name words, best first (`format phone` finds `formatPhoneNumber`). Use it before writing a helper that may exist.
+- `onus_find`: symbols by name words, ranked by how many words match in the name, then in fields and parameters, then in the file path (`format phone` finds `formatPhoneNumber`; a field name finds the types that declare it). Every answer also lists matching files.
 - `onus_symbol`: one symbol: kind, location, contract shape, declared invariants, how many places use it.
 - `onus_dependents`: what depends on a symbol, file or component, up to `depth` steps (imports, calls, type references). Use it before changing something.
 - `onus_dependencies`: what a symbol, file or component depends on: code, external services, events, tables, config keys.
@@ -23,7 +31,6 @@ Any MCP client that starts servers over stdio: run `onus mcp` in the repository 
 - `onus_owners`: owners and sensitivity labels.
 - `onus_component`: a component's public surface, the components it uses and that use it, its external services and events.
 - `onus_file`: a file's symbols, imports and importers.
-- `onus_check`: the changes in meaning between a commit (default `HEAD`) and the worktree now: the same rows as a pull request report. Run it before finishing a task.
 
 Targets can be a symbol id (`billing:src/payments.ts#chargeCard`), a bare symbol name, a file path, a module id or a component id. Answers are JSON, sorted, and limited (default 50 items, `limit` up to 500); `truncated` says when there is more. Each answer also says which version of the map it came from and whether the map was rebuilt for it.
 
