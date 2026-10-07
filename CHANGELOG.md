@@ -4,7 +4,7 @@ All notable changes to Onus are recorded here. The format follows [Keep a Change
 
 ## Unreleased
 
-M7 tuning, from an audit of reports on 20 large real pull requests: fewer wrong facts, flags on the changes that need a person, less noise, faster reports. A regression corpus (`crates/onus-cli/tests/corpus`) reproduces each kind of mistake with invented code and keeps it fixed.
+M7 tuning, from an audit of reports on 20 large real pull requests: fewer wrong facts, flags on the changes that need a person, less noise, faster reports. Audited again afterwards, rows with wrong facts went from 7% to under 1% and the reviewers' usefulness score from 2.1 to 3.0 out of 5 ([evaluation](docs/evaluation/2026-10-08-m7-replay.md)). A regression corpus (`crates/onus-cli/tests/corpus`) reproduces each kind of mistake with invented code and keeps it fixed.
 
 - **Fewer false alarms:**
   - A contract change is breaking only when a user or implementation outside the change was not updated. Casts (`as X`) no longer count as implementations; published packages and packages with unresolved imports stay breaking.
