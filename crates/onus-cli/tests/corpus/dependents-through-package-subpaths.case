@@ -1,0 +1,46 @@
+A shared package exposes subpaths whose `exports` point at build output, and
+another package imports one of them. A change in the shared package is used
+by that package; the report must not say nothing depends on it.
+status: open
+
+=== both package.json
+{ "name": "r", "private": true, "workspaces": ["packages/*"] }
+=== both packages/shared/package.json
+{
+  "name": "r-shared",
+  "private": true,
+  "main": "dist/index.cjs",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.mjs" },
+    "./utils": { "types": "./dist/utils/index.d.ts", "import": "./dist/utils.mjs" }
+  }
+}
+=== both packages/front/package.json
+{ "name": "r-front", "private": true, "main": "src/index.ts", "dependencies": { "r-shared": "*" } }
+=== both packages/shared/src/index.ts
+export const VERSION = 1;
+=== both packages/shared/src/utils/index.ts
+export { isGroupable } from './isGroupable';
+=== base packages/shared/src/utils/isGroupable.ts
+export function isGroupable(field: string): boolean {
+  return field !== 'createdBy';
+}
+=== head packages/shared/src/utils/isGroupable.ts
+const HIDDEN = ['createdBy'];
+
+export function isGroupable(field: string, strict?: boolean): boolean {
+  if (strict) {
+    console.info('strict grouping');
+  }
+  return !HIDDEN.includes(field);
+}
+=== both packages/front/src/index.ts
+import { isGroupable } from 'r-shared/utils';
+
+export const groupable = ['createdBy', 'name'].filter(isGroupable);
+=== expect
+row contract-param-added-optional title~"`isGroupable`" why~"used in 1 file across 1 component"
+row internal-changes title~"`shared`" why~"`front`"
+no * why~"no other component depends on it"
+no * why~"no other users"

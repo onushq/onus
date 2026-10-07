@@ -1,0 +1,27 @@
+Control: an interface gains a required method and an implementation in
+another package is not updated. That breaks the build and needs a person.
+
+=== both package.json
+{ "name": "r", "private": true, "workspaces": ["packages/*"] }
+=== both packages/store/package.json
+{ "name": "@r/store", "private": true, "main": "src/index.ts" }
+=== both packages/app/package.json
+{ "name": "@r/app", "private": true, "main": "src/index.ts", "dependencies": { "@r/store": "*" } }
+=== base packages/store/src/index.ts
+export interface Store {
+  get(key: string): string;
+}
+=== head packages/store/src/index.ts
+export interface Store {
+  get(key: string): string;
+  set(key: string, value: string): void;
+}
+=== both packages/app/src/memory.ts
+import type { Store } from '@r/store';
+
+export const memory: Store = {
+  get: (key) => key,
+};
+=== expect
+row contract-field-added-required ● title~"`Store` gains a required `set` method" why~"not changed yet" why~"`packages/app/src/memory.ts`"
+attention 1

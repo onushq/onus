@@ -1,0 +1,50 @@
+A method's body moves into a new private helper that still awaits every
+call and keeps the early exit. Nothing was removed.
+status: open
+
+=== both package.json
+{ "name": "chat", "private": true, "main": "src/index.ts" }
+=== base src/chat.service.ts
+export class ChatService {
+  constructor(private readonly queue: { add(x: unknown): Promise<void> }) {}
+
+  async sendMessage(input: { threadId: string; text: string }) {
+    const result = await this.preflight(input.threadId);
+    if (result.queued) {
+      return result;
+    }
+    await this.queue.add({ threadId: input.threadId, text: input.text });
+    return result;
+  }
+
+  private async preflight(threadId: string) {
+    return { queued: threadId.length === 0 };
+  }
+}
+=== head src/chat.service.ts
+export class ChatService {
+  constructor(private readonly queue: { add(x: unknown): Promise<void> }) {}
+
+  async sendMessage(input: { threadId: string; text: string }) {
+    return this.sendMessageToThread(input.threadId, input.text);
+  }
+
+  private async sendMessageToThread(threadId: string, text: string) {
+    const result = await this.preflight(threadId);
+    if (result.queued) {
+      return result;
+    }
+    await this.queue.add({ threadId, text });
+    return result;
+  }
+
+  private async preflight(threadId: string) {
+    return { queued: threadId.length === 0 };
+  }
+}
+=== both src/index.ts
+export { ChatService } from './chat.service';
+=== expect
+no await-removed
+no guard-removed
+attention 0

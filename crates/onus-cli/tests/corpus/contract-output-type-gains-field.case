@@ -1,0 +1,42 @@
+Types that other code only reads (generated API result types, a GraphQL
+`Mutation` root) gain required fields. Readers are unaffected and nothing in
+the repository builds these values, so nothing breaks.
+status: open
+
+=== both package.json
+{ "name": "r", "private": true, "workspaces": ["packages/*"] }
+=== both packages/client/package.json
+{ "name": "@r/client", "private": true, "main": "src/index.ts" }
+=== both packages/web/package.json
+{ "name": "@r/web", "private": true, "main": "src/index.ts", "dependencies": { "@r/client": "*" } }
+=== base packages/client/src/index.ts
+export type Participant = {
+  id: string;
+  name: string;
+};
+export type Mutation = {
+  sendMessage: boolean;
+};
+=== head packages/client/src/index.ts
+export type Participant = {
+  id: string;
+  name: string;
+  isSubscribed: boolean;
+};
+export type Mutation = {
+  sendMessage: boolean;
+  subscribeToThread: boolean;
+};
+=== both packages/web/src/index.ts
+import type { Mutation, Participant } from '@r/client';
+
+export function label(p: Participant): string {
+  return p.name;
+}
+export function sent(m: Mutation): boolean {
+  return m.sendMessage;
+}
+=== expect
+row contract-field-added-required ○ title~"`Participant` gains a required `isSubscribed` field"
+row contract-field-added-required ○ title~"`Mutation` gains a required `subscribeToThread` field"
+attention 0

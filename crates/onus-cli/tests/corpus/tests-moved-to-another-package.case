@@ -1,0 +1,55 @@
+A function moves to a shared package and its tests move with it, word for
+word. No coverage is lost.
+
+=== both package.json
+{ "name": "r", "private": true, "workspaces": ["packages/*"] }
+=== both packages/server/package.json
+{ "name": "@r/server", "private": true, "main": "src/index.ts", "dependencies": { "@r/shared": "*" } }
+=== both packages/shared/package.json
+{ "name": "@r/shared", "private": true, "main": "src/index.ts" }
+=== base packages/server/src/index.ts
+import { isGroupable } from './isGroupable';
+
+export const fields = ['a', 'b'].filter(isGroupable);
+=== head packages/server/src/index.ts
+import { isGroupable } from '@r/shared';
+
+export const fields = ['a', 'b'].filter(isGroupable);
+=== base packages/server/src/isGroupable.ts
+export function isGroupable(field: string): boolean {
+  return field !== 'b';
+}
+=== base packages/server/src/isGroupable.spec.ts
+import { isGroupable } from './isGroupable';
+
+describe('isGroupable', () => {
+  it('accepts plain fields', () => {
+    expect(isGroupable('a')).toBe(true);
+  });
+  it('rejects b', () => {
+    expect(isGroupable('b')).toBe(false);
+  });
+});
+=== base packages/shared/src/index.ts
+export const SHARED = 1;
+=== head packages/shared/src/index.ts
+export const SHARED = 1;
+export { isGroupable } from './isGroupable';
+=== head packages/shared/src/isGroupable.ts
+export function isGroupable(field: string): boolean {
+  return field !== 'b';
+}
+=== head packages/shared/src/isGroupable.test.ts
+import { isGroupable } from './isGroupable';
+
+describe('isGroupable', () => {
+  it('accepts plain fields', () => {
+    expect(isGroupable('a')).toBe(true);
+  });
+  it('rejects b', () => {
+    expect(isGroupable('b')).toBe(false);
+  });
+});
+=== expect
+no test-weakened
+attention 0

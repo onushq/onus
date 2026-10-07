@@ -1,0 +1,39 @@
+A code-first resolver gains two mutations.
+status: open
+
+=== both package.json
+{ "name": "server", "private": true, "main": "src/index.ts" }
+=== both src/index.ts
+export { ParticipantResolver } from './participant.resolver';
+=== base src/participant.resolver.ts
+import { Args, Mutation, Query, Resolver } from '@nestjs/graphql';
+
+@Resolver()
+export class ParticipantResolver {
+  @Query(() => [String])
+  participants(): string[] {
+    return [];
+  }
+}
+=== head src/participant.resolver.ts
+import { Args, Mutation, Query, Resolver } from '@nestjs/graphql';
+
+@Resolver()
+export class ParticipantResolver {
+  @Query(() => [String])
+  participants(): string[] {
+    return [];
+  }
+
+  @Mutation(() => Boolean)
+  subscribeToThread(@Args('threadId') threadId: string): boolean {
+    return threadId.length > 0;
+  }
+
+  @Mutation(() => Boolean)
+  unsubscribeFromThread(@Args('threadId') threadId: string): boolean {
+    return threadId.length > 0;
+  }
+}
+=== expect
+row public-api-changed ● title~"`subscribeToThread`" title~"`unsubscribeFromThread`"

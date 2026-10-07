@@ -1,0 +1,34 @@
+A test keeps its case but drops the assertions about a helper that this
+change deletes; the remaining assertions still cover the kept code.
+status: open
+
+=== both package.json
+{ "name": "calendar", "private": true, "main": "src/index.ts" }
+=== base src/index.ts
+export function cardId(recordId: string): string {
+  return `card-${recordId}`;
+}
+export function recordIdFromCardId(id: string): string {
+  return id.replace('card-', '');
+}
+=== head src/index.ts
+export function cardId(recordId: string): string {
+  return `card-${recordId}`;
+}
+=== base src/index.spec.ts
+import { cardId, recordIdFromCardId } from './index';
+
+it('builds and reads card ids', () => {
+  expect(cardId('1')).toBe('card-1');
+  expect(recordIdFromCardId('card-1')).toBe('1');
+  expect(recordIdFromCardId(cardId('2'))).toBe('2');
+});
+=== head src/index.spec.ts
+import { cardId } from './index';
+
+it('builds and reads card ids', () => {
+  expect(cardId('1')).toBe('card-1');
+});
+=== expect
+no test-weakened
+attention 0

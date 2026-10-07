@@ -1,0 +1,30 @@
+The repository's base TypeScript config switches module systems, and many
+project configs drop an override. One row names the root change and needs a
+person; the project configs read as one row per kind of edit.
+status: open
+
+=== both package.json
+{ "name": "r", "private": true, "workspaces": ["libs/*"] }
+=== both libs/a/package.json
+{ "name": "@r/a", "private": true, "main": "src/index.ts" }
+=== both libs/b/package.json
+{ "name": "@r/b", "private": true, "main": "src/index.ts" }
+=== both libs/a/src/index.ts
+export const a = 1;
+=== both libs/b/src/index.ts
+export const b = 1;
+=== base tsconfig.base.json
+{ "compilerOptions": { "module": "commonjs", "moduleResolution": "node", "strict": true, "paths": { "@r/a": ["libs/a/src/index.ts"], "lodash": ["node_modules/lodash"] } } }
+=== head tsconfig.base.json
+{ "compilerOptions": { "module": "preserve", "moduleResolution": "bundler", "strict": true, "paths": { "@r/a": ["libs/a/src/index.ts"] } } }
+=== base libs/a/tsconfig.json
+{ "extends": "../../tsconfig.base.json", "compilerOptions": { "module": "commonjs" } }
+=== head libs/a/tsconfig.json
+{ "extends": "../../tsconfig.base.json", "compilerOptions": {} }
+=== base libs/b/tsconfig.json
+{ "extends": "../../tsconfig.base.json", "compilerOptions": { "module": "commonjs" } }
+=== head libs/b/tsconfig.json
+{ "extends": "../../tsconfig.base.json", "compilerOptions": {} }
+=== expect
+row root-build-config-changed ● title~"`tsconfig.base.json`" title~"`module`" title~"`moduleResolution`" title~"`paths`"
+row build-config-changed ○ title~"`module`"
