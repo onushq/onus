@@ -1,0 +1,101 @@
+---
+source: crates/onus-cli/tests/scenarios.rs
+expression: json
+---
+{
+  "schemaVersion": 1,
+  "base": "base",
+  "head": "head",
+  "summary": {
+    "meaningChanges": 2,
+    "needsAttention": 2,
+    "secrets": 0,
+    "newRuleViolations": 0,
+    "intentMismatches": 0
+  },
+  "changes": [
+    {
+      "id": "constant-changed:billing:src/discount.ts#LOYALTY_RATE",
+      "kind": "security-sensitive",
+      "subkind": "constant-changed",
+      "level": "behavior",
+      "subject": "billing:src/discount.ts#LOYALTY_RATE",
+      "component": "billing",
+      "kindLabel": "Constant changed",
+      "title": "`LOYALTY_RATE` changes from `0.1` to `0.15`",
+      "whyItMatters": "Code that reads this value now behaves differently in a payments component; needs a person",
+      "hints": {
+        "labels": [
+          "payments"
+        ],
+        "blastRadius": 0,
+        "novelty": [],
+        "confidence": "static",
+        "rulesOfTheGame": false,
+        "intentMismatch": false,
+        "needsPerson": true
+      },
+      "locations": [
+        {
+          "file": "services/billing/src/discount.ts",
+          "lines": [
+            2,
+            2
+          ],
+          "side": "head"
+        }
+      ]
+    },
+    {
+      "id": "test-weakened:billing",
+      "kind": "test",
+      "subkind": "test-weakened",
+      "level": "behavior",
+      "subject": "billing",
+      "component": "billing",
+      "kindLabel": "Tests weakened",
+      "title": "Tests in `billing` were weakened",
+      "whyItMatters": "1 assertion removed from \"applyDiscount › gives loyalty members 10% off large orders\"; \"applyDiscount › does not discount customers outside the loyalty program\" is now skipped; source in `billing` changed in the same pull request; needs a person",
+      "hints": {
+        "labels": [
+          "payments"
+        ],
+        "blastRadius": 0,
+        "novelty": [],
+        "confidence": "static",
+        "rulesOfTheGame": true,
+        "intentMismatch": false,
+        "needsPerson": true
+      },
+      "locations": [
+        {
+          "file": "services/billing/src/discount.test.ts",
+          "lines": [
+            8,
+            8
+          ],
+          "side": "base"
+        },
+        {
+          "file": "services/billing/src/discount.test.ts",
+          "lines": [
+            22,
+            22
+          ],
+          "side": "head"
+        }
+      ]
+    }
+  ],
+  "ruleViolations": [],
+  "structure": {
+    "movedFiles": [],
+    "formattingOnly": []
+  },
+  "textStats": {
+    "files": 2,
+    "linesAdded": 2,
+    "linesRemoved": 3
+  },
+  "mapDiagnostics": []
+}

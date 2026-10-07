@@ -1,0 +1,5 @@
+/services/orders/ @team-orders
+/services/notifications/ @team-growth
+/services/user-preferences/ @team-growth
+/services/billing/ @team-payments
+/packages/ @team-platform

@@ -1,0 +1,25 @@
+---
+source: crates/onus-cli/tests/scenarios.rs
+expression: md
+---
+<!-- onus-report -->
+### Onus · no changes in meaning · 135 lines in 4 files
+
+No changes in meaning: only formatting, comments, moved files or other structure changed.
+
+**Intent check:** not stated (add an `onus-intent` block to the pull request) · **Boundary rules:** no new violations
+
+<details><summary>Structure only: 1 file moved, 3 files formatting only</summary>
+
+- moved `services/orders/src/util/ids.ts` → `services/orders/src/lib/ids.ts`
+- formatting, comments or import paths only: `services/orders/src/orders.ts`
+- formatting, comments or import paths only: `services/orders/src/returns.ts`
+- formatting, comments or import paths only: `services/orders/src/shipping/tracking.ts`
+
+</details>
+
+<details><summary>Map confidence notes</summary>
+
+Every import, call and event in the changed files was resolved statically.
+
+</details>

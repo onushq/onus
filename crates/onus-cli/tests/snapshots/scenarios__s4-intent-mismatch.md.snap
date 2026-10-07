@@ -1,0 +1,40 @@
+---
+source: crates/onus-cli/tests/scenarios.rs
+expression: md
+---
+<!-- onus-report -->
+### Onus · 3 meaning-level changes · 2 need attention · 32 lines in 2 files
+
+|   | Change | Kind | Why it matters |
+|---|---|---|---|
+| ● | `billing` now writes to the `payment` table | Outside stated intent · New data write | New write path in a payments component; needs a person |
+| ● | 10 lines of new code inside `billing` | Outside stated intent · Internal | Stays inside `billing`; no other component depends on it |
+| ○ | 21 changed lines of code inside `logger` | Internal | Stays inside `logger`, which `billing`, `notifications` and `orders` depend on |
+
+**Intent check:** **2 changes outside stated intent** · **Boundary rules:** no new violations
+
+Stated intent: "Add structured fields to log lines"
+
+- 10 lines of new code inside `billing`: `billing` is not in `touches` (logger)
+- `billing` now writes to the `payment` table: `billing` is not in `touches` (logger)
+
+<details><summary>Evidence per row (files and lines)</summary>
+
+1. **`billing` now writes to the `payment` table**
+   - kind `security-sensitive` / `new-data-write` · confidence `static` · labels payments · 1 dependent file
+   - `services/billing/src/payments.ts` line 32
+2. **10 lines of new code inside `billing`**
+   - kind `internal` / `internal-changes` · confidence `static` · labels payments · +10 −0 in 1 file
+   - `services/billing/src/payments.ts` lines 1, 5–6, 30–31, 33–34, 40–42
+3. **21 changed lines of code inside `logger`**
+   - kind `internal` / `internal-changes` · confidence `static` · 5 dependent files · +19 −2 in 1 file
+   - `packages/logger/src/format.ts` lines 9, 12 (before the change)
+   - `packages/logger/src/format.ts` lines 1–17, 26, 29
+
+</details>
+
+<details><summary>Map confidence notes</summary>
+
+Every import, call and event in the changed files was resolved statically.
+
+</details>

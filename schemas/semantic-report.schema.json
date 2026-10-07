@@ -1,0 +1,489 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SemanticReport",
+  "type": "object",
+  "properties": {
+    "base": {
+      "type": "string"
+    },
+    "changes": {
+      "description": "Ranked, most important first.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SemanticChange"
+      }
+    },
+    "head": {
+      "type": "string"
+    },
+    "intentCheck": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/IntentCheck"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "mapDiagnostics": {
+      "description": "Diagnostics of the head map in files this change touches.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/MapDiagnostic"
+      }
+    },
+    "ruleViolations": {
+      "description": "New boundary-rule violations (also listed in `changes`).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SemanticChange"
+      }
+    },
+    "schemaVersion": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "structure": {
+      "$ref": "#/$defs/StructureNotes"
+    },
+    "summary": {
+      "$ref": "#/$defs/ReportSummary"
+    },
+    "textStats": {
+      "$ref": "#/$defs/TextStats"
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "base",
+    "head",
+    "summary",
+    "changes",
+    "ruleViolations",
+    "structure",
+    "textStats",
+    "mapDiagnostics"
+  ],
+  "$defs": {
+    "ChangeKind": {
+      "description": "The manifesto's change kinds.",
+      "type": "string",
+      "enum": [
+        "additive",
+        "breaking",
+        "internal",
+        "dependency",
+        "config",
+        "test",
+        "security-sensitive"
+      ]
+    },
+    "ChangeLevel": {
+      "type": "string",
+      "enum": [
+        "relationship",
+        "behavior",
+        "structure"
+      ]
+    },
+    "Confidence": {
+      "description": "How a fact in the map is known.\n\nOrdered from most to least trustworthy, so `max()` over a set of facts\ngives the weakest one.",
+      "oneOf": [
+        {
+          "description": "Written down by a person in `onus.yaml`.",
+          "type": "string",
+          "const": "declared"
+        },
+        {
+          "description": "Confirmed by the language's own compiler, indexer or language server.",
+          "type": "string",
+          "const": "compiler"
+        },
+        {
+          "description": "Read directly from the syntax.",
+          "type": "string",
+          "const": "static"
+        },
+        {
+          "description": "Observed at runtime (later phases).",
+          "type": "string",
+          "const": "traced"
+        },
+        {
+          "description": "Guessed from conventions or heuristics.",
+          "type": "string",
+          "const": "inferred"
+        },
+        {
+          "description": "Onus could not resolve it; treat as higher risk.",
+          "type": "string",
+          "const": "low"
+        }
+      ]
+    },
+    "Hints": {
+      "type": "object",
+      "properties": {
+        "blastRadius": {
+          "description": "Files (outside tests) that depend on the subject in the head map.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "confidence": {
+          "$ref": "#/$defs/Confidence"
+        },
+        "intentMismatch": {
+          "description": "The change is outside the stated intent.",
+          "type": "boolean"
+        },
+        "labels": {
+          "description": "Sensitivity labels of the components involved.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "needsPerson": {
+          "description": "A person should look at this row.",
+          "type": "boolean"
+        },
+        "novelty": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "rulesOfTheGame": {
+          "description": "Tests, CI, policies, labels or declared contracts were touched.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "labels",
+        "blastRadius",
+        "novelty",
+        "confidence",
+        "rulesOfTheGame",
+        "intentMismatch",
+        "needsPerson"
+      ]
+    },
+    "IntentCheck": {
+      "type": "object",
+      "properties": {
+        "contracts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "externals": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "mismatches": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/IntentMismatch"
+          }
+        },
+        "stated": {
+          "type": "string"
+        },
+        "touches": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "stated",
+        "touches",
+        "contracts",
+        "externals",
+        "mismatches"
+      ]
+    },
+    "IntentMismatch": {
+      "type": "object",
+      "properties": {
+        "changeId": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "changeId",
+        "reason"
+      ]
+    },
+    "Location": {
+      "type": "object",
+      "properties": {
+        "file": {
+          "type": "string"
+        },
+        "lines": {
+          "description": "First and last line, inclusive, 1-based.",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          },
+          "maxItems": 2,
+          "minItems": 2
+        },
+        "side": {
+          "description": "Which tree the lines refer to.",
+          "$ref": "#/$defs/Side"
+        }
+      },
+      "required": [
+        "file",
+        "lines",
+        "side"
+      ]
+    },
+    "MapDiagnostic": {
+      "type": "object",
+      "properties": {
+        "confidence": {
+          "$ref": "#/$defs/Confidence"
+        },
+        "file": {
+          "type": "string"
+        },
+        "kind": {
+          "description": "`unresolved-import`, `dynamic-import`, `dynamic-access`,\n`dynamic-event-name`, `parse-error`, `no-entrypoint`, …",
+          "type": "string"
+        },
+        "line": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "file",
+        "line",
+        "message",
+        "confidence"
+      ]
+    },
+    "MovedFile": {
+      "type": "object",
+      "properties": {
+        "from": {
+          "type": "string"
+        },
+        "to": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "from",
+        "to"
+      ]
+    },
+    "ReportSummary": {
+      "type": "object",
+      "properties": {
+        "intentMismatches": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "meaningChanges": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "needsAttention": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "newRuleViolations": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "secrets": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "meaningChanges",
+        "needsAttention",
+        "secrets",
+        "newRuleViolations",
+        "intentMismatches"
+      ]
+    },
+    "SemanticChange": {
+      "type": "object",
+      "properties": {
+        "component": {
+          "description": "The component the change happens in, if any.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "hints": {
+          "$ref": "#/$defs/Hints"
+        },
+        "id": {
+          "description": "Deterministic id: `<subkind>:<subject>` plus a suffix when needed.",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/ChangeKind"
+        },
+        "kindLabel": {
+          "description": "Short label for the Kind column, e.g. \"Contract change, additive\".",
+          "type": "string"
+        },
+        "level": {
+          "$ref": "#/$defs/ChangeLevel"
+        },
+        "locations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Location"
+          }
+        },
+        "stats": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Stats"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "subject": {
+          "description": "The map id the change is about.",
+          "type": "string"
+        },
+        "subkind": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "whyItMatters": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "subkind",
+        "level",
+        "subject",
+        "kindLabel",
+        "title",
+        "whyItMatters",
+        "hints",
+        "locations"
+      ]
+    },
+    "Side": {
+      "type": "string",
+      "enum": [
+        "base",
+        "head"
+      ]
+    },
+    "Stats": {
+      "type": "object",
+      "properties": {
+        "files": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "linesAdded": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "linesRemoved": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "linesAdded",
+        "linesRemoved",
+        "files"
+      ]
+    },
+    "StructureNotes": {
+      "description": "Changes that move code without changing what it means.",
+      "type": "object",
+      "properties": {
+        "formattingOnly": {
+          "description": "Files whose only changes are formatting, comments or updated import\npaths.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "movedFiles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MovedFile"
+          }
+        }
+      },
+      "required": [
+        "movedFiles",
+        "formattingOnly"
+      ]
+    },
+    "TextStats": {
+      "type": "object",
+      "properties": {
+        "files": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "linesAdded": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "linesRemoved": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "files",
+        "linesAdded",
+        "linesRemoved"
+      ]
+    }
+  }
+}

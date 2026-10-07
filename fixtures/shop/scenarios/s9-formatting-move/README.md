@@ -1,0 +1,1 @@
+Behaviour-neutral churn: `services/orders/src/orders.ts` is reformatted (4-space indent, single quotes, trailing commas, one call rewrapped) and `src/util/ids.ts` moves unchanged to `src/lib/ids.ts`, with its three importers updated to the new path.

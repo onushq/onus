@@ -1,0 +1,128 @@
+---
+source: crates/onus-cli/tests/scenarios.rs
+expression: json
+---
+{
+  "schemaVersion": 1,
+  "base": "base",
+  "head": "head",
+  "summary": {
+    "meaningChanges": 2,
+    "needsAttention": 1,
+    "secrets": 0,
+    "newRuleViolations": 0,
+    "intentMismatches": 0
+  },
+  "changes": [
+    {
+      "id": "boundary-condition-changed:billing:src/discount.ts#applyDiscount",
+      "kind": "security-sensitive",
+      "subkind": "boundary-condition-changed",
+      "level": "behavior",
+      "subject": "billing:src/discount.ts#applyDiscount",
+      "component": "billing",
+      "kindLabel": "Boundary condition changed",
+      "title": "Boundary condition changed in `applyDiscount`: `order.subtotalCents > DISCOUNT_THRESHOLD_CENTS` is now `order.subtotalCents >= DISCOUNT_THRESHOLD_CENTS`",
+      "whyItMatters": "Values exactly at the boundary now take the other branch in a payments component; needs a person",
+      "hints": {
+        "labels": [
+          "payments"
+        ],
+        "blastRadius": 2,
+        "novelty": [],
+        "confidence": "static",
+        "rulesOfTheGame": false,
+        "intentMismatch": false,
+        "needsPerson": true
+      },
+      "locations": [
+        {
+          "file": "services/billing/src/discount.ts",
+          "lines": [
+            20,
+            20
+          ],
+          "side": "head"
+        }
+      ]
+    },
+    {
+      "id": "internal-changes:orders",
+      "kind": "internal",
+      "subkind": "internal-changes",
+      "level": "structure",
+      "subject": "orders",
+      "component": "orders",
+      "kindLabel": "Internal",
+      "title": "8 changed lines of code inside `orders`",
+      "whyItMatters": "Stays inside `orders`; no other component depends on it",
+      "hints": {
+        "labels": [],
+        "blastRadius": 0,
+        "novelty": [],
+        "confidence": "static",
+        "rulesOfTheGame": false,
+        "intentMismatch": false,
+        "needsPerson": false
+      },
+      "locations": [
+        {
+          "file": "services/orders/src/orders.ts",
+          "lines": [
+            4,
+            4
+          ],
+          "side": "base"
+        },
+        {
+          "file": "services/orders/src/orders.ts",
+          "lines": [
+            4,
+            4
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/orders/src/orders.ts",
+          "lines": [
+            21,
+            24
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/orders/src/orders.ts",
+          "lines": [
+            39,
+            39
+          ],
+          "side": "base"
+        },
+        {
+          "file": "services/orders/src/orders.ts",
+          "lines": [
+            43,
+            43
+          ],
+          "side": "head"
+        }
+      ],
+      "stats": {
+        "linesAdded": 6,
+        "linesRemoved": 2,
+        "files": 1
+      }
+    }
+  ],
+  "ruleViolations": [],
+  "structure": {
+    "movedFiles": [],
+    "formattingOnly": []
+  },
+  "textStats": {
+    "files": 2,
+    "linesAdded": 7,
+    "linesRemoved": 3
+  },
+  "mapDiagnostics": []
+}

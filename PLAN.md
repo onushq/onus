@@ -1,7 +1,7 @@
 # Onus: Implementation Plan
 
 Source: the manifesto *Code Is Not the Product* by Mikias Abebe (Sep 28, 2026).
-Status: **plan updated 2026-10-05.** Nothing is implemented yet. Onus is written in Rust and will be fully open source under Apache-2.0. Section 2 lists the decisions; the open ones are marked.
+Status: **plan updated 2026-10-07.** Phase 1 milestones M0–M5 are implemented on the `phase-1/first-version` branch (see 5.9); M6 is in progress and M7 is next. Onus is written in Rust and fully open source under Apache-2.0. Section 2 lists the decisions; the open ones are marked.
 
 **Naming.** The project and the software are both called **Onus**. The name comes from *onus probandi*, the burden of proof: today that burden sits on a reviewer who has to find problems by reading lines, and Onus moves it to the agent, which has to prove its change with evidence. Tagline: *"The onus is on the agent."*
 
@@ -190,12 +190,12 @@ Phases 3–5 add `ScopeToken`, `EscalationRequest`, `ChangeApplication`, `JudgeV
 ### 5.1 Pipeline
 
 ```
-onus report --base <ref> --head <ref> [--format md|json] [--intent-file f]
+onus report --base <ref> --head <ref> [--format md|json] [--intent <file>] [--fail-on rule-violation|secrets]
 
- 1. Materialize base and head (git worktrees in a temp dir; no installs)
+ 1. Materialize base and head (git archive into temp dirs; no installs)
  2. Load config: onus.yaml if present, otherwise infer (workspaces, CODEOWNERS, heuristics)
  3. Build map(base) [cached by sha+config+version] and map(head) via language adapters
- 4. Text stats (git diff --numstat) for line attribution
+ 4. Text stats (an in-process line diff of the two trees) for line attribution
  5. Semantic diff: match components → symbols → edges → externals → packages → tests
  6. Classify each difference into kind/subkind; attach hints (labels, blast radius, novelty)
  7. Evaluate declared boundary rules on head; report only *new* violations
@@ -218,6 +218,7 @@ onus report --base <ref> --head <ref> [--format md|json] [--intent-file f]
   - *Config:* `process.env.X` → `reads-config`.
 - **Tests:** test files are matched by globs. For each, extract test cases, assertion counts, `.skip`/`.only`/`xit`/`todo` markers and snapshot usage. Static `exercises` edges are the symbols referenced from test files; real coverage arrives in Phase 5.
 - **Adapter trait** (`LanguageAdapter::build(&Workspace) -> PartialMap`) lives in `onus-core` from day one, so Python, Go and others plug in through their tree-sitter grammars without touching the diff engine.
+- **Pluggable providers** ([ADR 0006](docs/adr/0006-pluggable-map-building.md)): discovery, language and fact providers; external plugins over a JSON protocol; SCIP index import and an LSP bridge for compiler-backed facts, run only in trusted mode inside a sandbox when they may execute repository code.
 
 ### 5.3 Semantic diff engine (`crates/onus-diff`)
 
@@ -331,16 +332,28 @@ A fixture monorepo, `fixtures/shop`, mirrors the manifesto's example: `orders`, 
 
 ### 5.9 Milestones
 
-| M | Deliverable | Done when |
-|---|---|---|
-| M0 | Public repo and Cargo workspace (rustfmt, clippy, insta, cargo-deny, CI on Linux/macOS/Windows); `onus-core` types + generated JSON Schemas; `fixtures/shop` with scenario scripts; community files (section 7a) | CI green on all three platforms; `onus --version` runs |
-| M1 | `onus-lang-ts` adapter: components, symbols, shapes, fingerprints, imports, calls, tests → `onus map build --json` | Golden map snapshot of `fixtures/shop` is reviewed and correct |
-| M2 | Declared layer: `onus.yaml` parsing + validation, inference (workspaces, CODEOWNERS), `onus init` | Inferred config for the fixture matches the hand-written one |
-| M3 | Diff engine core: symbol matching, rename/move, contract diff, edge diff, packages, config, blast radius | S2, S7 and S9 pass |
-| M4 | Extractors and detectors: externals registry, events, Prisma, env; notable edits; test weakening; secrets | S1 (minus rendering), S3, S5 and S8 pass |
-| M5 | Ranking, internal collapsing, intent check, boundary rules, markdown + JSON renderers → `onus report` | All of S1–S9 pass as report snapshots |
-| M6 | Release binaries via `cargo-dist` (Linux, macOS, Windows; x86_64 and arm64), Homebrew tap and shell installer; composite GitHub Action, sticky comment, base-map cache, `/onus caught`, metrics JSONL; dogfood on this repo | Running on Onus's own PRs |
-| M7 | Field trial on 3–5 real TS repos (including agent-authored PRs); tune false positives; performance pass | Gate data collected (5.10) |
+| M | Deliverable | Done when | Status |
+|---|---|---|---|
+| M0 | Public repo and Cargo workspace (rustfmt, clippy, insta, cargo-deny, CI on Linux/macOS/Windows); `onus-core` types + generated JSON Schemas; `fixtures/shop` with scenario scripts; community files (section 7a) | CI green on all three platforms; `onus --version` runs | **Done** (CI defined in `.github/workflows/ci.yml`; green on all three platforms still to be confirmed on the first pull request) |
+| M1 | `onus-lang-ts` adapter: components, symbols, shapes, fingerprints, imports, calls, tests → `onus map build --json` | Golden map snapshot of `fixtures/shop` is reviewed and correct | **Done** (the command is `onus map <dir> --json`; snapshot reviewed) |
+| M2 | Declared layer: `onus.yaml` parsing + validation, inference (workspaces, CODEOWNERS), `onus init` | Inferred config for the fixture matches the hand-written one | **Done** (components, paths and owners match; labels are suggested as comments) |
+| M3 | Diff engine core: symbol matching, rename/move, contract diff, edge diff, packages, config, blast radius | S2, S7 and S9 pass | **Done**, except "≥ 0.9 similar" rename matching (exact fingerprints only) |
+| M4 | Extractors and detectors: externals registry, events, Prisma, env; notable edits; test weakening; secrets | S1 (minus rendering), S3, S5 and S8 pass | **Done** |
+| M5 | Ranking, internal collapsing, intent check, boundary rules, markdown + JSON renderers → `onus report` | All of S1–S9 pass as report snapshots | **Done** |
+| M6 | Release binaries via `cargo-dist` (Linux, macOS, Windows; x86_64 and arm64), Homebrew tap and shell installer; composite GitHub Action, sticky comment, base-map cache, `/onus caught`, metrics JSONL; dogfood on this repo | Running on Onus's own PRs | **In progress:** release workflow (5 targets, checksums, build attestations), shell installer, composite Action with job summary and sticky comment, dogfood workflow. Not yet: Homebrew tap, base-map cache, `/onus caught`, metrics JSONL |
+| M7 | Field trial on 3–5 real TS repos (including agent-authored PRs); tune false positives; performance pass | Gate data collected (5.10) | Not started |
+
+**Deviations from this plan in M0–M5** (details in [ADR 0004](docs/adr/0004-map-and-report-format-additions.md) and [ADR 0005](docs/adr/0005-phase-1-diff-behavior.md)):
+
+- The map and report formats add fields to the sketch in section 4 (file token hashes, body facts, literals, `variable` symbols, location sides, a report summary and structure notes).
+- Module resolution lives in the TypeScript adapter; `onus-map` supplies workspace packages.
+- Both maps use the base tree's `onus.yaml`, so a pull request cannot relax its own checks.
+- Moves and formatting-only changes are listed as structure, not as rows (S9 needs zero rows); renames are one internal row.
+- New data writes and changed constants in labeled components are security-sensitive; additive changes to declared contracts do not need a person by themselves.
+- Exit codes: 1 for usage or runtime errors, 2 only for `--fail-on`.
+- `onus report` uses `git archive` instead of worktrees, and line counts come from an in-process diff instead of `git diff --numstat`.
+- No base-map cache yet: mapping the generated 230,000-line workspace takes about 0.7 s, so the cache moves to M6 with the Action.
+- M6 builds release binaries with a plain GitHub Actions workflow instead of `cargo-dist` (D6): five targets, fixed archive names that `releases/latest/download/` links and the Action rely on, and GitHub build attestations. Linux binaries are static (musl).
 
 ### 5.10 Phase 1 gate and metrics
 
@@ -443,6 +456,11 @@ onus/
   crates/
     onus-core/       # map, change and report types; JSON Schema generation; ids; ranking
     onus-lang-ts/    # tree-sitter TypeScript/JavaScript adapter + extractors
+    onus-lang-scip/  # SCIP index import (compiler-backed facts)
+    onus-lang-lsp/   # LSP bridge for any language server
+    onus-plugin-example/  # reference plugin (not published)
+    onus-plugin-svelte/   # Svelte components, as a language plugin
+    onus-testkit/    # test doubles (not published)
     onus-map/        # workspace discovery, adapters + declared layer -> CodebaseMap; caching
     onus-diff/       # semantic diff, classification, rules, intent check
     onus-report/     # markdown and JSON renderers

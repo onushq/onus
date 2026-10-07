@@ -1,0 +1,110 @@
+---
+source: crates/onus-cli/tests/scenarios.rs
+expression: json
+---
+{
+  "schemaVersion": 1,
+  "base": "base",
+  "head": "head",
+  "summary": {
+    "meaningChanges": 1,
+    "needsAttention": 1,
+    "secrets": 0,
+    "newRuleViolations": 1,
+    "intentMismatches": 0
+  },
+  "changes": [
+    {
+      "id": "rule-violation:deny:billing->notifications.internal",
+      "kind": "breaking",
+      "subkind": "rule-violation",
+      "level": "relationship",
+      "subject": "deny:billing->notifications.internal",
+      "component": "billing",
+      "kindLabel": "Boundary rule violation",
+      "title": "`billing` reaches into `notifications` internals (`renderTemplate`)",
+      "whyItMatters": "Breaks the declared rule \"billing may not use the internals of notifications\" with 2 new references; needs a person",
+      "hints": {
+        "labels": [
+          "payments"
+        ],
+        "blastRadius": 1,
+        "novelty": [],
+        "confidence": "static",
+        "rulesOfTheGame": true,
+        "intentMismatch": false,
+        "needsPerson": true
+      },
+      "locations": [
+        {
+          "file": "services/billing/src/receipts.ts",
+          "lines": [
+            2,
+            2
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/billing/src/receipts.ts",
+          "lines": [
+            8,
+            8
+          ],
+          "side": "head"
+        }
+      ]
+    }
+  ],
+  "ruleViolations": [
+    {
+      "id": "rule-violation:deny:billing->notifications.internal",
+      "kind": "breaking",
+      "subkind": "rule-violation",
+      "level": "relationship",
+      "subject": "deny:billing->notifications.internal",
+      "component": "billing",
+      "kindLabel": "Boundary rule violation",
+      "title": "`billing` reaches into `notifications` internals (`renderTemplate`)",
+      "whyItMatters": "Breaks the declared rule \"billing may not use the internals of notifications\" with 2 new references; needs a person",
+      "hints": {
+        "labels": [
+          "payments"
+        ],
+        "blastRadius": 1,
+        "novelty": [],
+        "confidence": "static",
+        "rulesOfTheGame": true,
+        "intentMismatch": false,
+        "needsPerson": true
+      },
+      "locations": [
+        {
+          "file": "services/billing/src/receipts.ts",
+          "lines": [
+            2,
+            2
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/billing/src/receipts.ts",
+          "lines": [
+            8,
+            8
+          ],
+          "side": "head"
+        }
+      ]
+    }
+  ],
+  "structure": {
+    "movedFiles": [],
+    "formattingOnly": []
+  },
+  "textStats": {
+    "files": 1,
+    "linesAdded": 2,
+    "linesRemoved": 1
+  },
+  "mapDiagnostics": []
+}

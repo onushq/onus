@@ -1,0 +1,20 @@
+# Outbound HTTP calls with a literal URL: fetch, got, ky and axios.
+pack: http-clients
+rules:
+  - id: call
+    query: |
+      ((call_expression
+         function: (identifier) @fn
+         arguments: (arguments . [(string) (template_string)] @url))
+       (#match? @fn "^(fetch|got|ky|axios)$"))
+    emit: { host: "@url" }
+  - id: axios-method
+    query: |
+      ((call_expression
+         function: (member_expression
+           object: (identifier) @obj
+           property: (property_identifier) @m)
+         arguments: (arguments . [(string) (template_string)] @url))
+       (#eq? @obj "axios")
+       (#match? @m "^(get|post|put|patch|delete|head|options|request)$"))
+    emit: { host: "@url" }

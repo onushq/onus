@@ -1,0 +1,28 @@
+# The declared layer for the shop fixture: components, owners, sensitivity
+# labels, one boundary rule and the extractors Onus cannot infer.
+version: 1
+components:
+  orders:           { path: "services/orders/**",           owners: ["@team-orders"] }
+  notifications:    { path: "services/notifications/**",    owners: ["@team-growth"] }
+  user-preferences: { path: "services/user-preferences/**", owners: ["@team-growth"], labels: [pii] }
+  billing:          { path: "services/billing/**",          owners: ["@team-payments"], labels: [payments] }
+  events:           { path: "packages/events/**",           owners: ["@team-platform"] }
+  logger:           { path: "packages/logger/**",           owners: ["@team-platform"] }
+  money:            { path: "packages/money/**",            owners: ["@team-platform"] }
+contracts:
+  UserPreferences:
+    symbol: "user-preferences:src/types.ts#UserPreferences"
+    invariants: ["phone numbers are stored in E.164"]
+rules:
+  # billing may not reach into notifications' internals
+  - deny: { from: billing, to: notifications.internal }
+labels:
+  payments: { sensitivity: high }
+  auth:     { sensitivity: high }
+  pii:      { sensitivity: high }
+extractors:
+  events:
+    publish:   ["bus.publish($EVENT, ...)"]
+    subscribe: ["bus.subscribe($EVENT, ...)"]
+  externals:
+    "@acme/sms": { vendor: "Acme SMS", category: sms, egress: [phone] }

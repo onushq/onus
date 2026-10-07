@@ -1,0 +1,215 @@
+---
+source: crates/onus-cli/tests/scenarios.rs
+expression: json
+---
+{
+  "schemaVersion": 1,
+  "base": "base",
+  "head": "head",
+  "summary": {
+    "meaningChanges": 3,
+    "needsAttention": 2,
+    "secrets": 0,
+    "newRuleViolations": 0,
+    "intentMismatches": 2
+  },
+  "changes": [
+    {
+      "id": "new-data-write:db-table:payment@billing",
+      "kind": "security-sensitive",
+      "subkind": "new-data-write",
+      "level": "relationship",
+      "subject": "db-table:payment",
+      "component": "billing",
+      "kindLabel": "New data write",
+      "title": "`billing` now writes to the `payment` table",
+      "whyItMatters": "New write path in a payments component; needs a person",
+      "hints": {
+        "labels": [
+          "payments"
+        ],
+        "blastRadius": 1,
+        "novelty": [],
+        "confidence": "static",
+        "rulesOfTheGame": false,
+        "intentMismatch": true,
+        "needsPerson": true
+      },
+      "locations": [
+        {
+          "file": "services/billing/src/payments.ts",
+          "lines": [
+            32,
+            32
+          ],
+          "side": "head"
+        }
+      ]
+    },
+    {
+      "id": "internal-changes:billing",
+      "kind": "internal",
+      "subkind": "internal-changes",
+      "level": "structure",
+      "subject": "billing",
+      "component": "billing",
+      "kindLabel": "Internal",
+      "title": "10 lines of new code inside `billing`",
+      "whyItMatters": "Stays inside `billing`; no other component depends on it",
+      "hints": {
+        "labels": [
+          "payments"
+        ],
+        "blastRadius": 0,
+        "novelty": [],
+        "confidence": "static",
+        "rulesOfTheGame": false,
+        "intentMismatch": true,
+        "needsPerson": true
+      },
+      "locations": [
+        {
+          "file": "services/billing/src/payments.ts",
+          "lines": [
+            1,
+            1
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/billing/src/payments.ts",
+          "lines": [
+            5,
+            6
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/billing/src/payments.ts",
+          "lines": [
+            30,
+            31
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/billing/src/payments.ts",
+          "lines": [
+            33,
+            34
+          ],
+          "side": "head"
+        },
+        {
+          "file": "services/billing/src/payments.ts",
+          "lines": [
+            40,
+            42
+          ],
+          "side": "head"
+        }
+      ],
+      "stats": {
+        "linesAdded": 10,
+        "linesRemoved": 0,
+        "files": 1
+      }
+    },
+    {
+      "id": "internal-changes:logger",
+      "kind": "internal",
+      "subkind": "internal-changes",
+      "level": "structure",
+      "subject": "logger",
+      "component": "logger",
+      "kindLabel": "Internal",
+      "title": "21 changed lines of code inside `logger`",
+      "whyItMatters": "Stays inside `logger`, which `billing`, `notifications` and `orders` depend on",
+      "hints": {
+        "labels": [],
+        "blastRadius": 5,
+        "novelty": [],
+        "confidence": "static",
+        "rulesOfTheGame": false,
+        "intentMismatch": false,
+        "needsPerson": false
+      },
+      "locations": [
+        {
+          "file": "packages/logger/src/format.ts",
+          "lines": [
+            1,
+            17
+          ],
+          "side": "head"
+        },
+        {
+          "file": "packages/logger/src/format.ts",
+          "lines": [
+            9,
+            9
+          ],
+          "side": "base"
+        },
+        {
+          "file": "packages/logger/src/format.ts",
+          "lines": [
+            12,
+            12
+          ],
+          "side": "base"
+        },
+        {
+          "file": "packages/logger/src/format.ts",
+          "lines": [
+            26,
+            26
+          ],
+          "side": "head"
+        },
+        {
+          "file": "packages/logger/src/format.ts",
+          "lines": [
+            29,
+            29
+          ],
+          "side": "head"
+        }
+      ],
+      "stats": {
+        "linesAdded": 19,
+        "linesRemoved": 2,
+        "files": 1
+      }
+    }
+  ],
+  "intentCheck": {
+    "stated": "Add structured fields to log lines",
+    "touches": [
+      "logger"
+    ],
+    "contracts": [],
+    "externals": [],
+    "mismatches": [
+      {
+        "changeId": "internal-changes:billing",
+        "reason": "`billing` is not in `touches` (logger)"
+      },
+      {
+        "changeId": "new-data-write:db-table:payment@billing",
+        "reason": "`billing` is not in `touches` (logger)"
+      }
+    ]
+  },
+  "ruleViolations": [],
+  "structure": {
+    "movedFiles": [],
+    "formattingOnly": []
+  },
+  "textStats": {
+    "files": 2,
+    "linesAdded": 30,
+    "linesRemoved": 2
+  },
+  "mapDiagnostics": []
+}

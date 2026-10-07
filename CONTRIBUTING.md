@@ -1,6 +1,6 @@
 # Contributing to Onus
 
-Thanks for helping. Onus is early, so the most useful contributions right now are design feedback on [PLAN.md](PLAN.md), real-world pull requests we can test semantic reports against, and, once Phase 1 code lands, adapters, extractors and test scenarios.
+Thanks for helping. Onus is early, so the most useful contributions right now are design feedback on [PLAN.md](PLAN.md), real-world pull requests we can test semantic reports against, adapters, extractors and test scenarios.
 
 ## Ways to contribute
 
@@ -13,18 +13,39 @@ Good first tasks are labeled [`good first issue`](https://github.com/onushq/onus
 
 ## Development
 
-Onus is a Cargo workspace on stable Rust. Once the workspace lands (milestone M0):
+Onus is a Cargo workspace on stable Rust; `rust-toolchain.toml` pins the version, and `rustup` installs it on first use. The crates follow the pipeline: `onus-core` (types, ids, ranking, schemas, provider and plugin interfaces), `onus-lang-ts` (the TypeScript adapter), `onus-lang-scip` (SCIP import), `onus-lang-lsp` (the LSP bridge), `onus-map` (map building and plugins), `onus-diff` (the semantic diff), `onus-report` (renderers) and `onus-cli` (the `onus` binary). `onus-plugin-svelte` adds Svelte through the plugin protocol, `onus-plugin-example` is a reference plugin, and `onus-testkit` holds test doubles such as a fake language server. Framework packs live in `crates/onus-lang-ts/packs/`.
 
 ```sh
 cargo build
 cargo test                     # unit tests and snapshot tests
-cargo insta review             # review changed map and report snapshots
 cargo fmt --all
 cargo clippy --all-targets -- -D warnings
+cargo run -p onus-cli -- map fixtures/shop/base
+```
+
+Two checks need extra tools, installed once:
+
+```sh
+cargo install cargo-insta cargo-deny
+cargo insta review             # review changed map and report snapshots
 cargo deny check               # licenses and advisories
 ```
 
-Map and report output is tested with snapshots (`insta`) against the scenarios in `fixtures/shop`. When a change alters a snapshot, review it with `cargo insta review` and explain the change in your pull request.
+Map and report output is tested with snapshots (`insta`) against the golden scenarios in `fixtures/shop`: `base/` is a small monorepo and each `scenarios/<id>/` folder is an overlay of changed and added files, with a `deleted.txt` for removed files and an optional `intent.yaml`. When a change alters a snapshot, review it with `cargo insta review` and explain the change in your pull request. A snapshot is a claim about the code: a wrong fact in it is a bug, even if the test passes.
+
+The JSON Schemas under `schemas/` are generated from `onus-core`; a test fails when they are stale. Regenerate them with:
+
+```sh
+cargo run -p onus-cli -- schema --out schemas
+```
+
+The user guide lives in `crates/onus-cli/guide/` and is compiled into the binary (`onus help <topic>`); `docs/guide.md` indexes it. When you change behavior a user can see, update the guide in the same pull request. Tests check that it still lists the built-in registry, the defaults and every kind of change the scenarios produce.
+
+To measure performance on a generated workspace of about 200,000 lines:
+
+```sh
+cargo test --release -p onus-cli --test perf -- --ignored --nocapture
+```
 
 ## Pull requests
 
