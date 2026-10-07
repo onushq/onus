@@ -919,6 +919,7 @@ dependencies = [
  "globset",
  "onus-core",
  "onus-map",
+ "regex",
  "serde",
  "serde_json",
  "serde_yaml_ng",

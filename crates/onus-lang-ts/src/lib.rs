@@ -151,6 +151,21 @@ pub fn analyze_cached(
     }
 }
 
+/// How a third-party API is named in [`SourceFile::external_apis`]: the
+/// imported name and the member used on it (`Effect.void`), the member
+/// alone through a namespace import (`object` for `z.object`), or
+/// `default.<member>`.
+fn api_name(imported: &Imported, member: Option<&str>) -> Option<String> {
+    match (imported, member) {
+        (Imported::Named(name), Some(m)) => Some(format!("{name}.{m}")),
+        (Imported::Named(name), None) => Some(name.clone()),
+        (Imported::Namespace, Some(m)) => Some(m.to_string()),
+        (Imported::Default, Some(m)) => Some(format!("default.{m}")),
+        (Imported::Default, None) => Some("default".into()),
+        (Imported::Namespace, None) => None,
+    }
+}
+
 /// A hash of everything that compiles into [`Patterns`]: event patterns,
 /// Prisma clients and packs.
 pub fn patterns_key(ws: &Workspace) -> String {
@@ -766,6 +781,7 @@ impl<'a> Linker<'a> {
             }
 
             // References.
+            let mut external_apis: BTreeSet<String> = BTreeSet::new();
             for r in &f.refs {
                 let target = if self.decls[fi].contains_key(r.name.as_str()) && !f.is_test {
                     Some(Target::Symbol(self.symbol_id(fi, &r.name)))
@@ -801,6 +817,11 @@ impl<'a> Linker<'a> {
                         }
                     }
                     Some(Target::Npm(p)) => {
+                        if let Some((_, b)) = self.bindings[fi].get(r.name.as_str())
+                            && let Some(api) = api_name(&b.imported, r.member.as_deref())
+                        {
+                            external_apis.insert(format!("{p} {api}"));
+                        }
                         if !f.is_test
                             && (r.kind == RefKind::Call
                                 || (r.kind == RefKind::Value && r.member.is_some()))
@@ -930,6 +951,7 @@ impl<'a> Linker<'a> {
                     targets.dedup();
                     targets
                 },
+                external_apis: external_apis.into_iter().collect(),
             });
             if f.is_test {
                 tests_out.push(TestNode {

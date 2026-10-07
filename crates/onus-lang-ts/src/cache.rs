@@ -21,7 +21,7 @@ use crate::extract::FileFacts;
 
 /// Bumped when the facts format or extraction changes in a way the crate
 /// version does not capture.
-const FORMAT: &str = "1";
+const FORMAT: &str = "2";
 
 /// Entries kept in memory before the oldest generation is dropped.
 const MEMORY_ENTRIES: usize = 400_000;

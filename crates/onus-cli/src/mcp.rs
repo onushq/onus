@@ -270,7 +270,7 @@ impl OnusMcp {
 
     #[tool(
         name = "onus_check",
-        description = "The changes in meaning between a commit (default HEAD) and this worktree as it is now: new external services, contract changes, new dependencies between components, weakened tests, broken boundary rules, committed secrets. Run before finishing a task."
+        description = "Check your work before finishing: the changes in meaning between a commit (default HEAD) and this worktree as it is now. Returns a checklist of things to verify (third-party APIs this repository has never used, with the pinned version; users of a changed interface you have not updated; secrets; broken boundary rules) and the full report (contract changes, new external services, new dependencies between components, weakened tests)."
     )]
     async fn check(
         &self,

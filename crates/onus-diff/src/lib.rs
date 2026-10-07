@@ -5,6 +5,7 @@
 //! changed lines. Every row comes from deterministic analysis and fixed
 //! templates; nothing is generated.
 
+mod apis;
 mod collapse;
 pub mod config_files;
 mod contracts;
@@ -73,6 +74,7 @@ pub fn diff(input: &DiffInput) -> SemanticReport {
     rows.extend(tests.rows.iter().cloned());
     rows.extend(notable::rows(&ctx, &pairs));
     rows.extend(secrets_scan::rows(&ctx));
+    rows.extend(apis::rows(&ctx));
     rows.extend(violations);
     let (internal_rows, structure) = internal::rows(&ctx, &rows, &tests);
     rows.extend(internal_rows);

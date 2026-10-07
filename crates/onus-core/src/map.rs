@@ -119,6 +119,12 @@ pub struct SourceFile {
     /// Resolved targets of the file's imports, in source order: a file path,
     /// `npm:<package>`, or `?<specifier>` when unresolved.
     pub imports: Vec<String>,
+    /// The APIs of third-party packages the file uses, as
+    /// `<package> <name>[.<member>]` (`effect Effect.void`, `zod z.object`
+    /// for `import { z }`, `zod object` through a namespace import), sorted.
+    /// Lets a diff spot APIs the repository has never used before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub external_apis: Vec<String>,
 }
 
 #[derive(

@@ -128,7 +128,7 @@ impl MapCache {
         scip: &[PathBuf],
     ) -> Result<MapCache> {
         let mut key = format!(
-            "onus map cache 1\nonus {}\ncommit {commit}\nconfig {}\ntrusted {} {}\nplugins {}\n",
+            "onus map cache 2\nonus {}\ncommit {commit}\nconfig {}\ntrusted {} {}\nplugins {}\n",
             env!("CARGO_PKG_VERSION"),
             config.map(|c| c.hash.as_str()).unwrap_or("none"),
             providers.trusted,
@@ -247,8 +247,60 @@ pub fn check_worktree(
     Ok(serde_json::json!({
         "base": report.base,
         "summary": report.summary,
+        "checklist": checklist(&report),
         "markdown": onus_report::to_markdown(&report, !head_map.rules.is_empty()),
     }))
+}
+
+/// What an agent should verify before it is done, from the rows of a
+/// report: things only a person or a compiler could otherwise catch.
+pub fn checklist(report: &SemanticReport) -> Vec<String> {
+    let at = |c: &onus_core::SemanticChange| -> String {
+        let places: Vec<String> = c
+            .locations
+            .iter()
+            .take(6)
+            .map(|l| format!("{}:{}", l.file, l.lines[0]))
+            .collect();
+        places.join(", ")
+    };
+    let mut items = Vec::new();
+    for c in &report.changes {
+        match c.subkind.as_str() {
+            "external-api-first-use" => items.push(format!(
+                "{}. {}. Used at {}.",
+                c.title,
+                capitalize(&c.why_it_matters),
+                at(c)
+            )),
+            "secret-committed" => items.push(format!(
+                "{}: remove it and load it from a secret store.",
+                c.title
+            )),
+            "rule-violation" => items.push(format!("{}: {}", c.title, c.why_it_matters)),
+            s if s.starts_with("contract-") && c.kind == onus_core::ChangeKind::Breaking => {
+                if let Some((_, users)) = c.why_it_matters.split_once("not changed yet: ") {
+                    items.push(format!(
+                        "{} (breaking). Update or confirm the users not changed yet: {}",
+                        c.title,
+                        users.trim_end_matches('.')
+                    ));
+                } else {
+                    items.push(format!("{} (breaking): check its callers.", c.title));
+                }
+            }
+            _ => {}
+        }
+    }
+    items
+}
+
+fn capitalize(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+        None => String::new(),
+    }
 }
 
 /// Extracted base commits and their maps, kept by a long-running server so

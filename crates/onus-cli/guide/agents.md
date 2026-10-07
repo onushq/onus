@@ -18,7 +18,7 @@ Any MCP client that starts servers over stdio: run `onus mcp` in the repository 
 
 The check:
 
-- `onus_check`: the changes in meaning between a commit (default `HEAD`) and the worktree now: the same rows as a pull request report. Run it before finishing a task.
+- `onus_check`: the changes in meaning between a commit (default `HEAD`) and the worktree now, as the same rows as a pull request report, preceded by a short checklist of what to verify before finishing: third-party APIs the repository has never used (with the pinned version), implementations and test doubles of a changed interface that were not updated, committed secrets and broken boundary rules. Run it before finishing a task.
 
 Navigation (experimental):
 

@@ -684,6 +684,13 @@
           "description": "Hash of the syntax tokens with comments, formatting and import\nspecifiers removed. Equal hashes mean \"same code, maybe reformatted\".",
           "type": "string"
         },
+        "externalApis": {
+          "description": "The APIs of third-party packages the file uses, as\n`<package> <name>[.<member>]` (`effect Effect.void`, `zod z.object`\nfor `import { z }`, `zod object` through a namespace import), sorted.\nLets a diff spot APIs the repository has never used before.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "imports": {
           "description": "Resolved targets of the file's imports, in source order: a file path,\n`npm:<package>`, or `?<specifier>` when unresolved.",
           "type": "array",

@@ -225,15 +225,182 @@ fn diff_shapes(kind: SymbolKind, b: &ContractShape, h: &ContractShape) -> Vec<De
         }
         ShapeKind::Alias | ShapeKind::Value => {
             if b.type_text != h.type_text {
-                out.push(Delta::unverified(format!(
-                    "type changes from `{}` to `{}`",
-                    type_or_unknown(&b.type_text),
-                    type_or_unknown(&h.type_text)
-                )));
+                match (
+                    b.type_text.as_deref().and_then(union_members),
+                    h.type_text.as_deref().and_then(union_members),
+                ) {
+                    (Some(bu), Some(hu)) => out.extend(diff_unions(&bu, &hu)),
+                    _ => out.push(Delta::unverified(format!(
+                        "type changes from `{}` to `{}`",
+                        compact(type_or_unknown(&b.type_text)),
+                        compact(type_or_unknown(&h.type_text))
+                    ))),
+                }
+            }
+            // An unannotated value whose initializer's keys are known.
+            if b.type_text.is_none()
+                && h.type_text.is_none()
+                && (!b.members.is_empty() || !h.members.is_empty())
+            {
+                out.extend(diff_keys(&b.members, &h.members));
             }
         }
     }
     out
+}
+
+/// Type text longer than this is cut in titles.
+const MAX_TYPE_TEXT: usize = 80;
+
+fn compact(t: &str) -> String {
+    if t.chars().count() <= MAX_TYPE_TEXT {
+        t.to_string()
+    } else {
+        let cut: String = t.chars().take(MAX_TYPE_TEXT - 1).collect();
+        format!("{cut}…")
+    }
+}
+
+/// The members of a union type (`'a' | 'b' | Foo<X | Y>`), split at the
+/// top level only; `None` when the type is not a union.
+fn union_members(t: &str) -> Option<Vec<String>> {
+    let mut parts = Vec::new();
+    let mut cur = String::new();
+    let mut depth = 0i32;
+    let mut quote: Option<char> = None;
+    let mut prev = ' ';
+    for ch in t.chars() {
+        match quote {
+            Some(q) => {
+                cur.push(ch);
+                if ch == q && prev != '\\' {
+                    quote = None;
+                }
+            }
+            None => match ch {
+                '\'' | '"' | '`' => {
+                    quote = Some(ch);
+                    cur.push(ch);
+                }
+                '<' | '(' | '[' | '{' => {
+                    depth += 1;
+                    cur.push(ch);
+                }
+                // `=>` closes nothing.
+                '>' if prev == '=' => cur.push(ch),
+                '>' | ')' | ']' | '}' => {
+                    depth -= 1;
+                    cur.push(ch);
+                }
+                '|' if depth == 0 => {
+                    parts.push(cur.trim().to_string());
+                    cur.clear();
+                }
+                _ => cur.push(ch),
+            },
+        }
+        prev = ch;
+    }
+    parts.push(cur.trim().to_string());
+    parts.retain(|p| !p.is_empty());
+    (parts.len() >= 2).then_some(parts)
+}
+
+/// Members a union gained or lost; reordering is no change.
+fn diff_unions(base: &[String], head: &[String]) -> Vec<Delta> {
+    let added: Vec<String> = head
+        .iter()
+        .filter(|m| !base.contains(m))
+        .map(|m| format!("`{}`", compact(m)))
+        .collect();
+    let removed: Vec<String> = base
+        .iter()
+        .filter(|m| !head.contains(m))
+        .map(|m| format!("`{}`", compact(m)))
+        .collect();
+    let mut out = Vec::new();
+    if !added.is_empty() {
+        out.push(Delta::additive(
+            "contract-union-widened",
+            format!("accepts {} too", listed(&added)),
+        ));
+    }
+    if !removed.is_empty() {
+        out.push(Delta::breaking(
+            "contract-union-narrowed",
+            format!("no longer accepts {}", listed(&removed)),
+        ));
+    }
+    out
+}
+
+/// Keys an unannotated value's initializer gained, lost or changed.
+fn diff_keys(base: &[Member], head: &[Member]) -> Vec<Delta> {
+    let b: BTreeMap<&str, &Member> = base.iter().map(|m| (m.name.as_str(), m)).collect();
+    let h: BTreeMap<&str, &Member> = head.iter().map(|m| (m.name.as_str(), m)).collect();
+    let added: Vec<String> = head
+        .iter()
+        .filter(|m| !b.contains_key(m.name.as_str()))
+        .map(|m| format!("`{}`", m.name))
+        .collect();
+    let removed: Vec<String> = base
+        .iter()
+        .filter(|m| !h.contains_key(m.name.as_str()))
+        .map(|m| format!("`{}`", m.name))
+        .collect();
+    let mut out = Vec::new();
+    if !added.is_empty() {
+        out.push(Delta::additive(
+            "contract-key-added",
+            if added.len() == 1 {
+                format!("gains a {} key", added[0])
+            } else {
+                format!("gains keys {}", listed(&added))
+            },
+        ));
+    }
+    if !removed.is_empty() {
+        out.push(Delta::breaking(
+            "contract-key-removed",
+            if removed.len() == 1 {
+                format!("loses its {} key", removed[0])
+            } else {
+                format!("loses keys {}", listed(&removed))
+            },
+        ));
+    }
+    for m in head {
+        let Some(old) = b.get(m.name.as_str()) else {
+            continue;
+        };
+        if old.type_text == m.type_text {
+            continue;
+        }
+        let shown = |t: &Option<String>| {
+            t.as_deref()
+                .filter(|t| !t.starts_with('#'))
+                .map(str::to_string)
+        };
+        out.push(Delta::unverified(
+            match (shown(&old.type_text), shown(&m.type_text)) {
+                (Some(a), Some(z)) => format!("`{}` changes from `{a}` to `{z}`", m.name),
+                _ => format!("changes its `{}` value", m.name),
+            },
+        ));
+    }
+    out
+}
+
+/// `a`, `b`, `c` and 4 more.
+fn listed(items: &[String]) -> String {
+    const SHOWN: usize = 4;
+    if items.len() <= SHOWN + 1 {
+        join_and(items)
+    } else {
+        let mut head: Vec<String> = items[..SHOWN].to_vec();
+        head.push(format!("{} more", items.len() - SHOWN));
+        join_and(&head)
+    }
 }
 
 /// `(breaking, phrase)` for each difference between two shapes.
@@ -274,6 +441,7 @@ fn signature_location(s: &SymbolNode, head: bool) -> Option<Location> {
 
 pub fn rows(ctx: &Ctx, pairs: &Pairs) -> Vec<SemanticChange> {
     let mut rows = Vec::new();
+    let mut opaque: Vec<&SymbolNode> = Vec::new();
     for (b, h, kind) in &pairs.pairs {
         if h.kind == SymbolKind::Method {
             continue;
@@ -309,13 +477,10 @@ pub fn rows(ctx: &Ctx, pairs: &Pairs) -> Vec<SemanticChange> {
                         && (hs.returns.is_none() || hs.kind == ShapeKind::Value)
                         && hs.type_text.is_none()
                         && b.body_fingerprint != h.body_fingerprint;
+                    // Nothing to compare: noted once for all such exports,
+                    // not flagged one by one (they are mostly unchanged).
                     if inferred && deltas.is_empty() {
-                        let mut d = Delta::unverified(
-                            "may have changed its inferred type (no type annotation to compare)"
-                                .into(),
-                        );
-                        d.subkind = "contract-changed-unverified";
-                        deltas.push(d);
+                        opaque.push(h);
                     }
                 }
             }
@@ -329,6 +494,9 @@ pub fn rows(ctx: &Ctx, pairs: &Pairs) -> Vec<SemanticChange> {
             locations.extend(signature_location(b, false));
         }
         rows.push(contract_row(ctx, h, deltas, locations));
+    }
+    if !opaque.is_empty() {
+        rows.push(opaque_row(&opaque));
     }
     for r in &pairs.removed {
         if r.visibility != Visibility::Public || r.kind == SymbolKind::Method {
@@ -416,6 +584,131 @@ pub fn rows(ctx: &Ctx, pairs: &Pairs) -> Vec<SemanticChange> {
     rows
 }
 
+/// The users of a symbol that a breaking change did not touch, test files
+/// first: what to check before the change is done. Returns the sentence for
+/// the row and the locations of those uses.
+///
+/// When the only breaking change is a new required member, code that merely
+/// calls the type is unaffected; only implementations and test doubles
+/// break. Those are found by how they are written (`implements X`,
+/// `satisfies X`, `: X = {`, `as X`, Effect's `Layer.succeed(X, …)` and
+/// `X.of({…})`); when none are found, the test files that use it are listed.
+fn untouched_users(
+    ctx: &Ctx,
+    s: &SymbolNode,
+    deltas: &[Delta],
+    removed: bool,
+) -> (String, Vec<Location>) {
+    const LISTED: usize = 6;
+    if removed {
+        return (String::new(), vec![]);
+    }
+    let changed: std::collections::BTreeSet<&str> =
+        ctx.text.files.iter().map(|f| f.path.as_str()).collect();
+    let mut uses: Vec<(String, u32)> = ctx
+        .dependent_sites(&s.id)
+        .into_iter()
+        .filter(|(f, _)| !changed.contains(f.as_str()))
+        .collect();
+    let only_new_required = deltas
+        .iter()
+        .filter(|d| d.breaking)
+        .all(|d| d.subkind == "contract-field-added-required");
+    let mut noun = "that use it";
+    if only_new_required {
+        let implementing: Vec<(String, u32)> = uses
+            .iter()
+            .filter_map(|(f, _)| implementation_line(ctx, f, &s.name).map(|l| (f.clone(), l)))
+            .collect();
+        if implementing.is_empty() {
+            uses.retain(|(f, _)| ctx.is_test_file(f));
+        } else {
+            uses = implementing;
+            noun = "that implement it";
+        }
+    }
+    type Uses = Vec<(String, u32)>;
+    let (mut tests, mut code): (Uses, Uses) =
+        uses.into_iter().partition(|(f, _)| ctx.is_test_file(f));
+    if tests.is_empty() && code.is_empty() {
+        return (String::new(), vec![]);
+    }
+    let name = |f: &str| format!("`{f}`");
+    let mut shown: Vec<String> = tests
+        .iter()
+        .chain(code.iter())
+        .map(|(f, _)| name(f))
+        .collect();
+    let total = shown.len();
+    shown.truncate(LISTED);
+    let more = if total > LISTED {
+        format!(" and {} more", total - LISTED)
+    } else {
+        String::new()
+    };
+    let what = match (tests.len(), code.len()) {
+        (0, c) => plural(c as u32, "file", "files"),
+        (t, 0) => plural(t as u32, "test file", "test files"),
+        (t, c) => format!(
+            "{} and {}",
+            plural(t as u32, "test file", "test files"),
+            plural(c as u32, "other file", "other files")
+        ),
+    };
+    let sentence = format!(
+        "; not changed yet: {what} {noun} ({}{more})",
+        shown.join(", ")
+    );
+    tests.append(&mut code);
+    let locations = tests
+        .into_iter()
+        .take(LISTED)
+        .map(|(f, l)| Location::head(&f, l, l))
+        .collect();
+    (sentence, locations)
+}
+
+/// The line where `file` (in the head tree) implements `name`, if it does.
+fn implementation_line(ctx: &Ctx, file: &str, name: &str) -> Option<u32> {
+    let text = std::fs::read_to_string(onus_core::paths::native(ctx.head_root, file)).ok()?;
+    let n = regex::escape(name);
+    let pattern = format!(
+        r"implements[^{{]*\b{n}\b|satisfies\s+{n}\b|:\s*{n}\s*=\s*\{{|\bas\s+{n}\b|Layer\.(?:succeed|effect|scoped|sync)\(\s*{n}\b|\b{n}\.of\("
+    );
+    let re = regex::Regex::new(&pattern).ok()?;
+    let m = re.find(&text)?;
+    Some(text[..m.start()].matches('\n').count() as u32 + 1)
+}
+
+/// One row for public symbols whose bodies changed but whose types are
+/// inferred, so there is nothing Onus can compare.
+fn opaque_row(symbols: &[&SymbolNode]) -> SemanticChange {
+    let names: Vec<String> = symbols.iter().map(|s| format!("`{}`", s.name)).collect();
+    let mut row = change(
+        ChangeKind::Internal,
+        "contract-inferred-changed",
+        ChangeLevel::Structure,
+        "inferred-contracts",
+        None,
+        "Inferred types",
+        format!(
+            "{} with inferred types changed: {}",
+            plural(symbols.len() as u32, "public symbol", "public symbols"),
+            listed(&names)
+        ),
+        "Their types are not written down, so Onus cannot compare them; this only matters if \
+         their shapes changed"
+            .into(),
+        symbols
+            .iter()
+            .filter_map(|s| signature_location(s, true))
+            .collect(),
+    );
+    row.id = "contract-inferred-changed".into();
+    row.hints.confidence = Confidence::Low;
+    row
+}
+
 fn contract_row(
     ctx: &Ctx,
     s: &SymbolNode,
@@ -498,9 +791,16 @@ fn contract_row(
         (
             ChangeKind::Breaking,
             "Contract change, breaking",
-            format!("{used}; existing callers may break{invariants}"),
+            format!(
+                "{used}; existing callers may break{}{invariants}",
+                untouched_users(ctx, s, &deltas, removed).0
+            ),
         )
     };
+    let mut locations = locations;
+    if breaking && subkind != "contract-changed-unverified" {
+        locations.extend(untouched_users(ctx, s, &deltas, removed).1);
+    }
     let mut row = change(
         kind,
         subkind,
