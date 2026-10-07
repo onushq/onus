@@ -48,6 +48,7 @@ const REPORT_HELP: &str = concat!(
 #[derive(Debug, Parser)]
 #[command(
     name = "onus",
+    bin_name = "onus",
     version,
     about = "Turns a pull request into a short report of changes in meaning",
     long_about = "Onus reads two versions of a codebase, builds a map of each and reports \
