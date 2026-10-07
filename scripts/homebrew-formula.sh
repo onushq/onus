@@ -12,7 +12,6 @@ set -euo pipefail
 
 tag="${1:?usage: homebrew-formula.sh <tag> [SHA256SUMS]}"
 sums_file="${2:-}"
-version="${tag#v}"
 repo="onushq/onus"
 
 if [ -n "$sums_file" ]; then
@@ -38,7 +37,6 @@ cat <<EOF
 class Onus < Formula
   desc "Turns a pull request into a short report of changes in meaning"
   homepage "https://onushq.com"
-  version "$version"
   license "Apache-2.0"
 
   on_macos do
