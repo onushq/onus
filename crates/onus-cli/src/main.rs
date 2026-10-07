@@ -567,13 +567,15 @@ fn run(cli: Cli) -> Result<i32> {
         }
         Cmd::Serve { socket, idle } => {
             #[cfg(unix)]
-            onus_cli::daemon::serve(&socket, std::time::Duration::from_secs(idle))?;
+            {
+                onus_cli::daemon::serve(&socket, std::time::Duration::from_secs(idle))?;
+                Ok(0)
+            }
             #[cfg(not(unix))]
             {
                 let _ = (socket, idle);
-                bail!("the map server needs Unix sockets; use --no-server");
+                bail!("the map server needs Unix sockets; use --no-server")
             }
-            Ok(0)
         }
         Cmd::Schema { out } => {
             let schemas = onus_core::schema::all_schemas();
