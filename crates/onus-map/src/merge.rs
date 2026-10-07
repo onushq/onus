@@ -10,6 +10,17 @@ use onus_core::{Confidence, Edge, EdgeKind, MapDiagnostic, PartialMap, Site};
 /// united, and an edge confirmed by both keeps the more trustworthy
 /// confidence, so a compiler-confirmed reference upgrades a syntactic one.
 pub fn merge(into: &mut PartialMap, other: PartialMap) {
+    // The first provider merges into nothing: no duplicates to resolve.
+    if into.files.is_empty()
+        && into.symbols.is_empty()
+        && into.edges.is_empty()
+        && into.tests.is_empty()
+        && into.diagnostics.is_empty()
+    {
+        *into = other;
+        sort(into);
+        return;
+    }
     let files: BTreeSet<String> = into.files.iter().map(|f| f.path.clone()).collect();
     into.files
         .extend(other.files.into_iter().filter(|f| !files.contains(&f.path)));

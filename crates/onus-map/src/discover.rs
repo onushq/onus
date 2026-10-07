@@ -468,40 +468,53 @@ fn with_source_ext(stem: &str, files: &BTreeSet<&str>) -> Option<String> {
 
 /// Assigns files to components by their root globs; the most specific
 /// component wins.
+///
+/// All roots go into one glob set, so a path is matched once rather than
+/// once per component (a monorepo has hundreds).
 #[derive(Debug)]
 pub struct ComponentMatcher {
-    sets: Vec<(String, usize, GlobSet)>,
+    /// Per component: id and the length of its folder.
+    components: Vec<(String, usize)>,
+    /// Glob index → component index.
+    owner: Vec<usize>,
+    set: GlobSet,
 }
 
 impl ComponentMatcher {
     pub fn new(components: &[Component]) -> Self {
-        let mut sets = Vec::new();
-        for c in components {
-            let mut b = GlobSetBuilder::new();
+        let mut b = GlobSetBuilder::new();
+        let mut owner = Vec::new();
+        let mut list = Vec::new();
+        for (ci, c) in components.iter().enumerate() {
+            list.push((c.id.clone(), component_dir(&c.roots).len()));
             for r in &c.roots {
                 if let Ok(g) = Glob::new(r) {
                     b.add(g);
+                    owner.push(ci);
                 }
                 // `services/orders/**` should also match the folder itself.
                 if let Some(dir) = r.strip_suffix("/**")
                     && let Ok(g) = Glob::new(dir)
                 {
                     b.add(g);
+                    owner.push(ci);
                 }
             }
-            if let Ok(set) = b.build() {
-                sets.push((c.id.clone(), component_dir(&c.roots).len(), set));
-            }
         }
-        ComponentMatcher { sets }
+        ComponentMatcher {
+            components: list,
+            owner,
+            set: b.build().unwrap_or_else(|_| GlobSet::empty()),
+        }
     }
 
     pub fn component_of(&self, path: &str) -> Option<String> {
-        self.sets
-            .iter()
-            .filter(|(_, _, set)| set.is_match(path))
+        self.set
+            .matches(path)
+            .into_iter()
+            .map(|g| &self.components[self.owner[g]])
             .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(&a.0)))
-            .map(|(id, _, _)| id.clone())
+            .map(|(id, _)| id.clone())
     }
 }
 

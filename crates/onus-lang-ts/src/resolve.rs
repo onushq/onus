@@ -166,11 +166,19 @@ impl Resolver {
         self.workspace_package(spec).is_some()
     }
 
+    /// The workspace package `spec` names, the longest name first: `@a/b/c`
+    /// tries `@a/b/c`, then `@a/b`, then `@a`.
     fn workspace_package(&self, spec: &str) -> Option<&WorkspacePackage> {
-        self.packages
-            .values()
-            .filter(|p| spec == p.name || spec.starts_with(&format!("{}/", p.name)))
-            .max_by_key(|p| p.name.len())
+        let mut end = spec.len();
+        loop {
+            let candidate = &spec[..end];
+            if let Some(p) = self.packages.get(candidate)
+                && p.name == candidate
+            {
+                return Some(p);
+            }
+            end = candidate.rfind('/')?;
+        }
     }
 
     fn nearest_tsconfig(&self, from: &str) -> Option<&TsConfig> {

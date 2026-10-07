@@ -26,8 +26,10 @@ pub const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 /// `/` separators. `.gitignore` files inside the tree are honored; files
 /// outside it are not, so the result does not depend on where the tree is.
 pub fn list_files(root: &Path) -> Vec<String> {
-    let mut out = Vec::new();
-    let walker = WalkBuilder::new(root)
+    // Walked on several threads (large monorepos have tens of thousands of
+    // folders), then sorted, so the result does not depend on scheduling.
+    let out = std::sync::Mutex::new(Vec::new());
+    WalkBuilder::new(root)
         .hidden(false)
         .parents(false)
         .git_ignore(true)
@@ -40,27 +42,36 @@ pub fn list_files(root: &Path) -> Vec<String> {
             let name = e.file_name().to_string_lossy();
             !(e.file_type().is_some_and(|t| t.is_dir()) && SKIPPED_DIRS.contains(&name.as_ref()))
         })
-        .build();
-    for entry in walker.flatten() {
-        if !entry.file_type().is_some_and(|t| t.is_file()) {
-            continue;
-        }
-        if entry.metadata().map(|m| m.len()).unwrap_or(0) > MAX_FILE_BYTES {
-            continue;
-        }
-        let Ok(rel) = entry.path().strip_prefix(root) else {
-            continue;
-        };
-        let rel = rel
-            .components()
-            .map(|c| c.as_os_str().to_string_lossy().into_owned())
-            .collect::<Vec<_>>()
-            .join("/");
-        if rel.ends_with(".min.js") {
-            continue;
-        }
-        out.push(rel);
-    }
+        .build_parallel()
+        .run(|| {
+            Box::new(|entry| {
+                if let Ok(entry) = entry
+                    && let Some(rel) = listed(root, &entry)
+                    && let Ok(mut out) = out.lock()
+                {
+                    out.push(rel);
+                }
+                ignore::WalkState::Continue
+            })
+        });
+    let mut out = out.into_inner().unwrap_or_default();
     out.sort();
     out
+}
+
+/// The relative path of `entry` if the map reads it.
+fn listed(root: &Path, entry: &ignore::DirEntry) -> Option<String> {
+    if !entry.file_type().is_some_and(|t| t.is_file()) {
+        return None;
+    }
+    if entry.metadata().map(|m| m.len()).unwrap_or(0) > MAX_FILE_BYTES {
+        return None;
+    }
+    let rel = entry.path().strip_prefix(root).ok()?;
+    let rel = rel
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/");
+    (!rel.ends_with(".min.js")).then_some(rel)
 }
