@@ -97,7 +97,7 @@ fn diff_members(owner: SymbolKind, base: &[Member], head: &[Member]) -> Vec<Delt
                 }
             }
             Some(old) => {
-                if old.type_text != m.type_text {
+                if !same_type(&old.type_text, &m.type_text) {
                     out.push(Delta::unverified(format!(
                         "`{}` changes type from `{}` to `{}`",
                         m.name,
@@ -154,7 +154,7 @@ fn diff_params(base: &[Param], head: &[Param]) -> Vec<Delta> {
                 }
             }
             Some(old) => {
-                if old.type_text != p.type_text {
+                if !same_type(&old.type_text, &p.type_text) {
                     out.push(Delta::unverified(format!(
                         "parameter `{}` changes type from `{}` to `{}`",
                         p.name,
@@ -205,7 +205,7 @@ fn diff_shapes(kind: SymbolKind, b: &ContractShape, h: &ContractShape) -> Vec<De
     match h.kind {
         ShapeKind::Function => {
             out.extend(diff_params(&b.params, &h.params));
-            if b.returns != h.returns {
+            if !same_type(&b.returns, &h.returns) {
                 out.push(Delta::unverified(format!(
                     "return type changes from `{}` to `{}`",
                     type_or_unknown(&b.returns),
@@ -214,7 +214,7 @@ fn diff_shapes(kind: SymbolKind, b: &ContractShape, h: &ContractShape) -> Vec<De
             }
         }
         ShapeKind::Object | ShapeKind::Class | ShapeKind::Enum => {
-            if b.type_text != h.type_text {
+            if !same_type(&b.type_text, &h.type_text) {
                 out.push(Delta::unverified(format!(
                     "changes `{}` to `{}`",
                     b.type_text.as_deref().unwrap_or("no heritage"),
@@ -224,7 +224,7 @@ fn diff_shapes(kind: SymbolKind, b: &ContractShape, h: &ContractShape) -> Vec<De
             out.extend(diff_members(kind, &b.members, &h.members));
         }
         ShapeKind::Alias | ShapeKind::Value => {
-            if b.type_text != h.type_text {
+            if !same_type(&b.type_text, &h.type_text) {
                 match (
                     b.type_text.as_deref().and_then(union_members),
                     h.type_text.as_deref().and_then(union_members),
@@ -308,15 +308,19 @@ fn union_members(t: &str) -> Option<Vec<String>> {
 
 /// Members a union gained or lost; reordering is no change.
 fn diff_unions(base: &[String], head: &[String]) -> Vec<Delta> {
+    let canon = |list: &[String]| -> Vec<String> { list.iter().map(|m| canonical(m)).collect() };
+    let (b, h) = (canon(base), canon(head));
     let added: Vec<String> = head
         .iter()
-        .filter(|m| !base.contains(m))
-        .map(|m| format!("`{}`", compact(m)))
+        .zip(&h)
+        .filter(|(_, c)| !b.contains(c))
+        .map(|(m, _)| format!("`{}`", compact(m)))
         .collect();
     let removed: Vec<String> = base
         .iter()
-        .filter(|m| !head.contains(m))
-        .map(|m| format!("`{}`", compact(m)))
+        .zip(&b)
+        .filter(|(_, c)| !h.contains(c))
+        .map(|(m, _)| format!("`{}`", compact(m)))
         .collect();
     let mut out = Vec::new();
     if !added.is_empty() {
@@ -332,6 +336,158 @@ fn diff_unions(base: &[String], head: &[String]) -> Vec<Delta> {
         ));
     }
     out
+}
+
+/// Whether two type texts denote the same type up to the order of object
+/// members and union members (generated code reorders both).
+fn same_type(a: &Option<String>, b: &Option<String>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => a == b || canonical(a) == canonical(b),
+        (a, b) => a == b,
+    }
+}
+
+/// A type text with object members and union members sorted, recursively:
+/// `{b:B,a:A|C}` and `{a:C|A;b:B}` both become `{a:A|C,b:B}`. Parameter
+/// and type argument order is kept, since it matters.
+fn canonical(t: &str) -> String {
+    let t = t.trim();
+    if let Some(members) = union_members(t) {
+        let mut m: Vec<String> = members.iter().map(|m| canonical(m)).collect();
+        m.sort();
+        m.dedup();
+        return m.join("|");
+    }
+    let chars: Vec<char> = t.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        match c {
+            '\'' | '"' | '`' => {
+                let end = closing_quote(&chars, i);
+                out.extend(&chars[i..=end]);
+                i = end + 1;
+            }
+            '{' | '(' | '[' | '<' => {
+                let Some(end) = closing(&chars, i) else {
+                    out.extend(&chars[i..]);
+                    break;
+                };
+                let inner: String = chars[i + 1..end].iter().collect();
+                let parts: Vec<String> = split_top(&inner, &[',', ';'])
+                    .into_iter()
+                    .map(|p| {
+                        if c == '{' {
+                            canonical_member(&p)
+                        } else {
+                            canonical(&p)
+                        }
+                    })
+                    .collect();
+                let mut parts = parts;
+                if c == '{' {
+                    parts.sort();
+                }
+                out.push(c);
+                out.push_str(&parts.join(","));
+                out.push(chars[end]);
+                i = end + 1;
+            }
+            c if c.is_whitespace() => i += 1,
+            c => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// `name?: Type` with the type in canonical form.
+fn canonical_member(m: &str) -> String {
+    let parts = split_top(m, &[':']);
+    match parts.split_first() {
+        Some((name, rest)) if !rest.is_empty() => {
+            format!("{}:{}", canonical(name), canonical(&rest.join(":")))
+        }
+        _ => canonical(m),
+    }
+}
+
+/// The index of the quote closing the one at `open`.
+fn closing_quote(chars: &[char], open: usize) -> usize {
+    let q = chars[open];
+    let mut i = open + 1;
+    while i < chars.len() {
+        if chars[i] == q && chars[i - 1] != '\\' {
+            return i;
+        }
+        i += 1;
+    }
+    chars.len() - 1
+}
+
+/// The index of the bracket closing the one at `open`; `=>` closes nothing.
+fn closing(chars: &[char], open: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    let mut i = open;
+    while i < chars.len() {
+        match chars[i] {
+            '\'' | '"' | '`' => i = closing_quote(chars, i),
+            '>' if i > 0 && chars[i - 1] == '=' => {}
+            '{' | '(' | '[' | '<' => depth += 1,
+            '}' | ')' | ']' | '>' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Splits at separators outside brackets and quotes, dropping empty parts.
+fn split_top(s: &str, seps: &[char]) -> Vec<String> {
+    let chars: Vec<char> = s.chars().collect();
+    let mut parts = Vec::new();
+    let mut cur = String::new();
+    let mut depth = 0i32;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        match c {
+            '\'' | '"' | '`' => {
+                let end = closing_quote(&chars, i);
+                cur.extend(&chars[i..=end]);
+                i = end + 1;
+                continue;
+            }
+            '>' if i > 0 && chars[i - 1] == '=' => cur.push(c),
+            '{' | '(' | '[' | '<' => {
+                depth += 1;
+                cur.push(c);
+            }
+            '}' | ')' | ']' | '>' => {
+                depth -= 1;
+                cur.push(c);
+            }
+            c if depth == 0 && seps.contains(&c) => {
+                parts.push(std::mem::take(&mut cur));
+            }
+            c => cur.push(c),
+        }
+        i += 1;
+    }
+    parts.push(cur);
+    parts
+        .into_iter()
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect()
 }
 
 /// Keys an unannotated value's initializer gained, lost or changed.
@@ -989,6 +1145,28 @@ mod tests {
         );
         // Renaming a parameter is not a contract change.
         assert!(diff_params(&base, &[param("recipient", "string", false)]).is_empty());
+    }
+
+    #[test]
+    fn member_and_union_order_is_no_change() {
+        let same = |a: &str, b: &str| same_type(&Some(a.into()), &Some(b.into()));
+        assert!(same(
+            "{__args:{clientId:string,redirectUrl:string,scope?:string}}",
+            "{__args:{redirectUrl:string,clientId:string,scope?:string}}"
+        ));
+        assert!(same("{ a: 'x' | 'y'; b: number }", "{b:number;a:'y'|'x'}"));
+        assert!(same(
+            "'A' | 'B' | Foo<{ x: 1, y: 2 }>",
+            "Foo<{y:2,x:1}> | 'B' | 'A'"
+        ));
+        // Parameter and type argument order matters.
+        assert!(!same(
+            "(a: string, b: number) => void",
+            "(b: number, a: string) => void"
+        ));
+        assert!(!same("Map<string, number>", "Map<number, string>"));
+        assert!(!same("{ a: string }", "{ a: number }"));
+        assert!(!same("{ a: string }", "{ a?: string }"));
     }
 
     #[test]

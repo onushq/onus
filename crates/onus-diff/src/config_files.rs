@@ -210,6 +210,11 @@ pub fn rows(ctx: &Ctx) -> Vec<SemanticChange> {
         let mut title = format!("{} `{}` changed", class.label, f.path);
         let mut subkind = class.subkind;
         let mut why = class.why.to_string();
+        if subkind == "lockfile-changed"
+            && let Some(w) = lockfile_why(ctx, f)
+        {
+            why = w;
+        }
         if f.path.ends_with("package.json") && f.status == Status::Modified {
             match manifest_changes(ctx, f) {
                 Some(keys) if keys.is_empty() => {
@@ -262,6 +267,40 @@ pub fn rows(ctx: &Ctx) -> Vec<SemanticChange> {
         |r| format!("`{}`", r.locations.first().map_or("", |l| l.file.as_str())),
         |r, items| format!("{items}; {}", lower_first(&r.why_it_matters)),
     )
+}
+
+/// What a lockfile change installs differently, when Onus can read it.
+fn lockfile_why(ctx: &Ctx, f: &FileChange) -> Option<String> {
+    let name = f.path.rsplit('/').next().unwrap_or(&f.path);
+    let read = |root: &std::path::Path, p: &str| {
+        std::fs::read_to_string(onus_core::paths::native(root, p)).unwrap_or_default()
+    };
+    let base = crate::lockfiles::installed(name, &read(ctx.base_root, f.base_path()))?;
+    let head = crate::lockfiles::installed(name, &read(ctx.head_root, &f.path))?;
+    let changes = crate::lockfiles::changes(&base, &head);
+    if changes.is_empty() {
+        return Some(
+            "No installed version changes; only lockfile metadata changed (patch hashes, \
+             checksums or how versions resolve)"
+                .into(),
+        );
+    }
+    let manifest_changed = ctx.text.files.iter().any(|c| {
+        let n = c.path.rsplit('/').next().unwrap_or(&c.path);
+        matches!(
+            n,
+            "package.json" | "pnpm-workspace.yaml" | ".yarnrc.yml" | ".npmrc"
+        )
+    });
+    Some(format!(
+        "Installed versions change{}: {}",
+        if manifest_changed {
+            ""
+        } else {
+            " without a manifest change"
+        },
+        crate::ctx::join_some(&changes, 4)
+    ))
 }
 
 fn lower_first(s: &str) -> String {

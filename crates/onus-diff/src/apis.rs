@@ -28,6 +28,22 @@ pub fn rows(ctx: &Ctx) -> Vec<SemanticChange> {
         }
     }
     let changed: BTreeSet<&str> = ctx.text.files.iter().map(|f| f.path.as_str()).collect();
+    // `RawData` through `import { RawData }` is the same API as
+    // `WebSocket.RawData` through the default import, and the other way
+    // round.
+    let known = |pkg: &str, name: &str| -> bool {
+        base_apis.contains(format!("{pkg} {name}").as_str())
+            || name
+                .split_once('.')
+                .is_some_and(|(_, member)| base_apis.contains(format!("{pkg} {member}").as_str()))
+            || (!name.contains('.')
+                && base_apis.iter().any(|a| {
+                    a.strip_prefix(pkg)
+                        .and_then(|r| r.strip_prefix(' '))
+                        .and_then(|r| r.split_once('.'))
+                        .is_some_and(|(_, member)| member == name)
+                }))
+    };
     // package → api → files using it.
     let mut first: BTreeMap<&str, BTreeMap<&str, BTreeSet<&str>>> = BTreeMap::new();
     for f in &ctx.head.files {
@@ -35,13 +51,10 @@ pub fn rows(ctx: &Ctx) -> Vec<SemanticChange> {
             continue;
         }
         for api in &f.external_apis {
-            if base_apis.contains(api.as_str()) {
-                continue;
-            }
             let Some((pkg, name)) = api.split_once(' ') else {
                 continue;
             };
-            if !base_packages.contains(pkg) {
+            if !base_packages.contains(pkg) || is_node_builtin(pkg) || known(pkg, name) {
                 continue;
             }
             first
@@ -104,6 +117,56 @@ pub fn rows(ctx: &Ctx) -> Vec<SemanticChange> {
         rows.push(row);
     }
     rows
+}
+
+/// Node's own modules: their APIs come with the runtime, not a pinned
+/// package version.
+fn is_node_builtin(pkg: &str) -> bool {
+    const BUILTINS: &[&str] = &[
+        "assert",
+        "async_hooks",
+        "buffer",
+        "child_process",
+        "cluster",
+        "console",
+        "constants",
+        "crypto",
+        "dgram",
+        "diagnostics_channel",
+        "dns",
+        "domain",
+        "events",
+        "fs",
+        "http",
+        "http2",
+        "https",
+        "inspector",
+        "module",
+        "net",
+        "os",
+        "path",
+        "perf_hooks",
+        "process",
+        "punycode",
+        "querystring",
+        "readline",
+        "repl",
+        "stream",
+        "string_decoder",
+        "sys",
+        "timers",
+        "tls",
+        "trace_events",
+        "tty",
+        "url",
+        "util",
+        "v8",
+        "vm",
+        "wasi",
+        "worker_threads",
+        "zlib",
+    ];
+    pkg.starts_with("node:") || BUILTINS.contains(&pkg.split('/').next().unwrap_or(pkg))
 }
 
 /// The first added line of `file` that mentions the API's last part

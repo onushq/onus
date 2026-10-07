@@ -1,6 +1,5 @@
 A code generator now sorts its output: object type members, arguments and
 union members change order. The types are identical.
-status: open
 
 === both package.json
 { "name": "r", "private": true, "workspaces": ["packages/*"] }
