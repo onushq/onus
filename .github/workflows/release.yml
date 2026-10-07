@@ -19,7 +19,7 @@ jobs:
     name: Check the tag
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: The tag matches the workspace version
         env:
           TAG: ${{ github.ref_name }}
@@ -55,7 +55,7 @@ jobs:
     steps:
       - name: Keep line endings as committed
         run: git config --global core.autocrlf false
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Install the toolchain
         shell: bash
         run: |
@@ -129,7 +129,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v5
         with:
           path: dist

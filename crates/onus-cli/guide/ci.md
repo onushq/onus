@@ -15,7 +15,7 @@ The Onus action downloads the release binary for the runner, checks its SHA-256,
       onus:
         runs-on: ubuntu-latest
         steps:
-          - uses: actions/checkout@v5
+          - uses: actions/checkout@v7
             with:
               fetch-depth: 0
           - uses: onushq/onus/action@v0.1.0

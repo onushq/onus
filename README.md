@@ -38,7 +38,7 @@ permissions:
   contents: read
   pull-requests: write
 steps:
-  - uses: actions/checkout@v5
+  - uses: actions/checkout@v7
     with:
       fetch-depth: 0
   - uses: onushq/onus/action@v0.1.0
