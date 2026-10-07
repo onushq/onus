@@ -83,6 +83,11 @@ pub fn validate(config: &OnusConfig) -> Result<(), MapError> {
             }
         }
     }
+    for p in &config.test_data {
+        if let Err(e) = globset::Glob::new(p) {
+            problems.push(format!("testData: invalid glob `{p}`: {e}"));
+        }
+    }
     let known = |c: &str| config.components.is_empty() || config.components.contains_key(c);
     for (i, rule) in config.rules.iter().enumerate() {
         let from = &rule.deny.from;

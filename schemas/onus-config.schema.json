@@ -31,6 +31,13 @@
         "$ref": "#/$defs/RuleConfig"
       }
     },
+    "testData": {
+      "description": "Globs of files that are test data, not code: fixtures, sample\nprojects, recorded responses. They are left out of the map, and\nsecret-shaped values added in them are noted without counting as\ncommitted secrets.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
     "tests": {
       "$ref": "#/$defs/TestsConfig",
       "default": {}

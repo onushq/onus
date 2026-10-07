@@ -24,6 +24,12 @@ pub struct OnusConfig {
     pub extractors: ExtractorsConfig,
     #[serde(default)]
     pub tests: TestsConfig,
+    /// Globs of files that are test data, not code: fixtures, sample
+    /// projects, recorded responses. They are left out of the map, and
+    /// secret-shaped values added in them are noted without counting as
+    /// committed secrets.
+    #[serde(default, rename = "testData", skip_serializing_if = "Vec::is_empty")]
+    pub test_data: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

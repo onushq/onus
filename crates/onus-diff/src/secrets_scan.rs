@@ -24,6 +24,36 @@ pub fn rows(ctx: &Ctx) -> Vec<SemanticChange> {
         }
     }
     let mut rows = Vec::new();
+    // Declared test data holds fake keys on purpose: one row for all of
+    // it, visible but not counted as a committed secret.
+    let (test_data, by_file): (BTreeMap<_, _>, BTreeMap<_, _>) = by_file
+        .into_iter()
+        .partition(|(file, _)| ctx.is_test_data(file));
+    if !test_data.is_empty() {
+        let files: Vec<String> = test_data.keys().map(|f| format!("`{f}`")).collect();
+        let kinds: BTreeSet<&str> = test_data
+            .values()
+            .flat_map(|(k, _)| k.iter().copied())
+            .collect();
+        let kinds: Vec<String> = kinds.iter().map(|k| k.to_string()).collect();
+        let mut row = change(
+            ChangeKind::Internal,
+            "secret-in-test-data",
+            ChangeLevel::Structure,
+            "test-data",
+            None,
+            "Test data",
+            format!("{} added in test data", capitalize(&join_and(&kinds))),
+            format!(
+                "In {}, which onus.yaml declares test data, so not counted as committed secrets; make sure they are fake (values not shown)",
+                join_and(&files)
+            ),
+            test_data.into_values().flat_map(|(_, l)| l).collect(),
+        );
+        row.id = "secret-in-test-data".into();
+        row.hints.novelty.push("secret".into());
+        rows.push(row);
+    }
     for (file, (kinds, locations)) in by_file {
         let kinds: Vec<String> = kinds.iter().map(|k| k.to_string()).collect();
         let component = ctx.component_of_path(file);

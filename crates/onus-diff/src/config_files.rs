@@ -185,7 +185,7 @@ fn manifest_changes(ctx: &Ctx, f: &FileChange) -> Option<Vec<String>> {
 pub fn rows(ctx: &Ctx) -> Vec<SemanticChange> {
     let mut rows = Vec::new();
     for f in &ctx.text.files {
-        if f.status == Status::Renamed {
+        if f.status == Status::Renamed || ctx.is_test_data(&f.path) {
             continue;
         }
         let class = if ctx.packs.contains(&f.path)
