@@ -4,6 +4,8 @@ All notable changes to Onus are recorded here. The format follows [Keep a Change
 
 ## Unreleased
 
+- The Homebrew tap is updated by a reusable `Homebrew tap` workflow that the release calls. Run it by hand to re-sync the tap, or as a dry run to check that `HOMEBREW_TAP_TOKEN` can still push. Release notes include the `brew install` line.
+
 ## [0.2.0] - 2026-10-07
 
 - `testData` in onus.yaml: globs of fixture projects and other sample code. They are left out of the map, their changes are one row, and fake keys added in them are noted without counting as committed secrets, so `fail-on: secrets` does not trip on them.
