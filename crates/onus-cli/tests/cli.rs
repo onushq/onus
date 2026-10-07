@@ -128,6 +128,72 @@ fn report_works_on_a_real_git_repository() {
 }
 
 #[test]
+fn the_base_map_cache_gives_the_same_report_and_is_reused() {
+    let repo = tempfile::tempdir().unwrap();
+    git(repo.path(), &["init", "-q", "-b", "main"]);
+    copy_dir(&fixture().join("base"), repo.path());
+    git(repo.path(), &["add", "-A"]);
+    git(repo.path(), &["commit", "-q", "-m", "base"]);
+    apply_overlay(&fixture().join("scenarios/s1-sms-alerts"), repo.path());
+    git(repo.path(), &["add", "-A"]);
+    git(repo.path(), &["commit", "-q", "-m", "sms alerts"]);
+    let cache = tempfile::tempdir().unwrap();
+
+    let report = |extra: &[&std::ffi::OsStr]| {
+        let out = onus()
+            .args([
+                "report", "--base", "main~1", "--head", "main", "--format", "json", "--repo",
+            ])
+            .arg(repo.path())
+            .args(extra)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        (
+            String::from_utf8(out.stdout).unwrap(),
+            String::from_utf8(out.stderr).unwrap(),
+        )
+    };
+    let cached = [
+        std::ffi::OsStr::new("--cache-dir"),
+        cache.path().as_os_str(),
+    ];
+    let (plain, _) = report(&[]);
+    let (cold, cold_err) = report(&cached);
+    let (warm, warm_err) = report(&cached);
+    assert_eq!(plain, cold);
+    assert_eq!(cold, warm);
+    assert!(!cold_err.contains("using the cached map"));
+    assert!(warm_err.contains("using the cached map"));
+
+    // The warm run really read the file: a cached map without the base's
+    // symbols changes the report.
+    let files: Vec<_> = std::fs::read_dir(cache.path())
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(files.len(), 1);
+    let mut map: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&files[0]).unwrap()).unwrap();
+    let original = map.clone();
+    map["symbols"] = serde_json::json!([]);
+    std::fs::write(&files[0], map.to_string()).unwrap();
+    assert!(report(&cached).0 != warm, "the cached map was not used");
+    let mut map = original;
+
+    // A cached map for another commit is ignored.
+    map["commit"] = serde_json::json!("0000000");
+    std::fs::write(&files[0], map.to_string()).unwrap();
+    let (again, err) = report(&cached);
+    assert_eq!(again, warm);
+    assert!(err.contains("ignoring unreadable cached map"));
+}
+
+#[test]
 fn init_infers_the_hand_written_components() {
     let dir = tempfile::tempdir().unwrap();
     copy_dir(&fixture().join("base"), dir.path());

@@ -76,7 +76,11 @@ pub fn build_map(root: &Path, opts: &BuildOptions) -> Result<CodebaseMap, MapErr
         None => config::load_from_tree(root)?,
     };
     let cfg: Option<&OnusConfig> = loaded.as_ref().map(|l| &l.config);
-    let files = walk::list_files(root);
+    let test_data = test_data_globs(cfg);
+    let files: Vec<String> = walk::list_files(root)
+        .into_iter()
+        .filter(|f| !test_data.is_match(f))
+        .collect();
     let file_set: BTreeSet<String> = files.iter().cloned().collect();
     let runner = Runner {
         sandbox: opts.plugins.sandbox.clone(),
@@ -449,6 +453,17 @@ pub fn build_map(root: &Path, opts: &BuildOptions) -> Result<CodebaseMap, MapErr
         rules,
         diagnostics,
     })
+}
+
+/// The `testData` globs of onus.yaml.
+pub fn test_data_globs(cfg: Option<&OnusConfig>) -> GlobSet {
+    let mut b = GlobSetBuilder::new();
+    for g in cfg.map(|c| c.test_data.as_slice()).unwrap_or_default() {
+        if let Ok(glob) = Glob::new(g) {
+            b.add(glob);
+        }
+    }
+    b.build().unwrap_or_else(|_| GlobSet::empty())
 }
 
 pub fn test_globs(cfg: Option<&OnusConfig>) -> GlobSet {

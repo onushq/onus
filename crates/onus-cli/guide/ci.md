@@ -18,7 +18,7 @@ The Onus action downloads the release binary for the runner, checks its SHA-256,
           - uses: actions/checkout@v7
             with:
               fetch-depth: 0
-          - uses: onushq/onus/action@v0.1.0
+          - uses: onushq/onus/action@v0.2.0
             id: onus
             with:
               fail-on: rule-violation,secrets
@@ -37,9 +37,11 @@ Inputs, all optional:
 - `comment`: `false` to only write the job summary.
 - `config`: an onus.yaml to use for both commits.
 - `working-directory`: the repository, if not the workspace root.
+- `cache`: `true` (the default) keeps the base commit's map in the Actions cache, so later pushes to the same pull request skip mapping the base again. `false` maps it every time.
+- `feedback`: `true` (the default) ends the comment with a line asking for a 👍 or 👎 reaction and for `/onus caught` replies (see below).
 - `github-token`: the token for the download and the comment. Default: the workflow's token.
 
-Outputs: `report` (path of the JSON report), `markdown` (path of the Markdown report), `meaning-changes` and `needs-attention` (counts from the report's summary).
+Outputs: `report` (path of the JSON report), `markdown` (path of the Markdown report), `meaning-changes` and `needs-attention` (counts from the report's summary), and `metrics` (one line of JSON: changed files and lines, rows, findings and the time the report took).
 
 Notes:
 
@@ -48,6 +50,43 @@ Notes:
 - On pull requests from forks, GitHub gives the workflow a read-only token, so the action skips the comment and only writes the job summary.
 - The comment starts with a hidden `<!-- onus-report -->` marker, which is how the action finds its own comment to update.
 - The action runs on Linux (x86_64 and ARM64), macOS and Windows runners.
+
+## Caching the base map
+
+Most of a report's time goes into mapping the two commits. A pull request is reported on every push, but its base commit rarely changes, so the action caches the base map (input `cache`). On the command line, the same cache is `--cache-dir`:
+
+    onus report --base "$BASE" --head "$HEAD" --cache-dir ~/.cache/onus
+
+The cached map's file name is a hash of everything that shapes it: the base commit, the Onus version, the onus.yaml and its packs, the plugins file and trusted mode, and any `--base-scip` indexes. A change to any of them builds a new map; a cached file is never updated in place, and one that cannot be read is ignored. The report is byte for byte the same with or without the cache.
+
+## Was the report useful? 👍 👎 and /onus caught
+
+The Phase 1 question is whether reviewers prefer the report to the raw diff. Two signals answer it, both left on the pull request itself:
+
+- A 👍 or 👎 reaction on the Onus comment.
+- A reply that starts with `/onus caught`, followed by what the report surfaced that the diff hid:
+
+      /onus caught the new SMS vendor; I would have missed it in 1,400 lines
+
+To acknowledge those replies with a 🚀, add a second workflow; the same action handles both events:
+
+    name: Onus caught
+    on:
+      issue_comment:
+        types: [created]
+    permissions:
+      issues: write
+      pull-requests: write
+    jobs:
+      caught:
+        if: github.event.issue.pull_request && startsWith(github.event.comment.body, '/onus caught')
+        runs-on: ubuntu-latest
+        steps:
+          - uses: onushq/onus/action@v0.2.0
+
+The comment also carries the report's metrics line in a hidden HTML comment. `scripts/onus-metrics.sh` in the Onus repository reads all of it back with the GitHub CLI, one JSON line per pull request, or one line of totals with `--summary` (reports, large reports, the share of 👍 on large pull requests, the catch rate, changed lines per row, time to first review):
+
+    scripts/onus-metrics.sh your-org/your-repo --limit 200 --summary
 
 ## Without the action
 

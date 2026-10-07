@@ -1,0 +1,24 @@
+name: Onus caught
+
+# Acknowledges `/onus caught <what>` replies on pull requests with a 🚀
+# reaction. The reply itself is the record; scripts/onus-metrics.sh counts it.
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  caught:
+    name: Onus caught
+    if: github.event.issue.pull_request && startsWith(github.event.comment.body, '/onus caught')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: action
+      - uses: ./action

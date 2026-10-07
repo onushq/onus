@@ -123,16 +123,22 @@ pub fn redact(text: &str) -> String {
 mod tests {
     use super::*;
 
+    // AWS's documented example keys, split so this file does not hold a
+    // secret-shaped literal itself.
+    const EXAMPLE_KEY_ID: &str = concat!("AKIA", "IOSFODNN7EXAMPLE");
+    const EXAMPLE_SECRET: &str = concat!("wJalrXUtnFEMI/K7MDENG/", "bPxRfiCYEXAMPLEKEY");
+
     #[test]
     fn finds_aws_keys_and_redacts_them() {
-        let line = r#"const AWS_ACCESS_KEY_ID = "AKIAIOSFODNN7EXAMPLE";"#;
+        let line = format!(r#"const AWS_ACCESS_KEY_ID = "{EXAMPLE_KEY_ID}";"#);
+        let line = line.as_str();
         let found = find_secrets(line);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].rule_id, "aws-access-key-id");
         assert!(!redact(line).contains("AKIA"));
 
-        let secret = r#"const AWS_SECRET_ACCESS_KEY = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";"#;
-        assert_eq!(find_secrets(secret)[0].rule_id, "aws-secret-access-key");
+        let secret = format!(r#"const AWS_SECRET_ACCESS_KEY = "{EXAMPLE_SECRET}";"#);
+        assert_eq!(find_secrets(&secret)[0].rule_id, "aws-secret-access-key");
     }
 
     #[test]

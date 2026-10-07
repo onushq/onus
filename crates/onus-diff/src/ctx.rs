@@ -36,6 +36,8 @@ pub struct Ctx<'a> {
     pub explained: RefCell<BTreeSet<String>>,
     /// Framework packs listed in onus.yaml.
     pub packs: BTreeSet<String>,
+    /// The `testData` globs of onus.yaml.
+    test_data: globset::GlobSet,
 }
 
 impl std::fmt::Debug for Ctx<'_> {
@@ -89,6 +91,7 @@ impl<'a> Ctx<'a> {
             matcher: ComponentMatcher::new(&all),
             moves: RefCell::new(text.renames()),
             explained: RefCell::new(BTreeSet::new()),
+            test_data: onus_map::build::test_data_globs(config),
             packs: config
                 .map(|c| {
                     c.extractors
@@ -132,6 +135,11 @@ impl<'a> Ctx<'a> {
         self.matcher
             .component_of(path)
             .unwrap_or_else(|| onus_lang_ts_root().to_string())
+    }
+
+    /// Whether onus.yaml declares the file test data.
+    pub fn is_test_data(&self, path: &str) -> bool {
+        self.test_data.is_match(path)
     }
 
     pub fn is_test_file(&self, path: &str) -> bool {

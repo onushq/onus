@@ -29,6 +29,7 @@ Onus works without configuration. An `onus.yaml` at the repository root adds wha
         clients: [prisma, db]
     tests:
       globs: ["**/*.test.ts", "e2e/**"]
+    testData: ["fixtures/**"]
 
 Unknown keys are an error, so a typo never silently does nothing.
 
@@ -148,6 +149,18 @@ Packs are read from the base version of a change, like this file.
 `globs`: which files are tests. Declaring globs replaces the defaults:
 
     **/*.test.*  **/*.spec.*  **/__tests__/**  **/test/**  **/tests/**  **/e2e/**
+
+## testData
+
+Globs of files that are test data rather than code: fixture projects, sample apps, recorded responses.
+
+    testData:
+      - fixtures/**
+      - e2e/recordings/**
+
+Test data is left out of the map, so a fixture app's imports, services and contracts do not show up as your code. Changes to it are summarized in one "changed lines of test data" row, and config files inside it (a fixture's package.json or tsconfig.json) are not reported as config changes.
+
+Secret-shaped values added in test data are not counted as committed secrets: `fail-on: secrets` does not trip on them, and they appear as one row, "... added in test data", that names the files without the values. Declare only folders that hold fake credentials on purpose. As with every setting, the report uses the base commit's onus.yaml, so a pull request cannot declare its own new secret as test data.
 
 ## Files Onus never reads
 

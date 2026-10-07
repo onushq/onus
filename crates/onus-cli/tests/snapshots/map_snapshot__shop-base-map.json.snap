@@ -6,10 +6,10 @@ expression: json
   "schemaVersion": 1,
   "commit": "worktree",
   "builtWith": {
-    "onus": "0.1.0",
+    "onus": "0.2.0",
     "providers": {
-      "discovery": "onus 0.1.0 (onus.yaml)",
-      "typescript": "onus-lang-ts 0.1.0 (tree-sitter-typescript 0.23)"
+      "discovery": "onus 0.2.0 (onus.yaml)",
+      "typescript": "onus-lang-ts 0.2.0 (tree-sitter-typescript 0.23)"
     },
     "configHash": "6211b4a2e2af00a3b28671c5775683e7bd43346f4c714a802429ef21e707ae34"
   },
