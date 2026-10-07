@@ -71,28 +71,28 @@ impl CallPattern {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Imported {
     Named(String),
     Default,
     Namespace,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Binding {
     pub local: String,
     pub imported: Imported,
     pub line: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Import {
     pub spec: String,
     pub line: u32,
     pub bindings: Vec<Binding>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum Export {
     Local {
         exported: String,
@@ -111,7 +111,7 @@ pub enum Export {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Decl {
     /// Qualified name: `Name` or `Class.method`.
     pub name: String,
@@ -128,14 +128,18 @@ pub struct Decl {
     pub enum_values: Vec<(String, String)>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum RefKind {
     Call,
     Type,
     Value,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct Ref {
     /// Enclosing declaration (qualified), or `None` at the top level.
     pub from: Option<String>,
@@ -145,7 +149,7 @@ pub struct Ref {
     pub line: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EventExpr {
     Literal(String),
     Ident(String),
@@ -153,7 +157,7 @@ pub enum EventExpr {
     Dynamic(String),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EventUse {
     pub from: Option<String>,
     pub publish: bool,
@@ -161,7 +165,7 @@ pub struct EventUse {
     pub line: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DataUse {
     pub from: Option<String>,
     pub model: String,
@@ -169,14 +173,14 @@ pub struct DataUse {
     pub line: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SiteUse {
     pub from: Option<String>,
     pub value: String,
     pub line: u32,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct FileFacts {
     pub path: String,
     pub is_test: bool,

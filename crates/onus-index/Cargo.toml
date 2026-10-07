@@ -1,6 +1,6 @@
 [package]
-name = "onus-lang-ts"
-description = "Onus language adapter for TypeScript and JavaScript, built on tree-sitter"
+name = "onus-index"
+description = "Onus map index: fast, bounded queries over a codebase map for the CLI and MCP"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,15 +11,13 @@ authors.workspace = true
 
 [dependencies]
 onus-core.workspace = true
-rayon.workspace = true
+schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-serde_yaml_ng.workspace = true
-tempfile.workspace = true
-tree-sitter.workspace = true
-tree-sitter-typescript.workspace = true
-
-[dev-dependencies]
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+onus-map.workspace = true
+tempfile.workspace = true

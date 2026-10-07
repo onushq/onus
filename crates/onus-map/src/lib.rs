@@ -14,6 +14,7 @@ pub mod walk;
 
 pub use build::{BuildOptions, build_map};
 pub use config::LoadedConfig;
+pub use onus_lang_ts::{CacheStats, FactsCache};
 
 #[derive(Debug, thiserror::Error)]
 pub enum MapError {

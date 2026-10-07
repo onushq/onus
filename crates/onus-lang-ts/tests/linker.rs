@@ -77,7 +77,7 @@ fn build(root: &Path, files: &[(&str, &str)]) -> PartialMap {
             packs: vec![],
         },
     };
-    TypeScriptAdapter.build(&ws).unwrap()
+    TypeScriptAdapter::default().build(&ws).unwrap()
 }
 
 fn has_edge(m: &PartialMap, from: &str, to: &str, kind: EdgeKind) -> bool {

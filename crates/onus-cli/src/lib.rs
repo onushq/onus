@@ -1,6 +1,9 @@
 //! The pieces behind the `onus` command, shared by the binary and its tests.
 
+pub mod daemon;
 pub mod guide;
+pub mod mcp;
+pub mod session;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -54,6 +57,8 @@ pub struct Providers {
     pub plugins: onus_map::plugin::PluginsFile,
     pub trusted: bool,
     pub allow_unsandboxed: bool,
+    /// Per-file facts shared between builds; see [`onus_map::FactsCache`].
+    pub facts_cache: Option<std::sync::Arc<onus_map::FactsCache>>,
 }
 
 impl Providers {
@@ -68,6 +73,7 @@ impl Providers {
             plugins,
             trusted,
             allow_unsandboxed,
+            facts_cache: None,
         })
     }
 }
@@ -175,6 +181,132 @@ impl MapCache {
     }
 }
 
+/// The changes in meaning between `base` and the worktree at `root` as it
+/// is now, given the worktree's current map. The base map comes from the
+/// repository's map cache, or is built with the shared facts cache, which
+/// already holds every file the two share.
+pub fn check_worktree(
+    root: &Path,
+    base: &str,
+    head_map: &CodebaseMap,
+    facts: std::sync::Arc<onus_map::FactsCache>,
+    bases: &BaseTrees,
+) -> Result<serde_json::Value> {
+    let sha = resolve_commit(root, base)?;
+    let b = bases.get(root, &sha)?;
+    let config = diff_config(b.dir.path(), None)?;
+    let providers = Providers {
+        facts_cache: Some(facts),
+        ..Providers::default()
+    };
+    let cache = match daemon::git_common_dir(root) {
+        Some(dir) => Some(MapCache::new(
+            &dir.join("onus").join("maps"),
+            &b.sha,
+            config.as_ref(),
+            &providers,
+            &[],
+        )?),
+        None => None,
+    };
+    let base_map = match b.map.get().cloned() {
+        Some(map) => map,
+        None => {
+            let map = match cache.as_ref().map(MapCache::load) {
+                Some(CacheLoad::Hit(map)) => *map,
+                _ => {
+                    let map = build_with(
+                        b.dir.path(),
+                        config.clone(),
+                        Some(b.sha.clone()),
+                        &providers,
+                        &[],
+                    )?;
+                    if let Some(c) = &cache {
+                        // A cache that cannot be written only costs time later.
+                        let _ = c.store(&map);
+                    }
+                    map
+                }
+            };
+            let map = std::sync::Arc::new(map);
+            let _ = b.map.set(map.clone());
+            map
+        }
+    };
+    let report = onus_diff::diff(&DiffInput {
+        base_root: b.dir.path(),
+        head_root: root,
+        base_map: &base_map,
+        head_map,
+        config: config.as_ref().map(|c| &c.config),
+        intent: None,
+        base_label: &ref_label(base, &sha),
+        head_label: "worktree",
+    });
+    Ok(serde_json::json!({
+        "base": report.base,
+        "summary": report.summary,
+        "markdown": onus_report::to_markdown(&report, !head_map.rules.is_empty()),
+    }))
+}
+
+/// Extracted base commits and their maps, kept by a long-running server so
+/// that checks against the same commit skip `git archive` and mapping.
+#[derive(Debug, Default)]
+pub struct BaseTrees {
+    trees: std::sync::Mutex<Vec<std::sync::Arc<BaseTree>>>,
+}
+
+/// One extracted commit.
+#[derive(Debug)]
+pub struct BaseTree {
+    pub sha: String,
+    pub dir: tempfile::TempDir,
+    pub map: std::sync::OnceLock<std::sync::Arc<CodebaseMap>>,
+}
+
+/// How many base commits a server keeps extracted.
+const BASE_TREES: usize = 4;
+
+impl BaseTrees {
+    /// The extracted tree of `sha`, extracting it on first use. The most
+    /// recently used commits are kept.
+    pub fn get(&self, repo: &Path, sha: &str) -> Result<std::sync::Arc<BaseTree>> {
+        let mut trees = self
+            .trees
+            .lock()
+            .map_err(|_| anyhow::anyhow!("base trees poisoned"))?;
+        if let Some(i) = trees.iter().position(|t| t.sha == sha) {
+            let t = trees.remove(i);
+            trees.push(t.clone());
+            return Ok(t);
+        }
+        let m = materialize(repo, sha)?;
+        let tree = std::sync::Arc::new(BaseTree {
+            sha: m.sha,
+            dir: m.dir,
+            map: std::sync::OnceLock::new(),
+        });
+        if trees.len() >= BASE_TREES {
+            trees.remove(0);
+        }
+        trees.push(tree.clone());
+        Ok(tree)
+    }
+}
+
+/// The commit `reference` names in `repo`.
+pub fn resolve_commit(repo: &Path, reference: &str) -> Result<String> {
+    let spec = format!("{reference}^{{commit}}");
+    Ok(String::from_utf8(
+        git(repo, &["rev-parse", "--verify", "--quiet", &spec])
+            .with_context(|| format!("unknown ref `{reference}`"))?,
+    )?
+    .trim()
+    .to_string())
+}
+
 /// The config both maps are built with: `--config` if given, else the base
 /// tree's `onus.yaml`. A pull request never gets to relax its own checks;
 /// a changed `onus.yaml` is reported as rules of the game instead.
@@ -210,6 +342,7 @@ pub fn build_with(
             trusted: providers.trusted,
             allow_unsandboxed: providers.allow_unsandboxed,
             scip_indexes: scip.to_vec(),
+            facts_cache: providers.facts_cache.clone(),
         },
     )?)
 }

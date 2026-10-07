@@ -229,6 +229,56 @@ Examples:
         #[arg(long, value_name = "DIR")]
         out: Option<PathBuf>,
     },
+    /// Serve the codebase map to coding agents over MCP (stdio).
+    #[command(
+        long_about = "Serve the codebase map of this worktree to a coding agent as MCP tools, on \
+                      stdin and stdout. Tools: onus_status, onus_find, onus_symbol, \
+                      onus_dependents, onus_dependencies, onus_tests_for, onus_owners, \
+                      onus_component, onus_file and onus_check. All agents and worktrees of a \
+                      repository share one map server, started on first use, which follows \
+                      file changes and rebuilds only what changed. See `onus help agents`.",
+        after_long_help = "\
+Examples:
+  onus mcp
+  claude mcp add onus -- onus mcp
+  onus mcp --repo ../worktrees/feature-a"
+    )]
+    Mcp {
+        /// The worktree to serve (default: the one containing the current directory).
+        #[arg(long, default_value = ".", value_name = "DIR")]
+        repo: PathBuf,
+        /// Build the map in this process instead of the shared map server.
+        #[arg(long)]
+        no_server: bool,
+    },
+    /// Ask the codebase map a question; the same answers as the MCP tools.
+    #[command(after_long_help = "\
+Examples:
+  onus query status
+  onus query find format phone
+  onus query dependents UserPreferences --depth 2
+  onus query tests-for services/billing/src/payments.ts
+  onus query check --base main")]
+    Query {
+        #[command(subcommand)]
+        question: QueryCmd,
+        /// The worktree to ask about (default: the one containing the current directory).
+        #[arg(long, global = true, default_value = ".", value_name = "DIR")]
+        repo: PathBuf,
+        /// Build the map in this process instead of the shared map server.
+        #[arg(long, global = true)]
+        no_server: bool,
+    },
+    /// Run a repository's map server (started automatically by `onus mcp`).
+    #[command(hide = true)]
+    Serve {
+        /// The Unix socket to listen on.
+        #[arg(long, value_name = "PATH")]
+        socket: PathBuf,
+        /// Exit after this many seconds without requests.
+        #[arg(long, default_value_t = 1800, value_name = "SECONDS")]
+        idle: u64,
+    },
     /// Show help for a command, or a topic from the guide.
     #[command(after_long_help = "\
 Examples:
@@ -236,9 +286,112 @@ Examples:
   onus help diff
   onus help configuration")]
     Help {
-        /// A command (map, diff, report, init, schema) or a guide topic.
+        /// A command (map, diff, report, init, schema, mcp, query) or a guide topic.
         topic: Option<String>,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum QueryCmd {
+    /// What the map holds.
+    Status,
+    /// Symbols whose names match some words, best first.
+    Find {
+        #[arg(required = true, num_args = 1..)]
+        words: Vec<String>,
+        #[arg(long, default_value_t = 0)]
+        limit: usize,
+    },
+    /// One symbol: kind, location, shape, invariants and counts.
+    Symbol { id: String },
+    /// What depends on a symbol, file, module or component.
+    Dependents {
+        target: String,
+        #[arg(long, default_value_t = 1)]
+        depth: u32,
+        #[arg(long, default_value_t = 0)]
+        limit: usize,
+    },
+    /// What a symbol, file, module or component depends on.
+    Dependencies {
+        target: String,
+        #[arg(long, default_value_t = 1)]
+        depth: u32,
+        #[arg(long, default_value_t = 0)]
+        limit: usize,
+    },
+    /// The tests that exercise a symbol, file, module or component.
+    TestsFor {
+        target: String,
+        #[arg(long, default_value_t = 0)]
+        limit: usize,
+    },
+    /// Who owns a symbol, file or component.
+    Owners { target: String },
+    /// A component: owners, public symbols, what it uses and what uses it.
+    Component { id: String },
+    /// A file: component, symbols, imports and importers.
+    File { path: String },
+    /// Changes in meaning between a commit and the worktree as it is now.
+    Check {
+        /// The commit to compare with.
+        #[arg(long, default_value = "HEAD")]
+        base: String,
+    },
+    /// The map server's worktrees and cache use.
+    Stats,
+}
+
+impl QueryCmd {
+    fn op(self) -> onus_cli::daemon::Op {
+        use onus_cli::daemon::Op;
+        use onus_index::Query;
+        let q = |query| Op::Query { query };
+        match self {
+            QueryCmd::Status => q(Query::Status),
+            QueryCmd::Find { words, limit } => q(Query::Find {
+                text: words.join(" "),
+                limit,
+            }),
+            QueryCmd::Symbol { id } => q(Query::Symbol { id }),
+            QueryCmd::Dependents {
+                target,
+                depth,
+                limit,
+            } => q(Query::Dependents {
+                target,
+                depth,
+                limit,
+            }),
+            QueryCmd::Dependencies {
+                target,
+                depth,
+                limit,
+            } => q(Query::Dependencies {
+                target,
+                depth,
+                limit,
+            }),
+            QueryCmd::TestsFor { target, limit } => q(Query::TestsFor { target, limit }),
+            QueryCmd::Owners { target } => q(Query::Owners { target }),
+            QueryCmd::Component { id } => q(Query::Component { id }),
+            QueryCmd::File { path } => q(Query::File { path }),
+            QueryCmd::Check { base } => Op::Check { base: Some(base) },
+            QueryCmd::Stats => Op::Stats,
+        }
+    }
+}
+
+/// The shared map server of the repository holding `root`, or this process.
+fn backend(root: &std::path::Path, no_server: bool) -> std::sync::Arc<dyn onus_cli::mcp::Backend> {
+    #[cfg(unix)]
+    if !no_server {
+        return std::sync::Arc::new(onus_cli::daemon::Client::new(
+            onus_cli::daemon::socket_path(root),
+        ));
+    }
+    let _ = (root, no_server);
+    std::sync::Arc::new(onus_cli::daemon::Server::new())
 }
 
 fn main() -> ExitCode {
@@ -389,6 +542,39 @@ fn run(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Cmd::Help { topic } => help(topic.as_deref()),
+        Cmd::Mcp { repo, no_server } => {
+            let root = onus_cli::daemon::worktree_root(&repo);
+            onus_cli::mcp::serve_stdio(root.clone(), backend(&root, no_server))?;
+            Ok(0)
+        }
+        Cmd::Query {
+            question,
+            repo,
+            no_server,
+        } => {
+            let root = onus_cli::daemon::worktree_root(&repo);
+            let req = onus_cli::daemon::Request {
+                root: root.clone(),
+                op: question.op(),
+            };
+            let response = backend(&root, no_server).call(&req)?;
+            if let Some(error) = response.error {
+                bail!("{error}");
+            }
+            let body = serde_json::json!({ "result": response.ok, "map": response.map });
+            println!("{}", serde_json::to_string_pretty(&body)?);
+            Ok(0)
+        }
+        Cmd::Serve { socket, idle } => {
+            #[cfg(unix)]
+            onus_cli::daemon::serve(&socket, std::time::Duration::from_secs(idle))?;
+            #[cfg(not(unix))]
+            {
+                let _ = (socket, idle);
+                bail!("the map server needs Unix sockets; use --no-server");
+            }
+            Ok(0)
+        }
         Cmd::Schema { out } => {
             let schemas = onus_core::schema::all_schemas();
             match out {
