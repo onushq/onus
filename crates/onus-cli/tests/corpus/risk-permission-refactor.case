@@ -1,6 +1,5 @@
 Permission checks are refactored into one helper. Even when behavior is
 meant to stay the same, authorization code needs a person.
-status: open
 
 === both package.json
 { "name": "server", "private": true, "main": "src/index.ts" }

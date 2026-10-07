@@ -918,6 +918,7 @@ version = "0.3.0"
 dependencies = [
  "globset",
  "onus-core",
+ "onus-lang-ts",
  "onus-map",
  "regex",
  "serde",

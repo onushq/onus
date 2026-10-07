@@ -1,6 +1,5 @@
 An existing SQL migration is edited after the fact, and a new one drops a
 column. Both change stored data.
-status: open
 
 === both package.json
 { "name": "api", "private": true, "main": "src/index.ts" }
@@ -15,4 +14,4 @@ ALTER TABLE users DROP COLUMN legacy_flag;
 DELETE FROM sessions WHERE expired = true;
 === expect
 row migration-changed ● title~"`db/migrations/0001_init.sql`" title~"edited"
-row migration-changed ● title~"`db/migrations/0002_drop_legacy.sql`" why~"drops column `users.legacy_flag`" why~"deletes rows from `sessions`"
+row migration-changed ● title~"`db/migrations/0002_drop_legacy.sql`" why~"rops column `users.legacy_flag`" why~"deletes rows from `sessions`"

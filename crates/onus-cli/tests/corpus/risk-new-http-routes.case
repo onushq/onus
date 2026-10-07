@@ -1,6 +1,5 @@
 New HTTP endpoints defined by file-based routing (a SvelteKit `+server.ts`
 and a Next.js `route.ts`) serve files. Each is public surface.
-status: open
 
 === both package.json
 { "name": "web", "private": true, "main": "src/index.ts" }

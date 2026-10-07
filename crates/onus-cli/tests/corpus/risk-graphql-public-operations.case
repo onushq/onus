@@ -1,6 +1,5 @@
 The GraphQL schema gains a query that skips authentication and two
 mutations. New operations are public API whose access checks need a person.
-status: open
 
 === both package.json
 { "name": "community", "private": true, "main": "src/index.ts" }

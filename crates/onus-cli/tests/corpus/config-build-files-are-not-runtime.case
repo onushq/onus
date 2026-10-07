@@ -1,6 +1,5 @@
 An Nx `project.json` gains a test target and the workspace catalog changes a
 version. These are build and workspace settings, not runtime configuration.
-status: open
 
 === both package.json
 { "name": "r", "private": true, "workspaces": ["apps/*"] }

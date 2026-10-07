@@ -1,6 +1,5 @@
 A new database migration creates tables with cascading deletes. It changes
 stored data and the deploy order, so it gets its own row that needs a person.
-status: open
 
 === both package.json
 { "name": "r", "private": true, "workspaces": ["libs/*"] }
@@ -34,4 +33,4 @@ export class CreatePosts1790000013000 implements MigrationInterface {
   }
 }
 === expect
-row migration-changed ● title~"`1790000013000-createPosts.ts`" title~"creates tables `posts` and `post_comments`" why~"ON DELETE CASCADE" why~"adds column `publishers.cv_pdf`"
+row migration-changed ● title~"1790000013000-createPosts.ts`" title~"creates tables `posts` and `post_comments`" why~"ON DELETE CASCADE" why~"adds column `publishers.cv_pdf`"

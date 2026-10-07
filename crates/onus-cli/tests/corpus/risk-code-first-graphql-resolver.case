@@ -1,5 +1,4 @@
 A code-first resolver gains two mutations.
-status: open
 
 === both package.json
 { "name": "server", "private": true, "main": "src/index.ts" }

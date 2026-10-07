@@ -1,6 +1,6 @@
 Infrastructure definitions change: a Terraform file and a Kubernetes
-manifest. They change how production runs.
-status: open
+manifest. They change how production runs; two files of one kind in one
+component read as one row.
 
 === both package.json
 { "name": "svc", "private": true, "main": "src/index.ts" }
@@ -30,5 +30,4 @@ metadata:
 spec:
   replicas: 1
 === expect
-row infrastructure-changed ● title~"`infra/main.tf`"
-row infrastructure-changed ● title~"`deploy/api.yaml`"
+row infrastructure-changed ● why~"`infra/main.tf`" why~"`deploy/api.yaml`"

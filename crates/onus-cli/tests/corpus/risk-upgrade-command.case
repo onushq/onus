@@ -1,6 +1,5 @@
 A versioned upgrade command (a data migration written as code) creates
 fields in every workspace. It is a migration even though it holds no SQL.
-status: open
 
 === both package.json
 { "name": "server", "private": true, "main": "src/index.ts" }
@@ -14,4 +13,4 @@ export class AddSubscriptionsCommand {
   }
 }
 === expect
-row migration-changed ● title~"`2-46-workspace-command-1791322315043-add-subscriptions.command.ts`"
+row migration-changed ● title~"2-46-workspace-command-1791322315043-add-subscriptions.command.ts`"

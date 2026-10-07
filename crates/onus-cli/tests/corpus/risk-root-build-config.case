@@ -1,7 +1,6 @@
 The repository's base TypeScript config switches module systems, and many
 project configs drop an override. One row names the root change and needs a
 person; the project configs read as one row per kind of edit.
-status: open
 
 === both package.json
 { "name": "r", "private": true, "workspaces": ["libs/*"] }

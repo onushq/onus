@@ -18,6 +18,7 @@ mod notable;
 mod packages;
 mod patches;
 mod relations;
+mod risk;
 mod rules;
 mod secrets_scan;
 mod tests_diff;
@@ -72,6 +73,7 @@ pub fn diff(input: &DiffInput) -> SemanticReport {
     rows.extend(relations::rows(&ctx, &violations));
     packages::rows(&ctx, &mut rows);
     rows.extend(patches::rows(&ctx));
+    rows.extend(risk::rows(&ctx));
     rows.extend(config_files::rows(&ctx));
     let tests = tests_diff::analyze(&ctx, &pairs);
     rows.extend(tests.rows.iter().cloned());
