@@ -49,6 +49,12 @@ pub struct DiffOptions {
     pub head_scip: Vec<PathBuf>,
     /// Where to keep maps of base commits between runs (see [`MapCache`]).
     pub cache_dir: Option<PathBuf>,
+    /// The paths that differ between the trees, when git already knows
+    /// them: only those are read and compared line by line.
+    pub changed_paths: Option<std::collections::BTreeSet<String>>,
+    /// Called before the base map is built, for a base tree written only
+    /// partly (see [`materialize_pair`]).
+    pub complete_base: Option<BaseCompleter>,
 }
 
 /// Plugins and trusted mode (ADR 0006), the same for every tree.
@@ -243,6 +249,7 @@ pub fn check_worktree(
         intent: None,
         base_label: &ref_label(base, &sha),
         head_label: "worktree",
+        changed_paths: None,
     });
     Ok(serde_json::json!({
         "base": report.base,
@@ -412,12 +419,19 @@ pub fn diff_dirs(base: &Path, head: &Path, opts: &DiffOptions) -> Result<Outcome
         bail!("head directory {} does not exist", head.display());
     }
     let config = diff_config(base, opts.config.as_deref())?;
+    // The two trees share almost every file: facts parsed for the base map
+    // are reused for the head map.
+    let mut providers = opts.providers.clone();
+    if providers.facts_cache.is_none() {
+        providers.facts_cache = Some(std::sync::Arc::new(onus_map::FactsCache::in_memory()));
+    }
+    let providers = &providers;
     let cache = match (&opts.cache_dir, &opts.base_commit) {
         (Some(dir), Some(commit)) => Some(MapCache::new(
             dir,
             commit,
             config.as_ref(),
-            &opts.providers,
+            providers,
             &opts.base_scip,
         )?),
         _ => None,
@@ -446,11 +460,14 @@ pub fn diff_dirs(base: &Path, head: &Path, opts: &DiffOptions) -> Result<Outcome
     let base_map = match cached {
         Some(map) => map,
         None => {
+            if let Some(complete) = &opts.complete_base {
+                (complete.0)()?;
+            }
             let map = build_with(
                 base,
                 config.clone(),
                 opts.base_commit.clone(),
-                &opts.providers,
+                providers,
                 &opts.base_scip,
             )?;
             if let Some(c) = &cache
@@ -468,7 +485,7 @@ pub fn diff_dirs(base: &Path, head: &Path, opts: &DiffOptions) -> Result<Outcome
         head,
         config.clone(),
         opts.head_commit.clone(),
-        &opts.providers,
+        providers,
         &opts.head_scip,
     )?;
     let report = onus_diff::diff(&DiffInput {
@@ -480,6 +497,7 @@ pub fn diff_dirs(base: &Path, head: &Path, opts: &DiffOptions) -> Result<Outcome
         intent: opts.intent.as_ref(),
         base_label: &opts.base_label,
         head_label: &opts.head_label,
+        changed_paths: opts.changed_paths.as_ref(),
     });
     Ok(Outcome {
         report,
@@ -555,6 +573,285 @@ pub fn materialize(repo: &Path, reference: &str) -> Result<Materialized> {
         .unpack(dir.path())
         .context("cannot extract git archive")?;
     Ok(Materialized { dir, sha })
+}
+
+/// The two trees of a comparison and the paths that differ between them.
+#[derive(Debug)]
+pub struct MaterializedPair {
+    pub base: Materialized,
+    pub head: Materialized,
+    pub changed: std::collections::BTreeSet<String>,
+    repo: PathBuf,
+    /// Paths written to the base tree while it is partial; `None` once it
+    /// is complete.
+    partial: std::sync::Mutex<Option<std::collections::BTreeSet<String>>>,
+}
+
+impl MaterializedPair {
+    /// Writes the rest of a partial base tree; nothing when it is complete.
+    pub fn complete_base(&self) -> Result<()> {
+        let mut partial = self
+            .partial
+            .lock()
+            .map_err(|_| anyhow::anyhow!("base tree lock poisoned"))?;
+        let Some(written) = partial.as_ref() else {
+            return Ok(());
+        };
+        let archive = git(&self.repo, &["archive", "--format=tar", &self.head.sha])?;
+        let entries = tree_entries(&archive)?;
+        let rest: Vec<&TreeEntry> = entries
+            .iter()
+            .filter(|e| !self.changed.contains(&e.path) && !written.contains(&e.path))
+            .collect();
+        write_tree(self.base.dir.path(), &rest)?;
+        *partial = None;
+        Ok(())
+    }
+}
+
+/// Completes a partial base tree before the base map is built from it.
+#[derive(Clone)]
+pub struct BaseCompleter(pub std::sync::Arc<dyn Fn() -> Result<()> + Send + Sync>);
+
+impl std::fmt::Debug for BaseCompleter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("BaseCompleter")
+    }
+}
+
+fn resolve_sha(repo: &Path, reference: &str) -> Result<String> {
+    let spec = format!("{reference}^{{commit}}");
+    Ok(String::from_utf8(
+        git(repo, &["rev-parse", "--verify", "--quiet", &spec])
+            .with_context(|| format!("unknown ref `{reference}`"))?,
+    )?
+    .trim()
+    .to_string())
+}
+
+/// One file of a tree to write: its path and where its bytes are in the
+/// archive, or a symlink target.
+struct TreeEntry<'a> {
+    path: String,
+    data: Result<&'a [u8], PathBuf>,
+}
+
+/// The files and symlinks of a tar archive held in memory, without copying
+/// their bytes.
+fn tree_entries(archive: &[u8]) -> Result<Vec<TreeEntry<'_>>> {
+    let mut out = Vec::new();
+    let mut tar = tar::Archive::new(archive);
+    for entry in tar.entries().context("cannot read git archive")? {
+        let entry = entry.context("cannot read git archive")?;
+        let kind = entry.header().entry_type();
+        let path = entry.path()?.to_string_lossy().replace('\\', "/");
+        if path.split('/').any(|s| s == "..") || path.starts_with('/') {
+            bail!("unsafe path `{path}` in git archive");
+        }
+        if kind.is_file() {
+            let start = entry.raw_file_position() as usize;
+            let len = entry.size() as usize;
+            let data = archive
+                .get(start..start + len)
+                .context("truncated git archive")?;
+            out.push(TreeEntry {
+                path,
+                data: Ok(data),
+            });
+        } else if kind.is_symlink()
+            && let Some(target) = entry.link_name()?
+        {
+            out.push(TreeEntry {
+                path,
+                data: Err(target.into_owned()),
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// The files config loading and the file walk read from a tree besides
+/// the changed ones: `.gitignore` files, `onus.yaml` and the packs it
+/// lists. `changed` holds the base versions of changed files.
+fn tree_config_files(
+    head: &[TreeEntry],
+    changed: &[TreeEntry],
+) -> std::collections::BTreeSet<String> {
+    let mut out: std::collections::BTreeSet<String> = head
+        .iter()
+        .filter(|e| e.path == "onus.yaml" || e.path.rsplit('/').next() == Some(".gitignore"))
+        .map(|e| e.path.clone())
+        .collect();
+    let config = changed
+        .iter()
+        .chain(head.iter())
+        .find(|e| e.path == "onus.yaml")
+        .and_then(|e| e.data.as_ref().ok())
+        .and_then(|bytes| serde_yaml_ng::from_slice::<serde_yaml_ng::Value>(bytes).ok());
+    if let Some(packs) = config
+        .as_ref()
+        .and_then(|c| c.get("extractors"))
+        .and_then(|e| e.get("packs"))
+        .and_then(|p| p.as_sequence())
+    {
+        for p in packs.iter().filter_map(|p| p.as_str()) {
+            out.insert(p.trim_start_matches("./").to_string());
+        }
+    }
+    out
+}
+
+/// Writes entries under `root`, on all cores: folders first, then files.
+fn write_tree(root: &Path, entries: &[&TreeEntry]) -> Result<()> {
+    use rayon::prelude::*;
+    let dirs: std::collections::BTreeSet<&str> = entries
+        .iter()
+        .filter_map(|e| e.path.rsplit_once('/').map(|(d, _)| d))
+        .collect();
+    for d in dirs {
+        std::fs::create_dir_all(onus_core::paths::native(root, d))?;
+    }
+    entries.par_iter().try_for_each(|e| -> Result<()> {
+        let to = onus_core::paths::native(root, &e.path);
+        match &e.data {
+            Ok(bytes) => {
+                std::fs::write(&to, bytes).with_context(|| format!("cannot write {}", e.path))?
+            }
+            Err(target) => {
+                // A link that cannot be made (Windows without the right) is
+                // left out, as `git archive` extraction would.
+                #[cfg(unix)]
+                let _ = std::os::unix::fs::symlink(target, &to);
+                #[cfg(not(unix))]
+                let _ = target;
+            }
+        }
+        Ok(())
+    })
+}
+
+/// Removes a tree's files on all cores, leaving the folders for the
+/// caller (a `TempDir`) to remove.
+fn clear_tree(root: &Path) {
+    use rayon::prelude::*;
+    fn files(dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in entries.flatten() {
+            match e.file_type() {
+                Ok(t) if t.is_dir() => files(&e.path(), out),
+                Ok(_) => out.push(e.path()),
+                Err(_) => {}
+            }
+        }
+    }
+    let mut all = Vec::new();
+    files(root, &mut all);
+    all.par_iter().for_each(|f| {
+        let _ = std::fs::remove_file(f);
+    });
+}
+
+impl Drop for MaterializedPair {
+    fn drop(&mut self) {
+        rayon::join(
+            || clear_tree(self.base.dir.path()),
+            || clear_tree(self.head.dir.path()),
+        );
+    }
+}
+
+/// Extracts both trees of a comparison from git. The head tree is one `git
+/// archive`; the base tree takes the head's bytes for every path git does
+/// not report as different and a second, small archive for the rest. Files
+/// are written on all cores. Only reads the repository; nothing in either
+/// tree is executed.
+///
+/// With `partial_base`, the base tree holds only what a report reads when
+/// the base map comes from the cache: the changed files, `.gitignore`
+/// files, `onus.yaml` and the packs it lists. [`MaterializedPair::complete_base`]
+/// writes the rest when the map has to be built after all.
+pub fn materialize_pair(
+    repo: &Path,
+    base: &str,
+    head: &str,
+    partial_base: bool,
+) -> Result<MaterializedPair> {
+    let base_sha = resolve_sha(repo, base)?;
+    let head_sha = resolve_sha(repo, head)?;
+    // `M\0path\0`, `A\0path\0`, … without rename detection.
+    let status = git(
+        repo,
+        &[
+            "diff",
+            "--name-status",
+            "-z",
+            "--no-renames",
+            "--no-ext-diff",
+            &base_sha,
+            &head_sha,
+        ],
+    )?;
+    let mut changed = std::collections::BTreeSet::new();
+    let mut in_base: Vec<String> = Vec::new();
+    let mut fields = status.split(|b| *b == 0).filter(|f| !f.is_empty());
+    while let (Some(code), Some(path)) = (fields.next(), fields.next()) {
+        let path = String::from_utf8_lossy(path).to_string();
+        if code.first() != Some(&b'A') {
+            in_base.push(path.clone());
+        }
+        changed.insert(path);
+    }
+    let head_archive = git(repo, &["archive", "--format=tar", &head_sha])?;
+    let mut base_archives = Vec::new();
+    for chunk in in_base.chunks(500) {
+        let mut args: Vec<&str> = vec![
+            "--literal-pathspecs",
+            "archive",
+            "--format=tar",
+            &base_sha,
+            "--",
+        ];
+        args.extend(chunk.iter().map(String::as_str));
+        base_archives.push(git(repo, &args)?);
+    }
+    let head_entries = tree_entries(&head_archive)?;
+    let mut base_changed = Vec::new();
+    for a in &base_archives {
+        base_changed.extend(tree_entries(a)?);
+    }
+    let needed = partial_base.then(|| tree_config_files(&head_entries, &base_changed));
+    let base_entries: Vec<&TreeEntry> = head_entries
+        .iter()
+        .filter(|e| !changed.contains(&e.path))
+        .filter(|e| needed.as_ref().is_none_or(|n| n.contains(&e.path)))
+        .chain(base_changed.iter())
+        .collect();
+    let written = needed.map(|_| base_entries.iter().map(|e| e.path.clone()).collect());
+    let head_refs: Vec<&TreeEntry> = head_entries.iter().collect();
+    let head_dir = tempfile::Builder::new().prefix("onus-").tempdir()?;
+    let base_dir = tempfile::Builder::new().prefix("onus-").tempdir()?;
+    let (b, h) = rayon::join(
+        || write_tree(base_dir.path(), &base_entries),
+        || write_tree(head_dir.path(), &head_refs),
+    );
+    let pair = MaterializedPair {
+        base: Materialized {
+            dir: base_dir,
+            sha: base_sha,
+        },
+        head: Materialized {
+            dir: head_dir,
+            sha: head_sha,
+        },
+        changed,
+        repo: repo.to_path_buf(),
+        partial: std::sync::Mutex::new(written),
+    };
+    b?;
+    h?;
+    Ok(pair)
 }
 
 /// `main (abc1234)`

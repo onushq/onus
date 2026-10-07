@@ -49,11 +49,18 @@ pub struct DiffInput<'a> {
     pub intent: Option<&'a Intent>,
     pub base_label: &'a str,
     pub head_label: &'a str,
+    /// The paths that differ, when the caller knows them (from git): only
+    /// those are read and compared.
+    pub changed_paths: Option<&'a BTreeSet<String>>,
 }
 
 pub fn diff(input: &DiffInput) -> SemanticReport {
-    let base_files = walk::list_files(input.base_root);
-    let head_files = walk::list_files(input.head_root);
+    let mut base_files = walk::list_files(input.base_root);
+    let mut head_files = walk::list_files(input.head_root);
+    if let Some(changed) = input.changed_paths {
+        base_files.retain(|f| changed.contains(f));
+        head_files.retain(|f| changed.contains(f));
+    }
     let text = text::diff_trees(input.base_root, &base_files, input.head_root, &head_files);
     let ctx = ctx::Ctx::new(
         input.base_map,
