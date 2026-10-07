@@ -1,7 +1,7 @@
 # Onus: Implementation Plan
 
 Source: the manifesto *Code Is Not the Product* by Mikias Abebe (Sep 28, 2026).
-Status: **plan updated 2026-10-07.** Phase 1 milestones M0–M5 are implemented on the `phase-1/first-version` branch (see 5.9); M6 is in progress and M7 is next. Onus is written in Rust and fully open source under Apache-2.0. Section 2 lists the decisions; the open ones are marked.
+Status: **plan updated 2026-10-07.** Phase 1 milestones M0–M6 are implemented and released (see 5.9); M7, the field trial, is next. Onus is written in Rust and fully open source under Apache-2.0. Section 2 lists the decisions; the open ones are marked.
 
 **Naming.** The project and the software are both called **Onus**. The name comes from *onus probandi*, the burden of proof: today that burden sits on a reviewer who has to find problems by reading lines, and Onus moves it to the agent, which has to prove its change with evidence. Tagline: *"The onus is on the agent."*
 
@@ -340,7 +340,7 @@ A fixture monorepo, `fixtures/shop`, mirrors the manifesto's example: `orders`, 
 | M3 | Diff engine core: symbol matching, rename/move, contract diff, edge diff, packages, config, blast radius | S2, S7 and S9 pass | **Done**, except "≥ 0.9 similar" rename matching (exact fingerprints only) |
 | M4 | Extractors and detectors: externals registry, events, Prisma, env; notable edits; test weakening; secrets | S1 (minus rendering), S3, S5 and S8 pass | **Done** |
 | M5 | Ranking, internal collapsing, intent check, boundary rules, markdown + JSON renderers → `onus report` | All of S1–S9 pass as report snapshots | **Done** |
-| M6 | Release binaries via `cargo-dist` (Linux, macOS, Windows; x86_64 and arm64), Homebrew tap and shell installer; composite GitHub Action, sticky comment, base-map cache, `/onus caught`, metrics JSONL; dogfood on this repo | Running on Onus's own PRs | **In progress:** release workflow (5 targets, checksums, build attestations), shell installer, composite Action with job summary and sticky comment, dogfood workflow. Not yet: Homebrew tap, base-map cache, `/onus caught`, metrics JSONL |
+| M6 | Release binaries via `cargo-dist` (Linux, macOS, Windows; x86_64 and arm64), Homebrew tap and shell installer; composite GitHub Action, sticky comment, base-map cache, `/onus caught`, metrics JSONL; dogfood on this repo | Running on Onus's own PRs | **Done:** release workflow (5 targets, checksums, build attestations), shell installer, Homebrew tap, composite Action with job summary, sticky comment, base-map cache, 👍/👎 and `/onus caught` feedback, metrics JSONL (`scripts/onus-metrics.sh`), dogfood workflows |
 | M7 | Field trial on 3–5 real TS repos (including agent-authored PRs); tune false positives; performance pass | Gate data collected (5.10) | Not started |
 
 **Deviations from this plan in M0–M5** (details in [ADR 0004](docs/adr/0004-map-and-report-format-additions.md) and [ADR 0005](docs/adr/0005-phase-1-diff-behavior.md)):
@@ -353,6 +353,8 @@ A fixture monorepo, `fixtures/shop`, mirrors the manifesto's example: `orders`, 
 - Exit codes: 1 for usage or runtime errors, 2 only for `--fail-on`.
 - `onus report` uses `git archive` instead of worktrees, and line counts come from an in-process diff instead of `git diff --numstat`.
 - No base-map cache yet: mapping the generated 230,000-line workspace takes about 0.7 s, so the cache moves to M6 with the Action.
+- M6 metrics are not stored anywhere new: the action embeds each report's metrics line in its comment, feedback stays on the pull request (👍/👎 reactions and `/onus caught` replies), and `scripts/onus-metrics.sh` reads it all back with the GitHub API as JSONL.
+- `testData` in onus.yaml (not in the original plan) keeps fixture projects out of the map and their fake keys out of the secret count; Onus's own repository needs it for `fixtures/shop`.
 - M6 builds release binaries with a plain GitHub Actions workflow instead of `cargo-dist` (D6): five targets, fixed archive names that `releases/latest/download/` links and the Action rely on, and GitHub build attestations. Linux binaries are static (musl).
 
 ### 5.10 Phase 1 gate and metrics

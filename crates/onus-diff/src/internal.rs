@@ -105,6 +105,10 @@ pub fn is_docs(path: &str) -> bool {
         || lower.contains("/docs/")
 }
 
+/// The bucket of files onus.yaml declares test data (`#` cannot appear in a
+/// component id).
+const TEST_DATA: &str = "#test-data";
+
 pub fn rows(
     ctx: &Ctx,
     existing: &[SemanticChange],
@@ -134,7 +138,11 @@ pub fn rows(
         {
             continue;
         }
-        let comp = ctx.component_of_path(&f.path);
+        let comp = if ctx.is_test_data(&f.path) {
+            TEST_DATA.to_string()
+        } else {
+            ctx.component_of_path(&f.path)
+        };
         let mut uncovered = false;
         let mut bucket = Bucket::default();
         if f.binary {
@@ -239,7 +247,10 @@ pub fn rows(
         } else {
             join_and(&kinds)
         };
-        let place = if comp == "root" {
+        let test_data = comp == TEST_DATA;
+        let place = if test_data {
+            "in test data".to_string()
+        } else if comp == "root" {
             "at the repository root".to_string()
         } else {
             format!("inside `{comp}`")
@@ -251,7 +262,7 @@ pub fn rows(
         } else {
             format!("{} changed lines of {what} {place}", thousands(total))
         };
-        let users: Vec<String> = if comp == "root" {
+        let users: Vec<String> = if comp == "root" || test_data {
             vec![]
         } else {
             let (_, comps) = ctx.dependents(&comp);
@@ -261,7 +272,9 @@ pub fn rows(
                 .map(|c| format!("`{c}`"))
                 .collect()
         };
-        let mut notes = vec![if comp == "root" {
+        let mut notes = vec![if test_data {
+            "Files onus.yaml declares as test data; they are not part of the map".to_string()
+        } else if comp == "root" {
             "Outside every component Onus found; declare them in onus.yaml to track them"
                 .to_string()
         } else if users.is_empty() {
@@ -327,8 +340,8 @@ pub fn rows(
             ChangeKind::Internal,
             SUBKIND_INTERNAL_CHANGES,
             ChangeLevel::Structure,
-            &comp,
-            (comp != "root").then_some(comp.as_str()),
+            if test_data { "test-data" } else { &comp },
+            (comp != "root" && !test_data).then_some(comp.as_str()),
             "Internal",
             title,
             notes.join("; "),
@@ -340,7 +353,7 @@ pub fn rows(
             files: b.files.len() as u32,
         });
         row.hints.confidence = confidence;
-        if comp != "root" {
+        if comp != "root" && !test_data {
             row.hints.blast_radius = ctx.dependents(&comp).0;
         }
         rows.push(row);

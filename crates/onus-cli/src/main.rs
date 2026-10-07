@@ -40,6 +40,7 @@ const REPORT_HELP: &str = concat!(
   onus report --base main --head HEAD
   onus report --repo ../shop --base origin/main --head feature/sms --format json
   onus report --base \"$BASE_SHA\" --head \"$HEAD_SHA\" --intent pr-body.md --fail-on secrets
+  onus report --base \"$BASE_SHA\" --head \"$HEAD_SHA\" --cache-dir ~/.cache/onus
 
 ",
     exit_codes!()
@@ -188,6 +189,11 @@ Examples:
         /// Import a SCIP index of the head ref (repeatable). Runs nothing.
         #[arg(long, value_name = "FILE")]
         head_scip: Vec<PathBuf>,
+        /// Keep the base ref's map in this folder and reuse it on the next run against the
+        /// same base commit. Safe to share between runs: the file name covers everything that
+        /// shapes the map.
+        #[arg(long, value_name = "DIR")]
+        cache_dir: Option<PathBuf>,
         #[command(flatten)]
         providers: ProviderArgs,
     },
@@ -312,8 +318,12 @@ fn run(cli: Cli) -> Result<i32> {
                 providers: providers.load()?,
                 base_scip,
                 head_scip,
+                cache_dir: None,
             };
             let outcome = onus_cli::diff_dirs(&base, &head, &opts)?;
+            for note in &outcome.notes {
+                eprintln!("onus: {note}");
+            }
             print!("{}", outcome.render(format));
             Ok(if onus_cli::should_fail(&outcome.report, &fail_on) {
                 EXIT_FAIL_ON
@@ -331,6 +341,7 @@ fn run(cli: Cli) -> Result<i32> {
             fail_on,
             base_scip,
             head_scip,
+            cache_dir,
             providers,
         } => {
             let providers = providers.load()?;
@@ -346,8 +357,12 @@ fn run(cli: Cli) -> Result<i32> {
                 providers,
                 base_scip,
                 head_scip,
+                cache_dir,
             };
             let outcome = onus_cli::diff_dirs(b.dir.path(), h.dir.path(), &opts)?;
+            for note in &outcome.notes {
+                eprintln!("onus: {note}");
+            }
             print!("{}", outcome.render(format));
             Ok(if onus_cli::should_fail(&outcome.report, &fail_on) {
                 EXIT_FAIL_ON

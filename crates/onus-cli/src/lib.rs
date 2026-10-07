@@ -44,6 +44,8 @@ pub struct DiffOptions {
     /// SCIP indexes of each tree, produced elsewhere.
     pub base_scip: Vec<PathBuf>,
     pub head_scip: Vec<PathBuf>,
+    /// Where to keep maps of base commits between runs (see [`MapCache`]).
+    pub cache_dir: Option<PathBuf>,
 }
 
 /// Plugins and trusted mode (ADR 0006), the same for every tree.
@@ -75,6 +77,8 @@ pub struct Outcome {
     pub report: SemanticReport,
     pub base_map: CodebaseMap,
     pub head_map: CodebaseMap,
+    /// Notes for stderr, such as whether the map cache was used.
+    pub notes: Vec<String>,
 }
 
 impl Outcome {
@@ -83,6 +87,91 @@ impl Outcome {
             Format::Json => onus_report::to_json(&self.report),
             Format::Md => onus_report::to_markdown(&self.report, !self.head_map.rules.is_empty()),
         }
+    }
+}
+
+/// Maps of base commits kept between runs. A pull request is usually
+/// reported many times against the same base commit; its map only depends
+/// on the commit and on how Onus builds maps, so it is built once.
+///
+/// The file name is a hash of everything that shapes the map: the commit,
+/// the Onus version, the config (with its packs), the plugins file and
+/// trusted mode, and the bytes of every base SCIP index. A changed input
+/// gives a new file; nothing is ever updated in place.
+#[derive(Debug, Clone)]
+pub struct MapCache {
+    pub path: PathBuf,
+    commit: String,
+}
+
+/// What [`MapCache::load`] found.
+#[derive(Debug)]
+pub enum CacheLoad {
+    Hit(Box<CodebaseMap>),
+    Miss,
+    /// A file that is not a map of this commit; it is rebuilt.
+    Unreadable,
+}
+
+impl MapCache {
+    pub fn new(
+        dir: &Path,
+        commit: &str,
+        config: Option<&LoadedConfig>,
+        providers: &Providers,
+        scip: &[PathBuf],
+    ) -> Result<MapCache> {
+        let mut key = format!(
+            "onus map cache 1\nonus {}\ncommit {commit}\nconfig {}\ntrusted {} {}\nplugins {}\n",
+            env!("CARGO_PKG_VERSION"),
+            config.map(|c| c.hash.as_str()).unwrap_or("none"),
+            providers.trusted,
+            providers.allow_unsandboxed,
+            serde_json::to_string(&providers.plugins)?,
+        );
+        for text in &providers.plugins.pack_texts {
+            key.push_str(&format!(
+                "pack {}\n",
+                onus_core::hash::sha256_hex(text.as_bytes())
+            ));
+        }
+        for path in scip {
+            let bytes = std::fs::read(path)
+                .with_context(|| format!("cannot read SCIP index {}", path.display()))?;
+            key.push_str(&format!("scip {}\n", onus_core::hash::sha256_hex(&bytes)));
+        }
+        let name = format!(
+            "map-{}.json",
+            &onus_core::hash::sha256_hex(key.as_bytes())[..32]
+        );
+        Ok(MapCache {
+            path: dir.join(name),
+            commit: commit.to_string(),
+        })
+    }
+
+    /// The cached map of this commit, if there is one.
+    pub fn load(&self) -> CacheLoad {
+        let Ok(text) = std::fs::read_to_string(&self.path) else {
+            return CacheLoad::Miss;
+        };
+        match serde_json::from_str::<CodebaseMap>(&text) {
+            Ok(map) if map.commit == self.commit => CacheLoad::Hit(Box::new(map)),
+            _ => CacheLoad::Unreadable,
+        }
+    }
+
+    /// Saves `map`. A cache that cannot be written only costs time later,
+    /// so callers report the error and carry on.
+    pub fn store(&self, map: &CodebaseMap) -> Result<()> {
+        let dir = self.path.parent().context("cache path has no folder")?;
+        std::fs::create_dir_all(dir)?;
+        // Write a sibling file, then rename it, so a reader never sees half
+        // a map.
+        let tmp = tempfile::NamedTempFile::new_in(dir)?;
+        serde_json::to_writer(std::io::BufWriter::new(tmp.as_file()), map)?;
+        tmp.persist(&self.path)?;
+        Ok(())
     }
 }
 
@@ -134,13 +223,58 @@ pub fn diff_dirs(base: &Path, head: &Path, opts: &DiffOptions) -> Result<Outcome
         bail!("head directory {} does not exist", head.display());
     }
     let config = diff_config(base, opts.config.as_deref())?;
-    let base_map = build_with(
-        base,
-        config.clone(),
-        opts.base_commit.clone(),
-        &opts.providers,
-        &opts.base_scip,
-    )?;
+    let cache = match (&opts.cache_dir, &opts.base_commit) {
+        (Some(dir), Some(commit)) => Some(MapCache::new(
+            dir,
+            commit,
+            config.as_ref(),
+            &opts.providers,
+            &opts.base_scip,
+        )?),
+        _ => None,
+    };
+    let mut notes = Vec::new();
+    let cached = match &cache {
+        Some(c) => match c.load() {
+            CacheLoad::Hit(map) => {
+                notes.push(format!(
+                    "using the cached map of {}",
+                    ref_label(&c.commit, &c.commit)
+                ));
+                Some(*map)
+            }
+            CacheLoad::Miss => None,
+            CacheLoad::Unreadable => {
+                notes.push(format!(
+                    "ignoring unreadable cached map {}",
+                    c.path.display()
+                ));
+                None
+            }
+        },
+        None => None,
+    };
+    let base_map = match cached {
+        Some(map) => map,
+        None => {
+            let map = build_with(
+                base,
+                config.clone(),
+                opts.base_commit.clone(),
+                &opts.providers,
+                &opts.base_scip,
+            )?;
+            if let Some(c) = &cache
+                && let Err(e) = c.store(&map)
+            {
+                notes.push(format!(
+                    "cannot write the map cache {}: {e:#}",
+                    c.path.display()
+                ));
+            }
+            map
+        }
+    };
     let head_map = build_with(
         head,
         config.clone(),
@@ -162,6 +296,7 @@ pub fn diff_dirs(base: &Path, head: &Path, opts: &DiffOptions) -> Result<Outcome
         report,
         base_map,
         head_map,
+        notes,
     })
 }
 

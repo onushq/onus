@@ -1,0 +1,8 @@
+# Onus's configuration for its own repository. Components are discovered
+# from the Cargo workspace.
+version: 1
+
+# The fixture monorepo is sample code, not Onus: it stays out of the map,
+# and the fake keys in scenario S8 are not reported as committed secrets.
+testData:
+  - fixtures/**

@@ -4,6 +4,15 @@ All notable changes to Onus are recorded here. The format follows [Keep a Change
 
 ## Unreleased
 
+## [0.2.0] - 2026-10-07
+
+- `testData` in onus.yaml: globs of fixture projects and other sample code. They are left out of the map, their changes are one row, and fake keys added in them are noted without counting as committed secrets, so `fail-on: secrets` does not trip on them.
+- `onus report --cache-dir`: keep the base ref's map and reuse it on the next report against the same base commit. The action caches it in the Actions cache (input `cache`).
+- The action ends its comment with a 👍/👎 and `/onus caught` feedback line and keeps the report's metrics in it; it also acknowledges `/onus caught` replies on `issue_comment`. `scripts/onus-metrics.sh` collects the Phase 1 measures from a repository's pull requests.
+- Homebrew: `brew install onushq/tap/onus`. The release workflow updates the tap.
+- A Markdown intent file (such as a pull request body) is only read for its `onus-intent` block.
+- Help shows the command as `onus` on every platform.
+
 ## [0.1.0] - 2026-10-07
 
 - Release binaries for Linux (static, x86_64 and ARM64), macOS (Apple silicon and Intel) and Windows, with SHA-256 checksums and build attestations; a shell installer (`curl -fsSL https://onushq.com/install.sh | sh`).

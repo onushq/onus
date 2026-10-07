@@ -205,8 +205,9 @@ fn s8_secret_is_reported_without_its_value() {
     assert_eq!(subkinds(r)[0], "secret-committed");
     assert_eq!(r.summary.secrets, 1);
     for out in [&run.md, &run.json] {
-        assert!(!out.contains("AKIAIOSFODNN7EXAMPLE"));
-        assert!(!out.contains("wJalrXUtnFEMI"));
+        // Split so this file does not hold a secret-shaped literal itself.
+        assert!(!out.contains(concat!("AKIA", "IOSFODNN7EXAMPLE")));
+        assert!(!out.contains(concat!("wJalrXUtnFEMI", "/K7MDENG")));
     }
 }
 
@@ -234,4 +235,36 @@ fn reports_are_deterministic() {
             b.render(onus_cli::Format::Md)
         );
     }
+}
+
+#[test]
+fn secrets_in_declared_test_data_are_noted_not_counted() {
+    let s = Scenario::new("s8-secret");
+    for side in ["base", "head"] {
+        let path = s.dir.path().join(side).join("onus.yaml");
+        let mut yaml = std::fs::read_to_string(&path).unwrap();
+        yaml.push_str("\ntestData:\n  - services/billing/src/payments.ts\n");
+        std::fs::write(&path, yaml).unwrap();
+    }
+    let outcome = s.run();
+    let r = &outcome.report;
+    assert!(!subkinds(r).contains(&"secret-committed"));
+    assert_eq!(r.summary.secrets, 0);
+    let note = row(r, "secret-in-test-data");
+    assert_eq!(note.kind, ChangeKind::Internal);
+    assert!(!note.hints.needs_person);
+    assert!(
+        note.why_it_matters
+            .contains("services/billing/src/payments.ts")
+    );
+    // Test data is not part of the map.
+    assert!(
+        !outcome
+            .head_map
+            .files
+            .iter()
+            .any(|f| f.path == "services/billing/src/payments.ts")
+    );
+    let md = outcome.render(onus_cli::Format::Md);
+    assert!(!md.contains(concat!("AKIA", "IOSFODNN7EXAMPLE")));
 }

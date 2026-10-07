@@ -170,3 +170,26 @@ jobs:
           flags=()
           case "$TAG" in *-*) flags+=(--prerelease) ;; esac
           gh release create "$TAG" dist/* --title "Onus $TAG" --notes-file notes.md --verify-tag "${flags[@]}"
+      - name: Update the Homebrew tap
+        if: ${{ !contains(github.ref_name, '-') }}
+        env:
+          # A fine-grained token with contents: write on onushq/homebrew-tap.
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "::notice::HOMEBREW_TAP_TOKEN is not set; update the tap with scripts/homebrew-formula.sh $TAG"
+            exit 0
+          fi
+          scripts/homebrew-formula.sh "$TAG" dist/SHA256SUMS > onus.rb
+          git clone --quiet --depth 1 "https://x-access-token:${TAP_TOKEN}@github.com/onushq/homebrew-tap.git" tap
+          cp onus.rb tap/Formula/onus.rb
+          cd tap
+          if git diff --quiet; then
+            echo "The tap already has onus $TAG."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit --quiet --all --message "onus ${TAG#v}"
+          git push --quiet origin HEAD:main

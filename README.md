@@ -26,7 +26,8 @@ The first row is the one that deserves a person's attention, so it comes first. 
 On macOS and Linux:
 
 ```sh
-curl -fsSL https://onushq.com/install.sh | sh     # installs onus to ~/.local/bin
+brew install onushq/tap/onus                      # Homebrew, macOS and Linux
+curl -fsSL https://onushq.com/install.sh | sh     # or: installs onus to ~/.local/bin
 ```
 
 The script picks the archive for your system from the [latest release](https://github.com/onushq/onus/releases/latest) and checks its SHA-256 before installing ([source](scripts/install.sh)). Archives for macOS, Linux (static, x86_64 and ARM64) and Windows are on the release page; each one carries a build attestation (`gh attestation verify <archive> --repo onushq/onus`).
@@ -41,7 +42,7 @@ steps:
   - uses: actions/checkout@v7
     with:
       fetch-depth: 0
-  - uses: onushq/onus/action@v0.1.0
+  - uses: onushq/onus/action@v0.2.0
     with:
       fail-on: secrets          # optional: rule-violation, secrets
 ```

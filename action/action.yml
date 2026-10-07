@@ -1,5 +1,10 @@
 name: Onus report
 description: Report the changes in meaning of a pull request, as a sticky comment and a job summary.
+
+# Two events:
+# - pull_request: report on the change (and keep the comment up to date).
+# - issue_comment: acknowledge `/onus caught <note>` replies, which record that
+#   the report surfaced something the diff hid (see `onus help ci`).
 author: Onus
 branding:
   icon: eye
@@ -48,6 +53,18 @@ inputs:
     description: The git repository to analyze.
     required: false
     default: "."
+  cache:
+    description: >-
+      Keep the base commit's map in the Actions cache, so later pushes to the
+      pull request skip mapping the base again.
+    required: false
+    default: "true"
+  feedback:
+    description: >-
+      End the comment with a line asking for a 👍 or 👎 reaction and for
+      `/onus caught <note>` replies, the Phase 1 usefulness measures.
+    required: false
+    default: "true"
   github-token:
     description: Token for downloading the release and commenting (needs pull-requests write to comment).
     required: false
@@ -66,12 +83,43 @@ outputs:
   needs-attention:
     description: Number of changes that need a person to look.
     value: ${{ steps.report.outputs.needs-attention }}
+  metrics:
+    description: >-
+      One line of JSON about this report (sizes, counts, time taken), also
+      kept in the comment for `scripts/onus-metrics.sh`.
+    value: ${{ steps.report.outputs.metrics }}
 
 runs:
   using: composite
   steps:
+    - name: Acknowledge /onus caught
+      if: github.event_name == 'issue_comment'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        REPO: ${{ github.repository }}
+        COMMENT_ID: ${{ github.event.comment.id }}
+        IS_PR: ${{ github.event.issue.pull_request != null }}
+        AUTHOR_TYPE: ${{ github.event.comment.user.type }}
+        # Through the environment, never pasted into the script.
+        BODY: ${{ github.event.comment.body }}
+      run: |
+        set -euo pipefail
+        case "$BODY" in
+          "/onus caught"*) ;;
+          *) echo "Not an /onus caught comment; nothing to do."; exit 0 ;;
+        esac
+        if [ "$IS_PR" != true ] || [ "$AUTHOR_TYPE" = Bot ]; then
+          echo "Only people's comments on pull requests count; nothing to do."
+          exit 0
+        fi
+        gh api --method POST "repos/$REPO/issues/comments/$COMMENT_ID/reactions" \
+          -f content=rocket > /dev/null
+        echo "Recorded. scripts/onus-metrics.sh counts it from the comment itself."
+
     - name: Install onus
       id: install
+      if: github.event_name != 'issue_comment'
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github-token }}
@@ -80,10 +128,13 @@ runs:
         ACTION_REF: ${{ github.action_ref }}
       run: |
         set -euo pipefail
+        found() {
+          "$1" --version
+          echo "onus=$1" >> "$GITHUB_OUTPUT"
+          echo "version=$("$1" --version | cut -d' ' -f2)" >> "$GITHUB_OUTPUT"
+        }
         if [ -n "$INPUT_PATH" ]; then
-          bin="$(cd "$(dirname "$INPUT_PATH")" && pwd)/$(basename "$INPUT_PATH")"
-          "$bin" --version
-          echo "onus=$bin" >> "$GITHUB_OUTPUT"
+          found "$(cd "$(dirname "$INPUT_PATH")" && pwd)/$(basename "$INPUT_PATH")"
           exit 0
         fi
         version="$INPUT_VERSION"
@@ -122,17 +173,31 @@ runs:
         else
           tar -xzf "$dir/$asset" -C "$dir"
         fi
-        bin="$dir/onus-$target/onus$exe"
-        "$bin" --version
-        echo "onus=$bin" >> "$GITHUB_OUTPUT"
+        found "$dir/onus-$target/onus$exe"
         echo "$dir/onus-$target" >> "$GITHUB_PATH"
+
+    - name: Restore the base map
+      if: github.event_name != 'issue_comment' && inputs.cache == 'true' && inputs.base != ''
+      uses: actions/cache@v5
+      with:
+        path: ${{ runner.temp }}/onus-map-cache
+        # One entry per base commit and Onus version. Inside it, each map's
+        # file name also covers the config and plugins, so a changed config
+        # never reuses a stale map.
+        key: onus-map-${{ runner.os }}-${{ steps.install.outputs.version }}-${{ inputs.base }}
 
     - name: Report
       id: report
+      if: github.event_name != 'issue_comment'
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       env:
         ONUS: ${{ steps.install.outputs.onus }}
+        VERSION: ${{ steps.install.outputs.version }}
+        CACHE: ${{ inputs.cache }}
+        CACHE_DIR: ${{ runner.temp }}/onus-map-cache
+        PR: ${{ github.event.pull_request.number }}
+        REPO: ${{ github.repository }}
         BASE: ${{ inputs.base }}
         HEAD: ${{ inputs.head }}
         INTENT: ${{ inputs.intent }}
@@ -166,7 +231,15 @@ runs:
           *) args+=(--intent "$INTENT") ;;
         esac
         [ -n "$CONFIG" ] && args+=(--config "$CONFIG")
+        # Releases before 0.2 have no map cache.
+        if [ "$CACHE" = true ] && "$ONUS" report --help | grep -q -- --cache-dir; then
+          args+=(--cache-dir "$CACHE_DIR")
+        fi
+        # Milliseconds; perl is on every GitHub runner, `date +%N` is not.
+        ms() { perl -MTime::HiRes=time -e 'printf "%d\n", time * 1000'; }
+        started=$(ms)
         "$ONUS" report "${args[@]}" --format md > "$out/onus-report.md"
+        finished=$(ms)
         status=0
         "$ONUS" report "${args[@]}" --format json --fail-on "$FAIL_ON" > "$out/onus-report.json" || status=$?
         if [ "$status" -ne 0 ] && [ "$status" -ne 2 ]; then
@@ -174,22 +247,41 @@ runs:
         fi
         cat "$out/onus-report.md" >> "$GITHUB_STEP_SUMMARY"
         summary=$(jq -c .summary "$out/onus-report.json")
+        # The Phase 1 measures for this report (PLAN.md 5.10), one JSON line.
+        jq -c \
+          --arg repo "$REPO" --arg pr "$PR" --arg base "$BASE" --arg head "$HEAD" \
+          --arg version "$VERSION" --argjson ms "$((finished - started))" '
+          {
+            schema: 1, repo: $repo, pr: ($pr | tonumber? // null), base: $base, head: $head,
+            onus: $version, durationMs: $ms,
+            files: .textStats.files,
+            changedLines: (.textStats.linesAdded + .textStats.linesRemoved),
+            rows: .summary.meaningChanges,
+            needsAttention: .summary.needsAttention,
+            secrets: .summary.secrets,
+            ruleViolations: .summary.newRuleViolations,
+            intentMismatches: .summary.intentMismatches
+          }' "$out/onus-report.json" > "$out/onus-metrics.json"
         {
           echo "report=$out/onus-report.json"
           echo "markdown=$out/onus-report.md"
           echo "meaning-changes=$(jq .meaningChanges <<< "$summary")"
           echo "needs-attention=$(jq .needsAttention <<< "$summary")"
+          echo "metrics=$(cat "$out/onus-metrics.json")"
           echo "failed=$([ "$status" -eq 2 ] && echo true || echo false)"
         } >> "$GITHUB_OUTPUT"
 
     - name: Comment
       if: >-
+        github.event_name != 'issue_comment' &&
         inputs.comment == 'true' && github.event.pull_request.number &&
         github.event.pull_request.head.repo.full_name == github.repository
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github-token }}
         MD: ${{ steps.report.outputs.markdown }}
+        METRICS: ${{ steps.report.outputs.metrics }}
+        FEEDBACK: ${{ inputs.feedback }}
         PR: ${{ github.event.pull_request.number }}
         REPO: ${{ github.repository }}
       run: |
@@ -199,6 +291,12 @@ runs:
         if [ "$(wc -c < "$MD")" -gt 60000 ]; then
           body+=$'\n\n…the report is longer than a comment allows; the full report is in the job summary.'
         fi
+        if [ "$FEEDBACK" = true ]; then
+          body+=$'\n\n<sub>Was this report useful? React with 👍 or 👎. If it surfaced something the diff hid, reply <code>/onus caught &lt;what&gt;</code>.</sub>'
+        fi
+        # Kept for scripts/onus-metrics.sh; invisible in the rendered comment.
+        body+=$'\n<!-- onus-metrics '"$METRICS"$' -->'
+
         id=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
           --jq '[.[] | select(.body | startswith("<!-- onus-report -->"))][0].id // empty' | head -n1)
         if [ -n "$id" ]; then
@@ -208,7 +306,7 @@ runs:
         fi
 
     - name: Fail on findings
-      if: steps.report.outputs.failed == 'true'
+      if: github.event_name != 'issue_comment' && steps.report.outputs.failed == 'true'
       shell: bash
       env:
         FAIL_ON: ${{ inputs.fail-on }}
