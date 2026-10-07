@@ -1,0 +1,75 @@
+Many project configs change at once, in two different ways: six drop a
+`module` override and two drop their `exclude` list. A row per component
+would bury the second pattern; one row for everything would hide it. Each
+kind of edit reads as its own row.
+
+=== both package.json
+{ "name": "r", "private": true, "workspaces": ["libs/*"] }
+=== both libs/l1/package.json
+{ "name": "@r/l1", "private": true, "main": "src/index.ts" }
+=== both libs/l1/src/index.ts
+export const l1 = 0;
+=== base libs/l1/tsconfig.json
+{ "compilerOptions": { "module": "commonjs", "strict": true } }
+=== head libs/l1/tsconfig.json
+{ "compilerOptions": { "strict": true } }
+=== both libs/l2/package.json
+{ "name": "@r/l2", "private": true, "main": "src/index.ts" }
+=== both libs/l2/src/index.ts
+export const l2 = 1;
+=== base libs/l2/tsconfig.json
+{ "compilerOptions": { "module": "commonjs", "strict": true } }
+=== head libs/l2/tsconfig.json
+{ "compilerOptions": { "strict": true } }
+=== both libs/l3/package.json
+{ "name": "@r/l3", "private": true, "main": "src/index.ts" }
+=== both libs/l3/src/index.ts
+export const l3 = 2;
+=== base libs/l3/tsconfig.json
+{ "compilerOptions": { "module": "commonjs", "strict": true } }
+=== head libs/l3/tsconfig.json
+{ "compilerOptions": { "strict": true } }
+=== both libs/l4/package.json
+{ "name": "@r/l4", "private": true, "main": "src/index.ts" }
+=== both libs/l4/src/index.ts
+export const l4 = 3;
+=== base libs/l4/tsconfig.json
+{ "compilerOptions": { "module": "commonjs", "strict": true } }
+=== head libs/l4/tsconfig.json
+{ "compilerOptions": { "strict": true } }
+=== both libs/l5/package.json
+{ "name": "@r/l5", "private": true, "main": "src/index.ts" }
+=== both libs/l5/src/index.ts
+export const l5 = 4;
+=== base libs/l5/tsconfig.json
+{ "compilerOptions": { "module": "commonjs", "strict": true } }
+=== head libs/l5/tsconfig.json
+{ "compilerOptions": { "strict": true } }
+=== both libs/l6/package.json
+{ "name": "@r/l6", "private": true, "main": "src/index.ts" }
+=== both libs/l6/src/index.ts
+export const l6 = 5;
+=== base libs/l6/tsconfig.json
+{ "compilerOptions": { "module": "commonjs", "strict": true } }
+=== head libs/l6/tsconfig.json
+{ "compilerOptions": { "strict": true } }
+=== both libs/l7/package.json
+{ "name": "@r/l7", "private": true, "main": "src/index.ts" }
+=== both libs/l7/src/index.ts
+export const l7 = 6;
+=== base libs/l7/tsconfig.json
+{ "compilerOptions": { "strict": true }, "exclude": ["src/admin"] }
+=== head libs/l7/tsconfig.json
+{ "compilerOptions": { "strict": true } }
+=== both libs/l8/package.json
+{ "name": "@r/l8", "private": true, "main": "src/index.ts" }
+=== both libs/l8/src/index.ts
+export const l8 = 7;
+=== base libs/l8/tsconfig.json
+{ "compilerOptions": { "strict": true }, "exclude": ["src/admin"] }
+=== head libs/l8/tsconfig.json
+{ "compilerOptions": { "strict": true } }
+=== expect
+row build-config-changed ○ title~"changes `module`" title~"6 components"
+row build-config-changed ○ title~"`exclude`"
+no build-config-changed title~"8 components"

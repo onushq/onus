@@ -27,19 +27,30 @@ fn widespread_candidate(r: &SemanticChange) -> bool {
 }
 
 pub fn widespread(rows: Vec<SemanticChange>) -> Vec<SemanticChange> {
-    let mut by_subkind: BTreeMap<String, Vec<SemanticChange>> = BTreeMap::new();
+    // Grouped by subkind and, for config, by the kind of edit: six configs
+    // dropping `module` and two dropping `exclude` are two patterns.
+    let mut by_subkind: BTreeMap<(String, String), Vec<SemanticChange>> = BTreeMap::new();
     let mut internal = Vec::new();
     let mut out = Vec::new();
     for r in rows {
         if r.subkind == SUBKIND_INTERNAL_CHANGES {
             internal.push(r);
         } else if widespread_candidate(&r) {
-            by_subkind.entry(r.subkind.clone()).or_default().push(r);
+            let pattern = if r.kind == ChangeKind::Config {
+                crate::ctx::edit_pattern(&r.title)
+            } else {
+                String::new()
+            };
+            by_subkind
+                .entry((r.subkind.clone(), pattern))
+                .or_default()
+                .push(r);
         } else {
             out.push(r);
         }
     }
-    for (subkind, members) in by_subkind {
+    let mut ids: BTreeMap<String, u32> = BTreeMap::new();
+    for ((subkind, pattern), members) in by_subkind {
         let components: BTreeSet<String> = members.iter().map(component_name).collect();
         if components.len() <= WIDESPREAD_COMPONENTS {
             out.extend(members);
@@ -52,15 +63,25 @@ pub fn widespread(rows: Vec<SemanticChange>) -> Vec<SemanticChange> {
         let names: Vec<String> = components.iter().map(|c| format!("`{c}`")).collect();
         let first = &members[0];
         let mut row = first.clone();
-        row.id = format!("{subkind}:widespread");
+        let n = ids.entry(subkind.clone()).or_default();
+        *n += 1;
+        row.id = if *n == 1 {
+            format!("{subkind}:widespread")
+        } else {
+            format!("{subkind}:widespread#{n}")
+        };
         row.subject = "repository".into();
         row.component = None;
-        row.title = format!(
-            "{}: changes in {} ({})",
-            first.kind_label,
+        let counts = format!(
+            "{} ({})",
             plural(components.len() as u32, "component", "components"),
             plural(files.len() as u32, "file", "files")
         );
+        row.title = if pattern.is_empty() {
+            format!("{}: changes in {counts}", first.kind_label)
+        } else {
+            format!("{} changes {pattern} in {counts}", first.kind_label)
+        };
         row.why_it_matters = format!(
             "The same kind of change in {}; review the pattern once rather than file by file",
             join_some(&names, 4)

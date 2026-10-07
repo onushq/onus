@@ -10,6 +10,7 @@ mod collapse;
 pub mod config_files;
 mod contracts;
 mod ctx;
+mod generated;
 pub mod intent;
 mod internal;
 mod lockfiles;
@@ -81,6 +82,7 @@ pub fn diff(input: &DiffInput) -> SemanticReport {
     rows.extend(secrets_scan::rows(&ctx));
     rows.extend(apis::rows(&ctx));
     rows.extend(violations);
+    let mut rows = generated::collapse(&ctx, rows);
     let (internal_rows, structure) = internal::rows(&ctx, &rows, &tests);
     rows.extend(internal_rows);
     let mut rows = collapse::widespread(rows);

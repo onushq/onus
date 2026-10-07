@@ -1,7 +1,6 @@
 Regenerated client code gains several types and fields. The generated file
 is a mirror of the schema change, so it reads as one quiet row instead of a
 contract row per type.
-status: open
 
 === both package.json
 { "name": "r", "private": true, "workspaces": ["packages/*"] }

@@ -418,11 +418,15 @@ pub fn rows(ctx: &Ctx) -> Vec<SemanticChange> {
         rows.push(row);
     }
     // Many files of one kind in one component (a new library's tsconfig
-    // files, a migration) read as one row.
-    crate::ctx::group_rows(
+    // files, a migration) read as one row per kind of edit.
+    crate::ctx::group_rows_by(
         rows,
         |_| true,
-        |r, n, place| format!("{}: {n} files changed {place}", r.kind_label),
+        |r| crate::ctx::edit_pattern(&r.title),
+        |r, n, place| match crate::ctx::edit_pattern(&r.title) {
+            p if p.is_empty() => format!("{}: {n} files changed {place}", r.kind_label),
+            p => format!("{}: {n} files {place} change {p}", r.kind_label),
+        },
         |r| format!("`{}`", r.locations.first().map_or("", |l| l.file.as_str())),
         |r, items| format!("{items}; {}", lower_first(&r.why_it_matters)),
     )

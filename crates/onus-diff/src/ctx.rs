@@ -322,6 +322,24 @@ pub fn change(
     }
 }
 
+/// The kind of edit a row's title names (`` `module` `` in "Build config
+/// `a/tsconfig.json` changes `module`"), or "" when it names none.
+pub fn edit_pattern(title: &str) -> String {
+    let at = [" changes ", " change "]
+        .iter()
+        .find_map(|w| title.find(w).map(|i| i + w.len()));
+    let Some(at) = at else {
+        return String::new();
+    };
+    let mut rest = &title[at..];
+    for tail in [" in `", " at the repository root"] {
+        if let Some(i) = rest.rfind(tail) {
+            rest = &rest[..i];
+        }
+    }
+    rest.to_string()
+}
+
 /// `1,404`
 pub fn thousands(n: u32) -> String {
     let s = n.to_string();
@@ -382,19 +400,34 @@ pub fn group_rows(
     item: impl Fn(&SemanticChange) -> String,
     why: impl Fn(&SemanticChange, &str) -> String,
 ) -> Vec<SemanticChange> {
+    group_rows_by(rows, groupable, |_| String::new(), title, item, why)
+}
+
+/// [`group_rows`], keeping rows apart that differ in `key` (the kind of
+/// edit, for config files).
+pub fn group_rows_by(
+    rows: Vec<SemanticChange>,
+    groupable: impl Fn(&SemanticChange) -> bool,
+    key: impl Fn(&SemanticChange) -> String,
+    title: impl Fn(&SemanticChange, usize, &str) -> String,
+    item: impl Fn(&SemanticChange) -> String,
+    why: impl Fn(&SemanticChange, &str) -> String,
+) -> Vec<SemanticChange> {
     let mut out = Vec::new();
-    let mut groups: BTreeMap<(Option<String>, String), Vec<SemanticChange>> = BTreeMap::new();
+    type Key = (Option<String>, String, String);
+    let mut groups: BTreeMap<Key, Vec<SemanticChange>> = BTreeMap::new();
     for r in rows {
         if groupable(&r) {
             groups
-                .entry((r.component.clone(), r.subkind.clone()))
+                .entry((r.component.clone(), r.subkind.clone(), key(&r)))
                 .or_default()
                 .push(r);
         } else {
             out.push(r);
         }
     }
-    for ((component, subkind), mut members) in groups {
+    let mut ids: BTreeMap<String, u32> = BTreeMap::new();
+    for ((component, subkind, _), mut members) in groups {
         if members.len() == 1 {
             out.extend(members);
             continue;
@@ -410,7 +443,13 @@ pub fn group_rows(
         row.title = title(first, members.len(), &place);
         row.why_it_matters = why(first, &join_some(&items, 4));
         row.subject = component.clone().unwrap_or_else(|| "root".into());
-        row.id = format!("{subkind}:{}", row.subject);
+        let n = ids.entry(format!("{subkind}:{}", row.subject)).or_default();
+        *n += 1;
+        row.id = if *n == 1 {
+            format!("{subkind}:{}", row.subject)
+        } else {
+            format!("{subkind}:{}#{n}", row.subject)
+        };
         row.locations = members.iter().flat_map(|m| m.locations.clone()).collect();
         row.locations.sort();
         row.locations.dedup();
