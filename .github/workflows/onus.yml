@@ -30,7 +30,7 @@ jobs:
           # AWS's published example keys on purpose, and Onus has no way
           # yet to mark paths as test data.
           fail-on: none
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always() && steps.onus.outputs.report
         with:
           name: onus-report
