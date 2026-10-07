@@ -1050,7 +1050,7 @@ fn contract_row(
                 join_and(&files)
             )
         } else if reach.noun == "implement it" {
-            "nothing in this repository implements it, and code that only reads it is unaffected"
+            "nothing outside this change implements it, and code that only reads it is unaffected"
                 .to_string()
         } else {
             "nothing outside this change uses it".to_string()

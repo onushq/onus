@@ -105,7 +105,10 @@ pub fn collapse(ctx: &Ctx, rows: Vec<SemanticChange>) -> Vec<SemanticChange> {
         );
         if !members.is_empty() {
             let items: Vec<String> = members.iter().map(|m| m.title.clone()).collect();
-            why.push_str(&format!("; it {}", lower_first(&join_some(&items, 4))));
+            why.push_str(&format!(
+                "; what changed: {}",
+                lower_first(&join_some(&items, 4))
+            ));
         }
         let (added, removed) = ctx
             .text

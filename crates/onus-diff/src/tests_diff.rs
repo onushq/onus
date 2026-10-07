@@ -250,7 +250,8 @@ pub fn analyze(ctx: &Ctx, pairs: &Pairs) -> TestsResult {
             "Tests removed with code",
             format!("Tests in `{comp}` removed with the code they tested"),
             format!(
-                "{}: each covered code this change deletes, so no remaining code loses coverage",
+                "{}: each used code this change deletes, so nothing that still exists by that \
+                 name loses a test; if the logic moved elsewhere, check that its tests moved too",
                 capitalize(&crate::ctx::join_some(&items, 4))
             ),
             vec![],

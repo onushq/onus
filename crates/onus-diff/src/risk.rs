@@ -150,7 +150,7 @@ fn migration_kind(path: &str) -> Option<MigrationKind> {
 fn migration_effects(text: &str) -> (Vec<String>, bool) {
     static DOWN: OnceLock<Regex> = OnceLock::new();
     let down = DOWN.get_or_init(|| {
-        Regex::new(r"(?m)^\s*(?:public\s+)?(?:async\s+)?(?:down\s*\(|export\s+(?:async\s+)?function\s+down\b|exports\.down\b|def\s+downgrade\b|def\s+down\b)")
+        Regex::new(r"(?m)^\s*(?:public\s+)?(?:async\s+)?(?:down\s*[(:=]|export\s+(?:async\s+)?function\s+down\b|export\s+const\s+down\b|exports\.down\b|def\s+downgrade\b|def\s+down\b)")
             .unwrap()
     });
     let text = match down.find(text) {
@@ -191,6 +191,33 @@ fn migration_effects(text: &str) -> (Vec<String>, bool) {
             };
             let start = c.get(0).map_or(0, |m| m.start());
             found.push((start, format!("{what} `{target}`")));
+        }
+    }
+    // `ALTER TABLE t ADD COLUMN a …, ADD COLUMN b …`: every column, not
+    // only the first.
+    static ALTER: OnceLock<Regex> = OnceLock::new();
+    let alter = ALTER.get_or_init(|| {
+        Regex::new(
+            r#"(?is)\balter\s+table\s+(?:only\s+)?[`"']?([\w.]+?)[`"']?\s+(add\s.*?)(?:;|`|$)"#,
+        )
+        .unwrap()
+    });
+    static ADD: OnceLock<Regex> = OnceLock::new();
+    let add = ADD.get_or_init(|| {
+        Regex::new(r#"(?i)(?:^|,)\s*add\s+(?:column\s+)?(?:if\s+not\s+exists\s+)?[`"']?(\w+)"#)
+            .unwrap()
+    });
+    for c in alter.captures_iter(text) {
+        let start = c.get(2).map_or(0, |m| m.start());
+        for a in add.captures_iter(&c[2]) {
+            let start = start + a.get(0).map_or(0, |m| m.start());
+            let col = &a[1];
+            if !matches!(
+                col.to_ascii_lowercase().as_str(),
+                "constraint" | "primary" | "foreign" | "unique" | "check" | "index"
+            ) {
+                found.push((start, format!("adds column `{}.{col}`", &c[1])));
+            }
         }
     }
     found.sort();
@@ -951,14 +978,26 @@ fn route_rows(ctx: &Ctx, f: &FileChange) -> Vec<SemanticChange> {
     rows
 }
 
-/// A literal `cache-control` value set in the text.
+/// The literal `cache-control` values set in the text.
 fn cache_header(text: &str) -> Option<String> {
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| {
         Regex::new(r#"(?i)['"]cache-control['"]\s*[:,]\s*['"`]([^'"`]+)['"`]"#).unwrap()
     });
-    re.captures(text)
-        .map(|c| format!("cache-control: {}", &c[1]))
+    let mut values: Vec<String> = Vec::new();
+    for c in re.captures_iter(text) {
+        if !values.iter().any(|v| v == &c[1]) {
+            values.push(c[1].to_string());
+        }
+    }
+    match values.as_slice() {
+        [] => None,
+        [one] => Some(format!("cache-control: {one}")),
+        _ => Some(format!(
+            "cache-control: {}",
+            values.join("` or `cache-control: ")
+        )),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1140,7 +1179,7 @@ mod tests {
     fn reads_what_a_migration_does() {
         let (effects, cascade) = migration_effects(
             "CREATE TABLE IF NOT EXISTS \"posts\" (id uuid, p uuid REFERENCES x ON DELETE CASCADE);\n\
-             ALTER TABLE users ADD COLUMN cv bytea;\n\
+             ALTER TABLE users ADD COLUMN cv bytea, ADD COLUMN cv_name text;\n\
              queryRunner.dropColumn('users', 'legacy');\n\
              async down() { DROP TABLE posts; }",
         );
@@ -1149,6 +1188,7 @@ mod tests {
             [
                 "creates table `posts`",
                 "adds column `users.cv`",
+                "adds column `users.cv_name`",
                 "drops column `users.legacy`"
             ]
         );
