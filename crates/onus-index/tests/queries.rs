@@ -20,13 +20,40 @@ fn find_ranks_exact_names_first() {
     let idx = index();
     let found = idx.find("UserPreferences", 5);
     assert_eq!(
-        found.symbols[0].id,
+        found.symbols[0].symbol.id,
         "user-preferences:src/types.ts#UserPreferences"
     );
     // Words match name parts in any case.
     let found = idx.find("apply discount", 5);
-    assert_eq!(found.symbols[0].name, "applyDiscount");
-    assert!(idx.find("no such thing anywhere", 5).symbols.is_empty());
+    assert_eq!(found.symbols[0].symbol.name, "applyDiscount");
+    assert_eq!(found.symbols[0].matched_words, 2);
+    let nothing = idx.find("zebra quantum", 5);
+    assert!(nothing.symbols.is_empty());
+    assert!(nothing.hint.is_some());
+}
+
+#[test]
+fn find_ranks_partial_matches_fields_and_paths() {
+    let idx = index();
+    // Not every word has to match: the best covered symbols come first.
+    let found = idx.find("user preferences profile", 5);
+    assert_eq!(found.symbols[0].symbol.name, "UserPreferences");
+    assert_eq!(found.symbols[0].matched_words, 2);
+    // A field name finds the type that declares it.
+    let found = idx.find("phone", 50);
+    let hit = found
+        .symbols
+        .iter()
+        .find(|s| s.symbol.name == "UserPreferences")
+        .expect("UserPreferences declares phone");
+    assert_eq!(hit.matched_fields, ["field `phone`"]);
+    // Plurals match, and matching files come with every answer.
+    let found = idx.find("payments", 5);
+    assert!(
+        found
+            .files
+            .contains(&"services/billing/src/payments.ts".to_string())
+    );
 }
 
 #[test]

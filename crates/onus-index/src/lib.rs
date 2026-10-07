@@ -35,6 +35,10 @@ pub struct MapIndex {
     symbol: HashMap<String, usize>,
     /// Lowercase name tokens per symbol, for `find`.
     tokens: Vec<Vec<String>>,
+    /// Per symbol: its fields and parameters, with their name tokens.
+    fields: Vec<Vec<(String, Vec<String>)>>,
+    /// Repository path → lowercase words of the path.
+    path_tokens: HashMap<String, Vec<String>>,
     /// Module id → repository path.
     module_file: HashMap<String, String>,
     /// Repository path → module id.
@@ -83,6 +87,30 @@ impl MapIndex {
             .map(|(i, s)| (s.id.clone(), i))
             .collect();
         let tokens = map.symbols.iter().map(|s| name_tokens(&s.name)).collect();
+        let fields = map
+            .symbols
+            .iter()
+            .map(|s| {
+                let Some(shape) = &s.shape else {
+                    return Vec::new();
+                };
+                shape
+                    .members
+                    .iter()
+                    .map(|m| m.name.clone())
+                    .chain(shape.params.iter().map(|p| p.name.clone()))
+                    .map(|n| {
+                        let t = name_tokens(&n);
+                        (n, t)
+                    })
+                    .collect()
+            })
+            .collect();
+        let path_tokens = map
+            .files
+            .iter()
+            .map(|f| (f.path.clone(), name_tokens(&f.path)))
+            .collect();
 
         let mut module_file: HashMap<String, String> = HashMap::new();
         let mut file_symbols: HashMap<String, Vec<usize>> = HashMap::new();
@@ -143,6 +171,8 @@ impl MapIndex {
             inc,
             symbol,
             tokens,
+            fields,
+            path_tokens,
             module_file,
             file_module,
             file,
@@ -203,42 +233,126 @@ impl MapIndex {
         found
     }
 
-    /// Symbols whose names match `query`, best first.
+    /// Symbols that match the words of `query`, best first: by how many
+    /// words match and where (the symbol's name, then its fields and
+    /// parameters, then its file's path). Also the files whose paths match,
+    /// so an answer always gives somewhere to start.
     pub fn find(&self, query: &str, limit: usize) -> Found {
         let limit = clamp(limit);
         let q = query.trim().to_lowercase();
-        let words = name_tokens(query);
-        if q.is_empty() {
+        let mut words: Vec<String> = name_tokens(query)
+            .into_iter()
+            .filter(|w| !STOP_WORDS.contains(&w.as_str()))
+            .collect();
+        words.dedup();
+        if q.is_empty() || words.is_empty() {
             return Found::default();
         }
-        let mut hits: Vec<(u32, &SymbolNode)> = Vec::new();
+        let joined = q.replace(' ', "");
+        let mut hits: Vec<(u32, usize, Vec<String>, &SymbolNode)> = Vec::new();
         for (i, s) in self.map.symbols.iter().enumerate() {
-            let name = s.name.to_lowercase();
-            let mut score = if name == q {
-                100
-            } else if name.starts_with(&q) {
-                80
-            } else if !words.is_empty()
-                && words
-                    .iter()
-                    .all(|w| self.tokens[i].iter().any(|t| t.starts_with(w.as_str())))
+            let exact = s.name.to_lowercase() == joined;
+            let mut score = if exact { 1000 } else { 0 };
+            let mut matched = 0;
+            let mut why: Vec<String> = Vec::new();
+            let mut in_name_or_field = exact;
+            let mut path_words = 0;
+            // A field or parameter named exactly like the query.
+            if let Some((field, _)) = self.fields[i]
+                .iter()
+                .find(|(name, _)| name.to_lowercase() == joined)
             {
-                60
-            } else if name.contains(&q) {
-                40
-            } else {
-                0
-            };
-            if score == 0 {
+                score += 200;
+                in_name_or_field = true;
+                why.push(format!("field `{field}`"));
+            }
+            for w in &words {
+                let name_hit = self.tokens[i].iter().find(|t| word_matches(w, t));
+                let field_hit = self.fields[i]
+                    .iter()
+                    .find(|(_, tokens)| tokens.iter().any(|t| word_matches(w, t)));
+                let path_hit = s
+                    .loc
+                    .as_ref()
+                    .and_then(|l| self.path_tokens.get(&l.file))
+                    .is_some_and(|tokens| tokens.iter().any(|t| word_matches(w, t)));
+                let best = if let Some(t) = name_hit {
+                    in_name_or_field = true;
+                    if t == w { 35 } else { 30 }
+                } else if let Some((field, _)) = field_hit {
+                    in_name_or_field = true;
+                    why.push(format!("field `{field}`"));
+                    18
+                } else if path_hit {
+                    path_words += 1;
+                    12
+                } else {
+                    0
+                };
+                if best > 0 {
+                    matched += 1;
+                }
+                score += best;
+            }
+            // Symbols of a file whose path has every word count too: the
+            // `publisherProfile.ts` of "publisher profile".
+            let whole_path = words.len() > 1 && path_words == words.len();
+            if !in_name_or_field && !whole_path {
                 continue;
             }
+            score += 15 * matched as u32;
             if s.visibility == onus_core::Visibility::Public {
                 score += 5;
             }
-            hits.push((score, s));
+            why.sort();
+            why.dedup();
+            hits.push((score, matched, why, s));
         }
-        hits.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.id.cmp(&b.1.id)));
+        // Symbols matching more of the words first, then by where they match.
+        hits.sort_by(|a, b| {
+            b.1.cmp(&a.1)
+                .then_with(|| b.0.cmp(&a.0))
+                .then_with(|| a.3.id.cmp(&b.3.id))
+        });
         let total = hits.len();
+
+        let mut files: Vec<(usize, &str)> = self
+            .map
+            .files
+            .iter()
+            .filter_map(|f| {
+                let tokens = self.path_tokens.get(&f.path)?;
+                let n = words
+                    .iter()
+                    .filter(|w| tokens.iter().any(|t| word_matches(w, t)))
+                    .count();
+                (n > 0).then_some((n, f.path.as_str()))
+            })
+            .collect();
+        files.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
+        let all_words = files.first().map_or(0, |f| f.0);
+        let files: Vec<String> = files
+            .into_iter()
+            .take_while(|f| f.0 == all_words)
+            .take(10)
+            .map(|(_, p)| p.to_string())
+            .collect();
+
+        let hint = if total == 0 && files.is_empty() {
+            Some(
+                "Nothing matched by name, field or path. Try one distinctive word (a type, \
+                 function or field name) or a different spelling."
+                    .to_string(),
+            )
+        } else if total == 0 {
+            Some(
+                "No symbol or field matched; these files match by path. Try `onus_file` on one \
+                 of them, or fewer words."
+                    .to_string(),
+            )
+        } else {
+            None
+        };
         Found {
             query: query.to_string(),
             total,
@@ -246,8 +360,14 @@ impl MapIndex {
             symbols: hits
                 .into_iter()
                 .take(limit)
-                .map(|(_, s)| symbol_ref(s))
+                .map(|(_, matched, why, s)| FoundSymbol {
+                    symbol: symbol_ref(s),
+                    matched_words: matched,
+                    matched_fields: why,
+                })
                 .collect(),
+            files,
+            hint,
         }
     }
 
@@ -645,6 +765,22 @@ fn clamp(limit: usize) -> usize {
     }
 }
 
+/// Whether a query word matches an identifier word: as a prefix
+/// (`pub` matches `publisher`), or as the plural of it (`publishers`).
+fn word_matches(word: &str, token: &str) -> bool {
+    if word.len() < 3 {
+        return token == word;
+    }
+    token.starts_with(word)
+        || (word.len() > 3 && word.ends_with('s') && token == &word[..word.len() - 1])
+}
+
+/// Words that carry no meaning in a search for code.
+const STOP_WORDS: &[&str] = &[
+    "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "in", "is", "it", "of", "on",
+    "or", "the", "to", "with",
+];
+
 /// Lowercase words of an identifier: `formatPhoneNumber` → format, phone,
 /// number; `MAX_RETRIES` → max, retries.
 pub fn name_tokens(name: &str) -> Vec<String> {
@@ -725,7 +861,24 @@ pub struct Found {
     pub query: String,
     pub total: usize,
     pub truncated: bool,
-    pub symbols: Vec<SymbolRef>,
+    pub symbols: Vec<FoundSymbol>,
+    /// Files whose paths match the most words (at most 10).
+    pub files: Vec<String>,
+    /// What to try when nothing, or only paths, matched.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FoundSymbol {
+    #[serde(flatten)]
+    pub symbol: SymbolRef,
+    /// How many of the query's words matched.
+    pub matched_words: usize,
+    /// Fields or parameters that matched, when the name did not.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub matched_fields: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
