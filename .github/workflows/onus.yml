@@ -26,10 +26,7 @@ jobs:
         uses: ./action
         with:
           onus-path: target/release/onus
-          # Report only: the fixtures and the secret detector's tests hold
-          # AWS's published example keys on purpose, and Onus has no way
-          # yet to mark paths as test data.
-          fail-on: none
+          fail-on: secrets
       - uses: actions/upload-artifact@v7
         if: always() && steps.onus.outputs.report
         with:
