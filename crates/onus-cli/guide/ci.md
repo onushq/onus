@@ -22,7 +22,7 @@ The Onus action downloads the release binary for the runner, checks its SHA-256,
             id: onus
             with:
               fail-on: rule-violation,secrets
-          - uses: actions/upload-artifact@v4
+          - uses: actions/upload-artifact@v7
             with:
               name: onus-report
               path: ${{ steps.onus.outputs.report }}
