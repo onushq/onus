@@ -10,3 +10,4 @@ Short records of decisions that are significant or hard to reverse. Propose a ne
 | [0004](0004-map-and-report-format-additions.md) | Additions to the map and report formats | Proposed |
 | [0005](0005-phase-1-diff-behavior.md) | Phase 1 semantic diff behavior | Proposed |
 | [0006](0006-pluggable-map-building.md) | Pluggable map building, language-author tooling and trusted mode | Proposed |
+| [0007](0007-map-server-for-agents.md) | An in-memory map server for agents, without a graph database | Proposed |

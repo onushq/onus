@@ -74,6 +74,17 @@ Useful flags: `--format json` for the full machine-readable report, `--intent <f
 
 Other languages and frameworks plug in through plugins, SCIP indexes and language servers (`onus help plugins`). The [user guide](docs/guide.md) covers every command, how to read a report, every kind of change, the `onus.yaml` reference, the intent check and running Onus in CI. It also ships in the binary: run `onus help` for the list of topics and `onus help <topic>` to read one.
 
+## For coding agents (preview)
+
+`onus mcp` gives coding agents the map as MCP tools: find symbols, walk what depends on what, the tests and owners of a change, and `onus_check`, which reports the changes in meaning of the work in progress before it is committed.
+
+```sh
+claude mcp add onus -- onus mcp
+onus query dependents UserPreferences --depth 2     # the same questions from a shell
+```
+
+All agents and worktrees of a repository share one map server that follows file changes and re-parses only what changed: warm answers take a few milliseconds, and a rebuild after an edit well under a second on an 8,600-file monorepo. See [`onus help agents`](crates/onus-cli/guide/agents.md) and [ADR 0007](docs/adr/0007-map-server-for-agents.md).
+
 ## Roadmap
 
 Each phase is useful on its own and moves on only when a measurable gate is passed.

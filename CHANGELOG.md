@@ -4,6 +4,9 @@ All notable changes to Onus are recorded here. The format follows [Keep a Change
 
 ## Unreleased
 
+- **The map for coding agents (Phase 2 preview):** `onus mcp` serves the map of a worktree as MCP tools (`onus_status`, `onus_find`, `onus_symbol`, `onus_dependents`, `onus_dependencies`, `onus_tests_for`, `onus_owners`, `onus_component`, `onus_file`, `onus_check`), and `onus query` asks the same questions from a shell. Every agent and worktree of a repository shares one map server, which follows file changes and re-parses only changed files, sharing per-file facts across worktrees (ADR 0007).
+- Mapping a large monorepo is about 40% faster (2.6 s to 1.5 s on 8,600 files) with byte-identical maps: public methods are found without a quadratic scan, components are matched with one glob set, packs compile once per process, the file walk is parallel and module resolution is cached.
+
 - The Homebrew tap is updated by a reusable `Homebrew tap` workflow that the release calls. Run it by hand to re-sync the tap, or as a dry run to check that `HOMEBREW_TAP_TOKEN` can still push. Release notes include the `brew install` line.
 
 ## [0.2.0] - 2026-10-07
