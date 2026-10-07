@@ -4,6 +4,18 @@ All notable changes to Onus are recorded here. The format follows [Keep a Change
 
 ## Unreleased
 
+## [0.3.0] - 2026-10-07
+
+- **Sharper reports and `onus_check`:**
+  - Untyped values are compared key by key (`Schema.struct({...})`, `z.object({...})`, object literals), and union types member by member.
+  - Changes Onus cannot compare are one low-confidence row instead of a "may have changed" row each.
+  - Production code that uses an API of an already-used package for the first time is reported with the pinned version.
+  - Breaking contract rows name the implementations and test doubles not updated.
+  - Changes in components of more than 300 files name their module folders.
+- **`onus_check` for agents:** it returns a checklist of what to verify before finishing, and states what it does not verify, so a clean result is evidence, not approval.
+- **The map for coding agents (experimental):** `onus mcp` serves the map of a worktree as MCP tools (`onus_status`, `onus_find`, `onus_symbol`, `onus_dependents`, `onus_dependencies`, `onus_tests_for`, `onus_owners`, `onus_component`, `onus_file`, `onus_check`), and `onus query` asks the same questions from a shell. Every agent and worktree of a repository shares one map server, which follows file changes and re-parses only changed files, sharing per-file facts across worktrees (ADR 0007). An [evaluation](docs/evaluation/2026-10-07-map-for-agents.md) found no measurable gain from the navigation tools for agents implementing features, so they are marked experimental and Phase 2 focuses on `onus_check`.
+- `onus find` ranks symbols by how many query words match (name, then fields and parameters, then path), finds the types that declare a field, and always lists matching files, instead of returning nothing unless every word was in one name.
+- Mapping a large monorepo is about 25% faster (4.6 s to 3.5 s on Twenty's 31,000 files) with byte-identical maps: public methods are found without a quadratic scan, components are matched with one glob set, packs compile once per process, the file walk is parallel and module resolution is cached.
 - The Homebrew tap is updated by a reusable `Homebrew tap` workflow that the release calls. Run it by hand to re-sync the tap, or as a dry run to check that `HOMEBREW_TAP_TOKEN` can still push. Release notes include the `brew install` line.
 
 ## [0.2.0] - 2026-10-07

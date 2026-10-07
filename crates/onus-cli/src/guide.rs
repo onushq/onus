@@ -46,6 +46,11 @@ pub const TOPICS: &[Topic] = &[
         text: include_str!("../guide/ci.md"),
     },
     Topic {
+        name: "agents",
+        summary: "The map for coding agents: onus mcp, its tools, many agents and worktrees",
+        text: include_str!("../guide/agents.md"),
+    },
+    Topic {
         name: "plugins",
         summary: "New languages and frameworks, SCIP indexes, language servers, trusted mode",
         text: include_str!("../guide/plugins.md"),

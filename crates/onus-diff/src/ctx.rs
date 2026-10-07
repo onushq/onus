@@ -201,6 +201,32 @@ impl<'a> Ctx<'a> {
         (files.len() as u32, comps)
     }
 
+    /// Files in the head map that use `symbol` (or a member of it), with the
+    /// first line of use in each, sorted by path. The symbol's own file is
+    /// left out.
+    pub fn dependent_sites(&self, symbol: &str) -> Vec<(String, u32)> {
+        let own_file = self
+            .head_syms
+            .get(symbol)
+            .and_then(|s| s.loc.as_ref())
+            .map(|l| l.file.as_str());
+        let class_prefix = format!("{symbol}.");
+        let mut first: BTreeMap<&str, u32> = BTreeMap::new();
+        for e in &self.head.edges {
+            if e.to != symbol && !e.to.starts_with(&class_prefix) {
+                continue;
+            }
+            for s in &e.sites {
+                if Some(s.file.as_str()) == own_file {
+                    continue;
+                }
+                let line = first.entry(s.file.as_str()).or_insert(s.line);
+                *line = (*line).min(s.line);
+            }
+        }
+        first.into_iter().map(|(f, l)| (f.to_string(), l)).collect()
+    }
+
     /// Head diagnostics in a file.
     pub fn head_diagnostics(&self, file: &str) -> Vec<&'a onus_core::MapDiagnostic> {
         self.head

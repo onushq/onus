@@ -6,10 +6,10 @@ expression: json
   "schemaVersion": 1,
   "commit": "worktree",
   "builtWith": {
-    "onus": "0.2.0",
+    "onus": "0.3.0",
     "providers": {
-      "discovery": "onus 0.2.0 (onus.yaml)",
-      "typescript": "onus-lang-ts 0.2.0 (tree-sitter-typescript 0.23)"
+      "discovery": "onus 0.3.0 (onus.yaml)",
+      "typescript": "onus-lang-ts 0.3.0 (tree-sitter-typescript 0.23)"
     },
     "configHash": "6211b4a2e2af00a3b28671c5775683e7bd43346f4c714a802429ef21e707ae34"
   },
@@ -142,6 +142,12 @@ expression: json
       "imports": [
         "npm:vitest",
         "packages/events/src/bus.ts"
+      ],
+      "externalApis": [
+        "vitest describe",
+        "vitest expect",
+        "vitest it",
+        "vitest vi.fn"
       ]
     },
     {
@@ -206,6 +212,14 @@ expression: json
       "imports": [
         "npm:vitest",
         "packages/logger/src/logger.ts"
+      ],
+      "externalApis": [
+        "vitest afterEach",
+        "vitest describe",
+        "vitest expect",
+        "vitest it",
+        "vitest vi.restoreAllMocks",
+        "vitest vi.spyOn"
       ]
     },
     {
@@ -229,6 +243,11 @@ expression: json
       "imports": [
         "npm:vitest",
         "packages/money/src/format.ts"
+      ],
+      "externalApis": [
+        "vitest describe",
+        "vitest expect",
+        "vitest it"
       ]
     },
     {
@@ -260,6 +279,9 @@ expression: json
       "contentHash": "3a79693171edf1bc",
       "imports": [
         "npm:@prisma/client"
+      ],
+      "externalApis": [
+        "@prisma/client PrismaClient"
       ]
     },
     {
@@ -272,6 +294,11 @@ expression: json
       "imports": [
         "npm:vitest",
         "services/billing/src/discount.ts"
+      ],
+      "externalApis": [
+        "vitest describe",
+        "vitest expect",
+        "vitest it"
       ]
     },
     {
@@ -462,6 +489,14 @@ expression: json
       "imports": [
         "npm:vitest",
         "services/billing/src/payments.ts"
+      ],
+      "externalApis": [
+        "vitest beforeEach",
+        "vitest describe",
+        "vitest expect",
+        "vitest it",
+        "vitest vi.fn",
+        "vitest vi.mock"
       ]
     },
     {
@@ -521,6 +556,10 @@ expression: json
       "imports": [
         "npm:@sendgrid/mail",
         "packages/logger/src/index.ts"
+      ],
+      "externalApis": [
+        "@sendgrid/mail default.send",
+        "@sendgrid/mail default.setApiKey"
       ]
     },
     {
@@ -644,6 +683,14 @@ expression: json
       "imports": [
         "npm:vitest",
         "services/notifications/src/handlers/order-placed.ts"
+      ],
+      "externalApis": [
+        "vitest beforeEach",
+        "vitest describe",
+        "vitest expect",
+        "vitest it",
+        "vitest vi.fn",
+        "vitest vi.mock"
       ]
     },
     {
@@ -703,6 +750,11 @@ expression: json
       "imports": [
         "npm:vitest",
         "services/notifications/src/templates/render.ts"
+      ],
+      "externalApis": [
+        "vitest describe",
+        "vitest expect",
+        "vitest it"
       ]
     },
     {
@@ -723,6 +775,9 @@ expression: json
       "contentHash": "3a79693171edf1bc",
       "imports": [
         "npm:@prisma/client"
+      ],
+      "externalApis": [
+        "@prisma/client PrismaClient"
       ]
     },
     {
@@ -748,6 +803,15 @@ expression: json
       "imports": [
         "npm:vitest",
         "services/orders/src/orders.ts"
+      ],
+      "externalApis": [
+        "vitest beforeEach",
+        "vitest describe",
+        "vitest expect",
+        "vitest expect.objectContaining",
+        "vitest it",
+        "vitest vi.fn",
+        "vitest vi.mock"
       ]
     },
     {
@@ -962,6 +1026,11 @@ expression: json
       "imports": [
         "npm:vitest",
         "services/orders/src/shipping/eta.ts"
+      ],
+      "externalApis": [
+        "vitest describe",
+        "vitest expect",
+        "vitest it"
       ]
     },
     {
@@ -1011,6 +1080,9 @@ expression: json
       "contentHash": "3a79693171edf1bc",
       "imports": [
         "npm:@prisma/client"
+      ],
+      "externalApis": [
+        "@prisma/client PrismaClient"
       ]
     },
     {
@@ -1035,6 +1107,14 @@ expression: json
       "imports": [
         "npm:vitest",
         "services/user-preferences/src/preferences.ts"
+      ],
+      "externalApis": [
+        "vitest beforeEach",
+        "vitest describe",
+        "vitest expect",
+        "vitest it",
+        "vitest vi.fn",
+        "vitest vi.mock"
       ]
     },
     {
@@ -3470,6 +3550,32 @@ expression: json
       "visibility": "internal",
       "shape": {
         "kind": "value",
+        "members": [
+          {
+            "name": "en-US",
+            "kind": "enum-member",
+            "optional": false,
+            "line": 9
+          },
+          {
+            "name": "en-GB",
+            "kind": "enum-member",
+            "optional": false,
+            "line": 9
+          },
+          {
+            "name": "de-DE",
+            "kind": "enum-member",
+            "optional": false,
+            "line": 9
+          },
+          {
+            "name": "fr-FR",
+            "kind": "enum-member",
+            "optional": false,
+            "line": 9
+          }
+        ],
         "unverified": true
       },
       "bodyFingerprint": "70590f10f1991363",

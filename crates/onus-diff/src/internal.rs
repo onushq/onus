@@ -105,6 +105,70 @@ pub fn is_docs(path: &str) -> bool {
         || lower.contains("/docs/")
 }
 
+/// Components with more files than this get their changes broken down by
+/// module folder: one row for a 30,000-file package says too little.
+const LARGE_COMPONENT_FILES: usize = 300;
+
+/// `in engine/core-modules/record-share (5 files), engine/twenty-orm (3 files)
+/// and 1 more folder`: the folders, three levels below the component's own
+/// folder (and its `src/`), where a large component changed.
+fn module_breakdown(ctx: &Ctx, comp: &str, files: &BTreeSet<String>) -> Option<String> {
+    const SHOWN: usize = 4;
+    let size = ctx
+        .head
+        .files
+        .iter()
+        .filter(|f| f.component_id.as_deref() == Some(comp))
+        .count();
+    if size <= LARGE_COMPONENT_FILES {
+        return None;
+    }
+    let dir = ctx.components.get(comp).map(|c| {
+        c.roots
+            .first()
+            .map(|r| r.trim_end_matches("/**").trim_end_matches('/').to_string())
+            .unwrap_or_default()
+    })?;
+    let mut counts: BTreeMap<String, u32> = BTreeMap::new();
+    for f in files {
+        let rel = f
+            .strip_prefix(&format!("{dir}/"))
+            .unwrap_or(f)
+            .trim_start_matches("src/");
+        let folder: Vec<&str> = rel.split('/').collect();
+        let folder = folder[..folder.len().saturating_sub(1)]
+            .iter()
+            .take(3)
+            .copied()
+            .collect::<Vec<_>>()
+            .join("/");
+        let folder = if folder.is_empty() {
+            ".".to_string()
+        } else {
+            folder
+        };
+        *counts.entry(folder).or_default() += 1;
+    }
+    if counts.len() < 2 && counts.keys().all(|k| k == ".") {
+        return None;
+    }
+    let mut ranked: Vec<(String, u32)> = counts.into_iter().collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let mut parts: Vec<String> = ranked
+        .iter()
+        .take(SHOWN)
+        .map(|(folder, n)| format!("`{folder}` ({})", plural(*n, "file", "files")))
+        .collect();
+    if ranked.len() > SHOWN {
+        parts.push(plural(
+            (ranked.len() - SHOWN) as u32,
+            "more folder",
+            "more folders",
+        ));
+    }
+    Some(format!("in {}", join_and(&parts)))
+}
+
 /// The bucket of files onus.yaml declares test data (`#` cannot appear in a
 /// component id).
 const TEST_DATA: &str = "#test-data";
@@ -290,6 +354,12 @@ pub fn rows(
                 }
             )
         }];
+        if !test_data
+            && comp != "root"
+            && let Some(modules) = module_breakdown(ctx, &comp, &b.files)
+        {
+            notes.push(modules);
+        }
         if let Some(n) = tests.added_cases.get(&comp).filter(|n| **n > 0) {
             notes.push(format!("adds {}", plural(*n, "test case", "test cases")));
         }

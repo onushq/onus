@@ -415,6 +415,7 @@ fn import(index: &Index, ws: &Workspace, so_far: &PartialMap) -> PartialMap {
             lines: text.lines().count() as u32,
             content_hash: short_hash(&bytes),
             imports: vec![],
+            external_apis: vec![],
         });
         if is_test.get(file).copied().unwrap_or(false) {
             continue;
@@ -564,6 +565,7 @@ mod tests {
             lines: 1,
             content_hash: String::new(),
             imports: vec![],
+            external_apis: vec![],
         };
         let so_far = PartialMap {
             // The TypeScript adapter saw `import { Client } from "./client"`

@@ -16,12 +16,17 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+notify.workspace = true
 onus-core.workspace = true
 onus-diff.workspace = true
+onus-index.workspace = true
 onus-map.workspace = true
 onus-report.workspace = true
+rmcp.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 tar.workspace = true
+tokio.workspace = true
 tempfile.workspace = true
 
 [dev-dependencies]

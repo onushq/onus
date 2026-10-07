@@ -476,6 +476,7 @@ fn map_files(
             lines: text.lines().count() as u32,
             content_hash: short_hash(&bytes),
             imports: vec![],
+            external_apis: vec![],
         });
         found.insert(f.path.clone(), symbols);
     }

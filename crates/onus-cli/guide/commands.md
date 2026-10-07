@@ -66,6 +66,25 @@ Writes the JSON Schemas of the map, the report and onus.yaml.
     onus schema --out schemas
     onus schema                         # print all three
 
+## onus mcp
+
+Serves the map of the current worktree to a coding agent as MCP tools, on stdin and stdout. See `onus help agents` for the tools and how many agents share one map server.
+
+    claude mcp add onus -- onus mcp
+
+- `--repo <dir>`: the worktree (default: the one containing the current directory).
+- `--no-server`: build the map in this process instead of the repository's shared map server.
+
+## onus query <question>
+
+The same questions as the MCP tools, from a shell, printed as JSON: `status`, `find <words>`, `symbol <id>`, `dependents <target>`, `dependencies <target>`, `tests-for <target>`, `owners <target>`, `component <id>`, `file <path>`, `check [--base <ref>]` and `stats`.
+
+    onus query find format phone
+    onus query dependents UserPreferences --depth 2 --limit 20
+
+- `--repo <dir>` and `--no-server`: as for `onus mcp`.
+- `--depth <n>` (1 to 8) and `--limit <n>` (default 50, at most 500) where they apply.
+
 ## onus help [command | topic]
 
     onus help                 # commands and guide topics

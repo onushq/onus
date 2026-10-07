@@ -43,6 +43,8 @@ Contracts are the public symbols of a component: everything reachable from its e
 | contract-member-added | additive | An enum member or a class method or property is added. |
 | contract-param-added-optional | additive | An optional or rest parameter is added. |
 | contract-param-now-optional | additive | A required parameter becomes optional. |
+| contract-key-added | additive | A public value without a type annotation gains a key: its initializer is an object literal, or a call such as `Schema.struct({...})` or `z.object({...})`, and the object gains a key. |
+| contract-union-widened | additive | A union type accepts more members (`'A' \| 'B'` becomes `'A' \| 'B' \| 'C'`). |
 | export-added | additive | A symbol becomes public. Several new exports of one component are one row. |
 | contract-field-added-required | breaking | A required field is added to an interface or type. |
 | contract-field-removed | breaking | A field, member or method is removed. |
@@ -53,7 +55,12 @@ Contracts are the public symbols of a component: everything reachable from its e
 | contract-param-removed | breaking | A parameter is removed. |
 | contract-param-now-required | breaking | An optional parameter becomes required. |
 | export-removed | breaking | A public symbol is removed or no longer exported. |
-| contract-changed-unverified | breaking | A type changed in a way Onus cannot prove compatible (a parameter, return or field type, type parameters), or a public symbol with no type annotation changed its body, so its inferred type may have changed (low confidence). |
+| contract-key-removed | breaking | A public value without a type annotation loses a key of its initializer. |
+| contract-union-narrowed | breaking | A union type no longer accepts some members. |
+| contract-changed-unverified | breaking | A type changed in a way Onus cannot prove compatible: a parameter, return, field or key type, or type parameters. |
+| contract-inferred-changed | internal | Public symbols whose types are inferred, not written, changed their bodies, and Onus has nothing to compare. One row for all of them, low confidence. |
+
+Breaking rows name the users the change has not touched yet, test files first. For a new required member, only implementations and test doubles break, so only those are named: `implements X`, `satisfies X`, `: X = {...}`, `as X`, and Effect's `Layer.succeed(X, ...)` and `X.of({...})`.
 
 Renaming a parameter is not a contract change. When a contract declared in onus.yaml has invariants, the row repeats them.
 
@@ -78,6 +85,10 @@ A symbol or file that moved inside one component without other changes, and a fi
 | lockfile-changed | dependency | A lockfile changed while no manifest dependency did. |
 
 Workspace packages (your own `@scope/...` packages) are not third-party: depending on one shows as a relationship between components.
+
+| Subkind | Kind | When |
+|---|---|---|
+| external-api-first-use | internal | Production code uses an API of a package the repository already depends on (`Effect.retry` from `effect`) that no other code in the repository uses. The row names the version the repository pins, to check the API exists in it: code written from memory of another version often calls functions that are not there. |
 
 ## Configuration and rules of the game
 
@@ -129,7 +140,7 @@ Found in functions and methods that exist on both sides. Security-sensitive in a
 
 | Subkind | Kind | When |
 |---|---|---|
-| internal-changes | internal | The changed lines of a component that no other row explains, with their count, labeled as code, tests or docs. |
+| internal-changes | internal | The changed lines of a component that no other row explains, with their count, labeled as code, tests or docs. In components with more than 300 files, the row also names the module folders that changed. |
 
 ## Grouped rows
 

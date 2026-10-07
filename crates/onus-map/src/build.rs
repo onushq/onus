@@ -46,6 +46,9 @@ pub struct BuildOptions {
     pub allow_unsandboxed: bool,
     /// SCIP indexes produced elsewhere; importing them runs nothing.
     pub scip_indexes: Vec<PathBuf>,
+    /// Per-file facts kept between builds (a long-running server, or a
+    /// folder shared by worktrees). The map is the same with or without it.
+    pub facts_cache: Option<std::sync::Arc<onus_lang_ts::FactsCache>>,
 }
 
 fn provider_note(id: &str, err: &ProviderError) -> MapDiagnostic {
@@ -145,8 +148,13 @@ pub fn build_map(root: &Path, opts: &BuildOptions) -> Result<CodebaseMap, MapErr
 
     // Language providers, in priority order: the built-in TypeScript adapter,
     // protocol plugins, then language servers.
-    let mut languages: Vec<(Box<dyn LanguageAdapter>, bool)> =
-        vec![(Box::new(TypeScriptAdapter), false)];
+    let mut languages: Vec<(Box<dyn LanguageAdapter>, bool)> = vec![(
+        Box::new(match &opts.facts_cache {
+            Some(c) => TypeScriptAdapter::with_cache(c.clone()),
+            None => TypeScriptAdapter::default(),
+        }),
+        false,
+    )];
     let mut keep_alive = Vec::new();
     for spec in &opts.plugins.plugins {
         match spec.kind {

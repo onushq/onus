@@ -6,6 +6,7 @@
 //! ([`resolve`]) and produces map symbols, edges, tests and diagnostics.
 //! Nothing from the analyzed tree is installed or executed.
 
+pub mod cache;
 pub mod extract;
 pub mod jsonc;
 pub mod lang;
@@ -14,6 +15,7 @@ pub mod packs;
 pub mod resolve;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use onus_core::ids::{self, module_id, symbol_id};
 use onus_core::{
@@ -22,6 +24,7 @@ use onus_core::{
 };
 use rayon::prelude::*;
 
+pub use crate::cache::{CacheStats, FactsCache};
 use crate::extract::{Binding, EventExpr, Export, FileFacts, Imported, Patterns, RefKind};
 use crate::resolve::{Resolution, Resolver};
 
@@ -31,8 +34,17 @@ pub const PARSE_STACK_BYTES: usize = 256 * 1024 * 1024;
 /// Component id used for analyzed files outside every component.
 pub const ROOT_COMPONENT: &str = "root";
 
-#[derive(Debug, Default, Clone, Copy)]
-pub struct TypeScriptAdapter;
+#[derive(Debug, Default, Clone)]
+pub struct TypeScriptAdapter {
+    cache: Option<Arc<FactsCache>>,
+}
+
+impl TypeScriptAdapter {
+    /// An adapter that reuses per-file facts from `cache` and adds to it.
+    pub fn with_cache(cache: Arc<FactsCache>) -> TypeScriptAdapter {
+        TypeScriptAdapter { cache: Some(cache) }
+    }
+}
 
 impl LanguageAdapter for TypeScriptAdapter {
     fn id(&self) -> &str {
@@ -51,7 +63,7 @@ impl LanguageAdapter for TypeScriptAdapter {
     }
 
     fn build(&self, ws: &Workspace) -> Result<PartialMap, onus_core::ProviderError> {
-        analyze(ws, &BTreeMap::new())
+        analyze_cached(ws, &BTreeMap::new(), self.cache.as_deref())
     }
 }
 
@@ -71,24 +83,52 @@ pub fn analyze(
     ws: &Workspace,
     overrides: &BTreeMap<String, SourceOverride>,
 ) -> Result<PartialMap, onus_core::ProviderError> {
+    analyze_cached(ws, overrides, None)
+}
+
+/// Like [`analyze`], reusing and adding to `cache`. Only files whose path,
+/// bytes or patterns changed are parsed again; linking always covers the
+/// whole workspace, so the result is the same as without a cache.
+pub fn analyze_cached(
+    ws: &Workspace,
+    overrides: &BTreeMap<String, SourceOverride>,
+    cache: Option<&FactsCache>,
+) -> Result<PartialMap, onus_core::ProviderError> {
     {
         let patterns = patterns(ws).map_err(onus_core::ProviderError::Failed)?;
+        let patterns_key = patterns_key(ws);
         let sources: Vec<&onus_core::WorkspaceFile> = ws
             .files
             .iter()
             .filter(|f| lang::is_source(&f.path) || overrides.contains_key(&f.path))
             .collect();
-        let extract_all = || -> Vec<FileFacts> {
+        let extract_all = || -> Vec<Arc<FileFacts>> {
             sources
                 .par_iter()
-                .map(|f| match overrides.get(&f.path) {
-                    Some(o) => extract::extract_as(&f.path, &o.text, f.is_test, &patterns, o.tsx),
-                    None => {
-                        let text = std::fs::read(onus_core::paths::native(&ws.root, &f.path))
-                            .map(|b| String::from_utf8_lossy(&b).into_owned())
-                            .unwrap_or_default();
-                        extract::extract(&f.path, &text, f.is_test, &patterns)
+                .map(|f| {
+                    let (bytes, tsx) = match overrides.get(&f.path) {
+                        Some(o) => (o.text.as_bytes().to_vec(), o.tsx),
+                        None => (
+                            std::fs::read(onus_core::paths::native(&ws.root, &f.path))
+                                .unwrap_or_default(),
+                            lang::is_tsx(&f.path),
+                        ),
+                    };
+                    let key = cache
+                        .map(|_| FactsCache::key(&f.path, f.is_test, tsx, &patterns_key, &bytes));
+                    if let (Some(c), Some(k)) = (cache, &key)
+                        && let Some(hit) = c.get(k)
+                    {
+                        return hit;
                     }
+                    let text = String::from_utf8_lossy(&bytes);
+                    let facts = Arc::new(extract::extract_as(
+                        &f.path, &text, f.is_test, &patterns, tsx,
+                    ));
+                    if let (Some(c), Some(k)) = (cache, &key) {
+                        c.put(k, &facts);
+                    }
+                    facts
                 })
                 .collect()
         };
@@ -111,14 +151,67 @@ pub fn analyze(
     }
 }
 
-/// The compiled packs for a workspace.
-pub fn patterns(ws: &Workspace) -> Result<Patterns, String> {
-    Patterns::new(
-        &ws.extractors.publish_patterns,
-        &ws.extractors.subscribe_patterns,
-        &ws.extractors.prisma_clients,
-        &ws.extractors.packs,
-    )
+/// How a third-party API is named in [`SourceFile::external_apis`]: the
+/// imported name and the member used on it (`Effect.void`), the member
+/// alone through a namespace import (`object` for `z.object`), or
+/// `default.<member>`.
+fn api_name(imported: &Imported, member: Option<&str>) -> Option<String> {
+    match (imported, member) {
+        (Imported::Named(name), Some(m)) => Some(format!("{name}.{m}")),
+        (Imported::Named(name), None) => Some(name.clone()),
+        (Imported::Namespace, Some(m)) => Some(m.to_string()),
+        (Imported::Default, Some(m)) => Some(format!("default.{m}")),
+        (Imported::Default, None) => Some("default".into()),
+        (Imported::Namespace, None) => None,
+    }
+}
+
+/// A hash of everything that compiles into [`Patterns`]: event patterns,
+/// Prisma clients and packs.
+pub fn patterns_key(ws: &Workspace) -> String {
+    let e = &ws.extractors;
+    let mut key = String::new();
+    for list in [
+        &e.publish_patterns,
+        &e.subscribe_patterns,
+        &e.prisma_clients,
+        &e.packs,
+    ] {
+        for item in list {
+            key.push_str(item);
+            key.push('\0');
+        }
+        key.push('\u{1}');
+    }
+    onus_core::hash::sha256_hex(key.as_bytes())
+}
+
+/// The compiled packs for a workspace. Compiling the combined tree-sitter
+/// queries takes over 100 ms, so each distinct set of patterns is compiled
+/// once per process and shared: a long-running server rebuilding maps, or a
+/// build that validates the packs before analyzing, pays for it once.
+pub fn patterns(ws: &Workspace) -> Result<Arc<Patterns>, String> {
+    static COMPILED: OnceLock<Mutex<HashMap<String, Arc<Patterns>>>> = OnceLock::new();
+    let e = &ws.extractors;
+    let key = patterns_key(ws);
+    let cache = COMPILED.get_or_init(Default::default);
+    if let Some(p) = cache.lock().ok().and_then(|c| c.get(&key).cloned()) {
+        return Ok(p);
+    }
+    let compiled = Arc::new(Patterns::new(
+        &e.publish_patterns,
+        &e.subscribe_patterns,
+        &e.prisma_clients,
+        &e.packs,
+    )?);
+    if let Ok(mut c) = cache.lock() {
+        // A handful of configs at most; never grow without bound.
+        if c.len() >= 16 {
+            c.clear();
+        }
+        c.insert(key, compiled.clone());
+    }
+    Ok(compiled)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -137,7 +230,7 @@ struct FileInfo {
 
 struct Linker<'a> {
     ws: &'a Workspace,
-    facts: &'a [FileFacts],
+    facts: &'a [Arc<FileFacts>],
     resolver: &'a Resolver,
     by_path: HashMap<&'a str, usize>,
     info: Vec<FileInfo>,
@@ -148,12 +241,15 @@ struct Linker<'a> {
     /// Per file and import index: resolution of the specifier.
     resolutions: Vec<Vec<Resolution>>,
     export_memo: std::cell::RefCell<HashMap<(usize, String), Option<Target>>>,
+    /// (importing folder, specifier) → resolution. Resolution depends only
+    /// on the folder, and re-export chains ask the same questions often.
+    resolve_memo: std::cell::RefCell<HashMap<(String, String), Resolution>>,
     /// Symbol id → (file, decl index), for literal lookups.
     symbols: HashMap<String, (usize, usize)>,
 }
 
 impl<'a> Linker<'a> {
-    fn new(ws: &'a Workspace, facts: &'a [FileFacts], resolver: &'a Resolver) -> Self {
+    fn new(ws: &'a Workspace, facts: &'a [Arc<FileFacts>], resolver: &'a Resolver) -> Self {
         let by_path: HashMap<&str, usize> = facts
             .iter()
             .enumerate()
@@ -232,6 +328,7 @@ impl<'a> Linker<'a> {
             bindings,
             resolutions,
             export_memo: Default::default(),
+            resolve_memo: Default::default(),
             symbols: HashMap::new(),
         };
         for (fi, f) in facts.iter().enumerate() {
@@ -262,8 +359,20 @@ impl<'a> Linker<'a> {
         }
     }
 
+    /// [`Resolver::resolve`], remembered per folder and specifier.
+    fn resolve_from(&self, path: &str, spec: &str) -> Resolution {
+        let dir = path.rsplit_once('/').map_or("", |(d, _)| d);
+        let key = (dir.to_string(), spec.to_string());
+        if let Some(r) = self.resolve_memo.borrow().get(&key) {
+            return r.clone();
+        }
+        let r = self.resolver.resolve(path, spec);
+        self.resolve_memo.borrow_mut().insert(key, r.clone());
+        r
+    }
+
     fn resolve_spec(&self, file: usize, spec: &str) -> Option<Target> {
-        match self.resolver.resolve(&self.facts[file].path, spec) {
+        match self.resolve_from(&self.facts[file].path, spec) {
             Resolution::File(p) => self.by_path.get(p.as_str()).map(|&i| Target::Module(i)),
             Resolution::Asset(_) => Some(Target::Asset),
             Resolution::Npm(p) => Some(Target::Npm(p)),
@@ -404,13 +513,20 @@ impl<'a> Linker<'a> {
                 }
             }
         }
-        // Methods of public classes are public too.
-        let classes: Vec<String> = public.iter().map(|id| format!("{id}.")).collect();
-        for id in self.symbols.keys() {
-            if classes.iter().any(|c| id.starts_with(c.as_str())) {
-                public.insert(id.clone());
-            }
-        }
+        // Methods of public classes are public too: `c:f.ts#A.b` is public
+        // when `c:f.ts#A` is.
+        let methods: Vec<String> = self
+            .symbols
+            .keys()
+            .filter(|id| {
+                let name_start = id.find('#').map_or(0, |i| i + 1);
+                id[name_start..]
+                    .match_indices('.')
+                    .any(|(dot, _)| public.contains(&id[..name_start + dot]))
+            })
+            .cloned()
+            .collect();
+        public.extend(methods);
         public
     }
 
@@ -588,7 +704,7 @@ impl<'a> Linker<'a> {
                 if let Export::From { spec, line, .. } | Export::Star { spec, line } = e {
                     import_targets.push((
                         *line,
-                        match self.resolver.resolve(&f.path, spec) {
+                        match self.resolve_from(&f.path, spec) {
                             Resolution::File(p) | Resolution::Asset(p) => p,
                             Resolution::Npm(p) => ids::npm_id(&p),
                             Resolution::Unresolved => format!("?{spec}"),
@@ -665,6 +781,7 @@ impl<'a> Linker<'a> {
             }
 
             // References.
+            let mut external_apis: BTreeSet<String> = BTreeSet::new();
             for r in &f.refs {
                 let target = if self.decls[fi].contains_key(r.name.as_str()) && !f.is_test {
                     Some(Target::Symbol(self.symbol_id(fi, &r.name)))
@@ -700,6 +817,11 @@ impl<'a> Linker<'a> {
                         }
                     }
                     Some(Target::Npm(p)) => {
+                        if let Some((_, b)) = self.bindings[fi].get(r.name.as_str())
+                            && let Some(api) = api_name(&b.imported, r.member.as_deref())
+                        {
+                            external_apis.insert(format!("{p} {api}"));
+                        }
                         if !f.is_test
                             && (r.kind == RefKind::Call
                                 || (r.kind == RefKind::Value && r.member.is_some()))
@@ -829,6 +951,7 @@ impl<'a> Linker<'a> {
                     targets.dedup();
                     targets
                 },
+                external_apis: external_apis.into_iter().collect(),
             });
             if f.is_test {
                 tests_out.push(TestNode {

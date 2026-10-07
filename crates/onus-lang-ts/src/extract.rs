@@ -71,28 +71,28 @@ impl CallPattern {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Imported {
     Named(String),
     Default,
     Namespace,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Binding {
     pub local: String,
     pub imported: Imported,
     pub line: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Import {
     pub spec: String,
     pub line: u32,
     pub bindings: Vec<Binding>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum Export {
     Local {
         exported: String,
@@ -111,7 +111,7 @@ pub enum Export {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Decl {
     /// Qualified name: `Name` or `Class.method`.
     pub name: String,
@@ -128,14 +128,18 @@ pub struct Decl {
     pub enum_values: Vec<(String, String)>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum RefKind {
     Call,
     Type,
     Value,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct Ref {
     /// Enclosing declaration (qualified), or `None` at the top level.
     pub from: Option<String>,
@@ -145,7 +149,7 @@ pub struct Ref {
     pub line: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EventExpr {
     Literal(String),
     Ident(String),
@@ -153,7 +157,7 @@ pub enum EventExpr {
     Dynamic(String),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EventUse {
     pub from: Option<String>,
     pub publish: bool,
@@ -161,7 +165,7 @@ pub struct EventUse {
     pub line: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DataUse {
     pub from: Option<String>,
     pub model: String,
@@ -169,14 +173,14 @@ pub struct DataUse {
     pub line: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SiteUse {
     pub from: Option<String>,
     pub value: String,
     pub line: u32,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct FileFacts {
     pub path: String,
     pub is_test: bool,
@@ -925,7 +929,10 @@ impl Extractor<'_> {
                     type_text: Some(t.to_string()),
                     unverified: false,
                 },
-                None => unverified_value(),
+                None => ContractShape {
+                    members: inferred_members(v, self.src),
+                    ..unverified_value()
+                },
             },
             (None, None) => unverified_value(),
         };
@@ -2027,6 +2034,123 @@ fn signature_end(node: Node) -> Option<u32> {
 
 fn strip_colon(s: String) -> String {
     s.strip_prefix(':').map(str::to_string).unwrap_or(s)
+}
+
+/// The keys of the object a `const` is initialised with, so that a changed
+/// initializer can be compared key by key without a type annotation: an
+/// object literal, or the first object (or array of strings) passed to a
+/// call such as `Schema.struct({...})`, `z.object({...})` or `z.enum([...])`,
+/// looking through `as`, `satisfies`, parentheses and call chains.
+fn inferred_members(value: Node, src: &[u8]) -> Vec<Member> {
+    let mut node = value;
+    for _ in 0..8 {
+        match node.kind() {
+            "object" => return object_members(node, src),
+            "parenthesized_expression"
+            | "as_expression"
+            | "satisfies_expression"
+            | "non_null_expression" => match node.named_child(0) {
+                Some(inner) => node = inner,
+                None => return vec![],
+            },
+            "call_expression" | "new_expression" => {
+                if let Some(args) = node.child_by_field_name("arguments") {
+                    for a in named_children(args) {
+                        if a.kind() == "object" {
+                            return object_members(a, src);
+                        }
+                        if a.kind() == "array" {
+                            let values = string_array_members(a, src);
+                            if !values.is_empty() {
+                                return values;
+                            }
+                        }
+                    }
+                }
+                // `Schema.struct({...}).annotations(...)`: the object is
+                // further down the chain.
+                let callee = node
+                    .child_by_field_name("function")
+                    .or_else(|| node.child_by_field_name("constructor"));
+                match callee.and_then(|c| match c.kind() {
+                    "member_expression" => c.child_by_field_name("object"),
+                    "call_expression" => Some(c),
+                    _ => None,
+                }) {
+                    Some(next) => node = next,
+                    None => return vec![],
+                }
+            }
+            _ => return vec![],
+        }
+    }
+    vec![]
+}
+
+/// The longest initializer text kept for a key, so a changed value can be
+/// shown; longer ones are compared by a hash.
+const MAX_KEY_VALUE_TEXT: usize = 80;
+
+fn object_members(object: Node, src: &[u8]) -> Vec<Member> {
+    let mut members = Vec::new();
+    for child in named_children(object) {
+        let (name, kind, value) = match child.kind() {
+            "pair" => {
+                let Some(key) = child.child_by_field_name("key") else {
+                    continue;
+                };
+                let name = string_value(key, src).unwrap_or_else(|| text(key, src).to_string());
+                (
+                    name,
+                    MemberKind::Property,
+                    child.child_by_field_name("value"),
+                )
+            }
+            "shorthand_property_identifier" => {
+                (text(child, src).to_string(), MemberKind::Property, None)
+            }
+            "method_definition" => match child.child_by_field_name("name") {
+                Some(n) => (text(n, src).to_string(), MemberKind::Method, Some(child)),
+                None => continue,
+            },
+            _ => continue,
+        };
+        let type_text = value.map(|v| {
+            let t = norm(v, src);
+            if t.len() > MAX_KEY_VALUE_TEXT {
+                format!("#{}", short_hash(t.as_bytes()))
+            } else {
+                t
+            }
+        });
+        members.push(Member {
+            name,
+            kind,
+            type_text,
+            optional: false,
+            readonly: false,
+            line: line(child),
+        });
+    }
+    members
+}
+
+fn string_array_members(array: Node, src: &[u8]) -> Vec<Member> {
+    let mut members = Vec::new();
+    for item in named_children(array) {
+        let Some(value) = string_value(item, src) else {
+            return vec![];
+        };
+        members.push(Member {
+            name: value,
+            kind: MemberKind::EnumMember,
+            type_text: None,
+            optional: false,
+            readonly: false,
+            line: line(item),
+        });
+    }
+    members
 }
 
 fn unverified_value() -> ContractShape {
