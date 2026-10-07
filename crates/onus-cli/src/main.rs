@@ -157,7 +157,8 @@ Examples:
     #[command(
         long_about = "Report the changes in meaning between two git refs. Each ref is extracted \
                       with `git archive` into a temporary directory that is removed afterwards; \
-                      the repository itself is never modified.",
+                      the repository itself is never modified. Only the paths git reports as \
+                      different are compared line by line.",
         after_long_help = REPORT_HELP
     )]
     Report {

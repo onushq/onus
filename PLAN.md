@@ -1,7 +1,7 @@
 # Onus: Implementation Plan
 
 Source: the manifesto *Code Is Not the Product* by Mikias Abebe (Sep 28, 2026).
-Status: **plan updated 2026-10-07.** Phase 1 milestones M0–M6 are implemented and released (see 5.9); M7, the field trial, is next. Onus is written in Rust and fully open source under Apache-2.0. Section 2 lists the decisions; the open ones are marked.
+Status: **plan updated 2026-10-07.** Phase 1 milestones M0–M6 are implemented and released (see 5.9); M7, the field trial, is in progress. Onus is written in Rust and fully open source under Apache-2.0. Section 2 lists the decisions; the open ones are marked.
 
 **Naming.** The project and the software are both called **Onus**. The name comes from *onus probandi*, the burden of proof: today that burden sits on a reviewer who has to find problems by reading lines, and Onus moves it to the agent, which has to prove its change with evidence. Tagline: *"The onus is on the agent."*
 
@@ -341,7 +341,7 @@ A fixture monorepo, `fixtures/shop`, mirrors the manifesto's example: `orders`, 
 | M4 | Extractors and detectors: externals registry, events, Prisma, env; notable edits; test weakening; secrets | S1 (minus rendering), S3, S5 and S8 pass | **Done** |
 | M5 | Ranking, internal collapsing, intent check, boundary rules, markdown + JSON renderers → `onus report` | All of S1–S9 pass as report snapshots | **Done** |
 | M6 | Release binaries via `cargo-dist` (Linux, macOS, Windows; x86_64 and arm64), Homebrew tap and shell installer; composite GitHub Action, sticky comment, base-map cache, `/onus caught`, metrics JSONL; dogfood on this repo | Running on Onus's own PRs | **Done:** release workflow (5 targets, checksums, build attestations), shell installer, Homebrew tap, composite Action with job summary, sticky comment, base-map cache, 👍/👎 and `/onus caught` feedback, metrics JSONL (`scripts/onus-metrics.sh`), dogfood workflows |
-| M7 | Field trial on 3–5 real TS repos (including agent-authored PRs); tune false positives; performance pass | Gate data collected (5.10) | Not started |
+| M7 | Field trial on 3–5 real TS repos (including agent-authored PRs); tune false positives; performance pass | Gate data collected (5.10) | **In progress:** reports on 20 large merged pull requests from two TypeScript monorepos were audited; the mistakes found are fixed and kept fixed by a regression corpus (`crates/onus-cli/tests/corpus`): false breaking rows, removals that were moves, tests that moved or went with their code, order-sensitive type comparison, missed subpath imports and lockfile facts; risk classes (migrations, public API operations, HTTP routes, auth code, patched dependencies, root build config, infrastructure) get their own flagged rows; generated code and config noise are folded; reports compare only changed paths. Next: the live trial with feedback collection |
 
 **Deviations from this plan in M0–M5** (details in [ADR 0004](docs/adr/0004-map-and-report-format-additions.md) and [ADR 0005](docs/adr/0005-phase-1-diff-behavior.md)):
 
