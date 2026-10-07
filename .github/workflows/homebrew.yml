@@ -1,0 +1,73 @@
+name: Homebrew tap
+
+# Writes Formula/onus.rb in onushq/homebrew-tap for a release. The release
+# workflow calls it after publishing. Run it by hand to re-sync the tap, or
+# with dry-run (the default) to check that HOMEBREW_TAP_TOKEN can still push.
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+    secrets:
+      HOMEBREW_TAP_TOKEN:
+        required: false
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The release tag, such as v0.2.0
+        required: true
+        type: string
+      dry-run:
+        description: Only check that the token can push; change nothing
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  tap:
+    name: Update the Homebrew tap
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: scripts
+      - name: Write and push the formula
+        env:
+          # A fine-grained token with contents: write on onushq/homebrew-tap.
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+          DRY_RUN: ${{ inputs.dry-run || false }}
+        run: |
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::$TAG is not a release tag such as v0.2.0"
+            exit 1
+          fi
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "::notice::HOMEBREW_TAP_TOKEN is not set; update the tap with scripts/homebrew-formula.sh $TAG"
+            exit 0
+          fi
+          scripts/homebrew-formula.sh "$TAG" > onus.rb
+          git clone --quiet --depth 1 "https://x-access-token:${TAP_TOKEN}@github.com/onushq/homebrew-tap.git" tap
+          cp onus.rb tap/Formula/onus.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet; then
+            echo "The tap already has onus $TAG."
+          else
+            git diff --stat
+            git commit --quiet --all --message "onus ${TAG#v}"
+          fi
+          if [ "$DRY_RUN" = true ]; then
+            # Asks GitHub for push access without sending anything.
+            git push --dry-run origin HEAD:main
+            echo "Dry run: the token can push to onushq/homebrew-tap."
+          elif ! git diff --quiet origin/main HEAD; then
+            git push --quiet origin HEAD:main
+            echo "Pushed onus ${TAG#v} to onushq/homebrew-tap."
+          fi
