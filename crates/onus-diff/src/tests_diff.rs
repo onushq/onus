@@ -313,15 +313,42 @@ fn stem(file: &str) -> String {
 
 impl Gone {
     fn new(ctx: &Ctx, pairs: &Pairs) -> Gone {
+        // New cases are counted per file (against the same file, or the file
+        // it moved from, in the base), so a case that moved to another file
+        // is new there.
+        let moves = ctx.moves.borrow();
+        let base_by_file: BTreeMap<&str, &TestNode> = ctx
+            .base
+            .tests
+            .iter()
+            .map(|t| (t.file.as_str(), t))
+            .collect();
         let mut bodies: BTreeMap<String, i64> = BTreeMap::new();
         let mut titles: BTreeMap<(String, String), i64> = BTreeMap::new();
-        for (map, sign) in [(ctx.head, 1), (ctx.base, -1)] {
-            for t in &map.tests {
-                for c in &t.cases {
-                    if !c.fingerprint.is_empty() {
-                        *bodies.entry(c.fingerprint.clone()).or_default() += sign;
-                    }
-                    *titles.entry((stem(&t.file), c.name.clone())).or_default() += sign;
+        for t in &ctx.head.tests {
+            let base_path = moves.get(&t.file).map(String::as_str).unwrap_or(&t.file);
+            let mut file_bodies: BTreeMap<&str, i64> = BTreeMap::new();
+            let mut file_titles: BTreeMap<&str, i64> = BTreeMap::new();
+            for c in &t.cases {
+                *file_bodies.entry(c.fingerprint.as_str()).or_default() += 1;
+                *file_titles.entry(c.name.as_str()).or_default() += 1;
+            }
+            if let Some(b) = base_by_file.get(base_path) {
+                for c in &b.cases {
+                    *file_bodies.entry(c.fingerprint.as_str()).or_default() -= 1;
+                    *file_titles.entry(c.name.as_str()).or_default() -= 1;
+                }
+            }
+            for (fp, n) in file_bodies {
+                if !fp.is_empty() && n > 0 {
+                    *bodies.entry(fp.to_string()).or_default() += n;
+                }
+            }
+            for (title, n) in file_titles {
+                if n > 0 {
+                    *titles
+                        .entry((stem(&t.file), title.to_string()))
+                        .or_default() += n;
                 }
             }
         }
@@ -360,22 +387,58 @@ impl Gone {
         let text =
             std::fs::read_to_string(onus_core::paths::native(ctx.base_root, &r.file)).ok()?;
         let lines: Vec<&str> = text.lines().collect();
-        let spans: Vec<(u32, u32)> = if r.assertions.is_empty() {
-            vec![(r.case.line, r.case.end_line)]
-        } else {
-            r.assertions.iter().map(|a| (a.line, a.line)).collect()
-        };
-        let mut used = None;
-        for (a, z) in spans {
-            let body = lines
+        let span = |a: u32, z: u32| {
+            lines
                 .get(a.saturating_sub(1) as usize..(z as usize).min(lines.len()))
                 .map(|l| l.join("\n"))
-                .unwrap_or_default();
-            let hit = self.removed_names.iter().find(|n| contains_word(&body, n));
-            // Every removed assertion must be about deleted code.
-            used = Some(hit?.clone());
+                .unwrap_or_default()
+        };
+        let find = |body: &str| {
+            self.removed_names
+                .iter()
+                .find(|n| contains_word(body, n))
+                .cloned()
+        };
+        if !r.assertions.is_empty() {
+            // Every removed assertion must be about deleted code. An
+            // assertion can span lines: its text and its first line count.
+            let mut used = None;
+            for a in &r.assertions {
+                let body = format!("{}\n{}", a.text, span(a.line, a.line));
+                used = Some(find(&body)?);
+            }
+            return used;
         }
-        used
+        if let Some(hit) = find(&span(r.case.line, r.case.end_line)) {
+            return Some(hit);
+        }
+        // A deleted test file whose subject was deleted: what it exercises
+        // is gone, even when its cases reach it through a variable.
+        if r.file_deleted {
+            let exercised: Vec<&str> = ctx
+                .base
+                .tests
+                .iter()
+                .find(|t| t.file == r.file)
+                .map(|t| {
+                    t.exercises
+                        .iter()
+                        .map(|e| onus_core::ids::name_of(e))
+                        .map(|n| n.rsplit('.').next().unwrap_or(n))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let gone: Vec<&&str> = exercised
+                .iter()
+                .filter(|n| self.removed_names.contains(**n))
+                .collect();
+            if let Some(first) = gone.first()
+                && find(&text).is_some()
+            {
+                return Some((**first).to_string());
+            }
+        }
+        None
     }
 }
 

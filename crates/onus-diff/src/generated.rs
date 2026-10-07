@@ -47,13 +47,15 @@ pub fn is_generated(ctx: &Ctx, path: &str, status: Status) -> bool {
 }
 
 /// Rows a generated file's change can produce that are better read once.
+/// A generated schema's operations mirror the resolvers or schema they
+/// come from, which get their own rows.
 fn mergeable(r: &SemanticChange) -> bool {
     matches!(
         r.kind,
         ChangeKind::Additive | ChangeKind::Breaking | ChangeKind::Internal
     ) && !r.subkind.starts_with("route-")
-        && r.subkind != "public-api-changed"
         && r.subkind != "secret-committed"
+        && r.subkind != "auth-code-changed"
 }
 
 /// Folds rows whose locations all lie in generated files into one row per

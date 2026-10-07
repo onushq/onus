@@ -1,5 +1,5 @@
 A function moves to a shared package and its tests move with it, word for
-word. No coverage is lost.
+word, into a test file that also has a case of its own. No coverage is lost.
 
 === both package.json
 { "name": "r", "private": true, "workspaces": ["packages/*"] }
@@ -41,6 +41,11 @@ export function isGroupable(field: string): boolean {
 }
 === head packages/shared/src/isGroupable.test.ts
 import { isGroupable } from './isGroupable';
+import { SHARED } from './index';
+
+it('exports the shared constant', () => {
+  expect(SHARED).toBe(1);
+});
 
 describe('isGroupable', () => {
   it('accepts plain fields', () => {

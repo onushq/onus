@@ -1,5 +1,6 @@
 An interface gains a required method, and its only implementation is updated
-in the same change. Test doubles that cast (`as Engine`, `as never`) do not
+in the same change. Test doubles that cast (`as Engine`, `{ … } as never`,
+also inside `Layer.succeed`) and factories that return another call do not
 implement it and do not break. Nothing in the repository breaks.
 
 === both package.json
@@ -44,11 +45,16 @@ export function boot(): void {
   engine.start();
 }
 === both packages/app/src/boot.spec.ts
-import type { Engine } from '@r/engine';
+import { Layer } from 'effect';
+import { createEngine, type Engine } from '@r/engine';
 import { boot } from './index';
 
 const fake = { start: () => {} } as Engine;
 const other = {} as never;
+const layer = Layer.succeed(Engine, {
+  start: () => {},
+} as never);
+const make = (): Engine => createEngine();
 
 it('boots', () => {
   boot();

@@ -86,39 +86,63 @@ fn code(items: impl IntoIterator<Item = String>) -> Vec<String> {
 // ---------------------------------------------------------------------------
 // Migrations
 
-/// Whether a path is a database migration: a file in a `migrations` folder
-/// (Prisma, TypeORM, Knex, Supabase, Rails `db/migrate`, Alembic), a
-/// `*.migration.*` file, a Flyway `V1__name.sql`, or a versioned upgrade
-/// command (`upgrade…/…-command-<timestamp>-….ts`).
+/// Whether a path is in a database migrations folder (Prisma, TypeORM,
+/// Knex, Supabase, Rails `db/migrate`, Alembic), is a `*.migration.*`
+/// file, a Flyway `V1__name.sql`, or a versioned upgrade command
+/// (`upgrade…/…-command-<timestamp>-….ts`).
 pub fn is_migration(path: &str) -> bool {
+    migration_kind(path).is_some()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MigrationKind {
+    /// One step of the migration history: runs once per database.
+    Versioned,
+    /// Other code in a migrations folder (a registry, helpers, grants).
+    Support,
+}
+
+fn migration_kind(path: &str) -> Option<MigrationKind> {
     let lower = path.to_ascii_lowercase();
     let name = lower.rsplit('/').next().unwrap_or(&lower);
     let code_or_sql = [".sql", ".ts", ".js", ".mjs", ".cjs", ".py", ".rb"]
         .iter()
         .any(|e| name.ends_with(e));
     if !code_or_sql || name.ends_with(".d.ts") {
-        return false;
-    }
-    let dirs: Vec<&str> = lower.split('/').collect();
-    let dirs = &dirs[..dirs.len() - 1];
-    if dirs
-        .iter()
-        .any(|d| matches!(*d, "migrations" | "migration" | "migrate"))
-        || lower.contains("alembic/versions/")
-    {
-        return !matches!(name, "index.ts" | "index.js");
-    }
-    if name.contains(".migration.") {
-        return true;
+        return None;
     }
     static FLYWAY: OnceLock<Regex> = OnceLock::new();
     let flyway = FLYWAY.get_or_init(|| Regex::new(r"^v\d+(?:[._]\d+)*__.+\.sql$").unwrap());
-    if flyway.is_match(name) {
-        return true;
+    static VERSIONED: OnceLock<Regex> = OnceLock::new();
+    let versioned = VERSIONED.get_or_init(|| Regex::new(r"^\d{3,}|\d{10,}").unwrap());
+    let segments: Vec<&str> = lower.split('/').collect();
+    let dirs = &segments[..segments.len() - 1];
+    let parent = dirs.last().copied().unwrap_or("");
+    if name.contains(".migration.") || flyway.is_match(name) {
+        return Some(MigrationKind::Versioned);
     }
     static UPGRADE: OnceLock<Regex> = OnceLock::new();
     let upgrade = UPGRADE.get_or_init(|| Regex::new(r"command.*\d{10,}|\d{10,}.*command").unwrap());
-    lower.contains("upgrade") && upgrade.is_match(name)
+    if lower.contains("upgrade") && upgrade.is_match(name) {
+        return Some(MigrationKind::Versioned);
+    }
+    let in_folder = dirs
+        .iter()
+        .any(|d| matches!(*d, "migrations" | "migration" | "migrate"))
+        || lower.contains("alembic/versions/");
+    if !in_folder {
+        return None;
+    }
+    // `20240101_init.sql`, `1790000013000-create.ts`, Prisma's
+    // `20240101_init/migration.sql`, any Alembic version.
+    if versioned.is_match(name)
+        || (name == "migration.sql" && versioned.is_match(parent))
+        || lower.contains("alembic/versions/")
+    {
+        Some(MigrationKind::Versioned)
+    } else {
+        Some(MigrationKind::Support)
+    }
 }
 
 /// What a migration's text does to stored data, in order, without
@@ -211,6 +235,7 @@ fn summarize_effects(effects: &[String]) -> Vec<String> {
 }
 
 fn migration_row(ctx: &Ctx, f: &FileChange) -> Option<SemanticChange> {
+    let kind = migration_kind(&f.path)?;
     let text = match f.status {
         Status::Deleted => base_text(ctx, f),
         _ => head_text(ctx, f),
@@ -218,12 +243,18 @@ fn migration_row(ctx: &Ctx, f: &FileChange) -> Option<SemanticChange> {
     let (effects, cascade) = migration_effects(&text);
     let summary = summarize_effects(&effects);
     let path = &f.path;
-    let title = match f.status {
-        Status::Added => match summary.first() {
+    // Code next to the migrations (a registry, helpers) is ordinary code
+    // unless it touches stored data itself.
+    if kind == MigrationKind::Support && summary.is_empty() {
+        return None;
+    }
+    let title = match (kind, f.status) {
+        (MigrationKind::Support, _) => format!("Migration code `{path}` changed"),
+        (_, Status::Added) => match summary.first() {
             Some(first) => format!("Migration `{path}` {first}"),
             None => format!("New migration `{path}`"),
         },
-        Status::Deleted => format!("Migration `{path}` removed"),
+        (_, Status::Deleted) => format!("Migration `{path}` removed"),
         _ => format!("Existing migration `{path}` edited"),
     };
     let mut why: Vec<String> = Vec::new();
@@ -236,12 +267,15 @@ fn migration_row(ctx: &Ctx, f: &FileChange) -> Option<SemanticChange> {
                 .into(),
         );
     }
-    why.push(match f.status {
-        Status::Added => "it changes stored data: deploy it before code that relies on the new \
+    why.push(match (kind, f.status) {
+        (MigrationKind::Support, _) => "it changes how stored data is migrated".into(),
+        (_, Status::Added) => {
+            "it changes stored data: deploy it before code that relies on the new \
                           shape, and check it can be rolled back"
-            .into(),
-        Status::Deleted => "databases that already ran it keep its changes; databases that did \
-                            not will never get them"
+                .into()
+        }
+        (_, Status::Deleted) => "databases that already ran it keep its changes; databases that \
+                                 did not will never get them"
             .into(),
         _ => "databases that already ran this migration will not run the edit, so their data \
               and new databases can drift apart"
@@ -285,6 +319,55 @@ struct Operation {
     /// Directives or decorators that skip authentication.
     skips_auth: Option<String>,
     line: u32,
+}
+
+/// A signature with its arguments sorted by name: GraphQL arguments are
+/// named, so their order is no change.
+fn canonical_signature(signature: &str) -> String {
+    let Some(open) = signature.find('(') else {
+        return signature.to_string();
+    };
+    let mut depth = 0;
+    let mut close = None;
+    for (i, c) in signature[open..].char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(open + i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some(close) = close else {
+        return signature.to_string();
+    };
+    static ARG: OnceLock<Regex> = OnceLock::new();
+    let arg = ARG.get_or_init(|| {
+        Regex::new(r#"([A-Za-z_]\w*)\s*:\s*([\w\[\]!]+)(\s*=\s*(?:"[^"]*"|[^,\s)]+))?"#).unwrap()
+    });
+    let mut args: Vec<String> = arg
+        .captures_iter(&signature[open + 1..close])
+        .map(|c| {
+            let default: String = c
+                .get(3)
+                .map_or(String::new(), |d| d.as_str().split_whitespace().collect());
+            format!("{}:{}{default}", &c[1], &c[2])
+        })
+        .collect();
+    args.sort();
+    format!(
+        "{}({}){}",
+        signature[..open].trim(),
+        args.join(","),
+        signature[close + 1..]
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    )
 }
 
 /// Directives and decorators that make an operation public.
@@ -524,9 +607,10 @@ fn graphql_rows(ctx: &Ctx, f: &FileChange) -> Vec<SemanticChange> {
     let changed: Vec<&Operation> = head
         .iter()
         .filter(|o| {
-            base_by
-                .get(&key(o))
-                .is_some_and(|b| b.signature != o.signature && b.skips_auth == o.skips_auth)
+            base_by.get(&key(o)).is_some_and(|b| {
+                canonical_signature(&b.signature) != canonical_signature(&o.signature)
+                    && b.skips_auth == o.skips_auth
+            })
         })
         .collect();
     let comp = component(ctx, &f.path);
@@ -647,8 +731,13 @@ fn graphql_rows(ctx: &Ctx, f: &FileChange) -> Vec<SemanticChange> {
             "public-api-changed",
             ChangeKind::Breaking,
             format!(
-                "GraphQL {} change their arguments or results",
-                describe(&changed)
+                "GraphQL {} {}",
+                describe(&changed),
+                if changed.len() == 1 {
+                    "changes its arguments or result"
+                } else {
+                    "change their arguments or results"
+                }
             ),
             "Clients built against the old signature may break".into(),
             &changed,
@@ -1031,13 +1120,20 @@ mod tests {
             assert!(is_migration(p), "{p}");
         }
         for p in [
-            "src/migrations/index.ts",
             "src/migrate.ts",
             "src/commands/upgrade.command.ts",
             "docs/migrations/guide.md",
         ] {
             assert!(!is_migration(p), "{p}");
         }
+        assert_eq!(
+            migration_kind("libs/db/src/migrations/migrations.ts"),
+            Some(MigrationKind::Support)
+        );
+        assert_eq!(
+            migration_kind("apps/core/migrations/src/tables/community.ts"),
+            Some(MigrationKind::Support)
+        );
     }
 
     #[test]
@@ -1085,6 +1181,18 @@ mod tests {
         );
         let names: Vec<&str> = ops.iter().map(|o| o.name.as_str()).collect();
         assert_eq!(names, ["subscribe", "list"]);
+    }
+
+    #[test]
+    fn argument_order_is_no_change() {
+        assert_eq!(
+            canonical_signature("posts(first: Int, after: String): [Post!]!"),
+            canonical_signature("posts(after: String first: Int): [Post!]!")
+        );
+        assert_ne!(
+            canonical_signature("posts(first: Int): [Post!]!"),
+            canonical_signature("posts(first: Int!): [Post!]!")
+        );
     }
 
     #[test]

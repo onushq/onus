@@ -23,6 +23,16 @@ export interface MutationSelection {
 }
 export type Kind = 'C' | 'A' | 'B';
 export type Row = { createdAt: string; id: string; name: string };
+=== base packages/sdk/src/schema.graphql
+# This file was generated. Do not edit.
+type Mutation {
+  authorizeApp(clientId: String!, redirectUrl: String!, scope: String): Boolean!
+}
+=== head packages/sdk/src/schema.graphql
+# This file was generated. Do not edit.
+type Mutation {
+  authorizeApp(redirectUrl: String!, clientId: String!, scope: String): Boolean!
+}
 === both packages/app/src/index.ts
 import type { Kind, MutationSelection, Row } from '@r/sdk';
 
@@ -30,6 +40,7 @@ export const kinds: Kind[] = ['A'];
 export const selection: MutationSelection = {};
 export const rows: Row[] = [];
 === expect
+no public-api-changed
 no contract-changed-unverified
 no contract-union-narrowed
 attention 0
