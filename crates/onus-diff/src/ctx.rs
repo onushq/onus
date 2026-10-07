@@ -205,26 +205,39 @@ impl<'a> Ctx<'a> {
     /// first line of use in each, sorted by path. The symbol's own file is
     /// left out.
     pub fn dependent_sites(&self, symbol: &str) -> Vec<(String, u32)> {
-        let own_file = self
-            .head_syms
-            .get(symbol)
-            .and_then(|s| s.loc.as_ref())
-            .map(|l| l.file.as_str());
-        let class_prefix = format!("{symbol}.");
-        let mut first: BTreeMap<&str, u32> = BTreeMap::new();
-        for e in &self.head.edges {
-            if e.to != symbol && !e.to.starts_with(&class_prefix) {
-                continue;
-            }
-            for s in &e.sites {
-                if Some(s.file.as_str()) == own_file {
-                    continue;
-                }
-                let line = first.entry(s.file.as_str()).or_insert(s.line);
-                *line = (*line).min(s.line);
-            }
-        }
-        first.into_iter().map(|(f, l)| (f.to_string(), l)).collect()
+        sites_in(self.head, symbol)
+    }
+
+    /// The same, in the base map: for things the change removed.
+    pub fn base_dependent_sites(&self, symbol: &str) -> Vec<(String, u32)> {
+        sites_in(self.base, symbol)
+    }
+
+    /// Whether the component's package is published: its `package.json` is
+    /// not private and says what to publish (`files` or `publishConfig`).
+    pub fn is_published(&self, component: &str) -> bool {
+        let Some(c) = self.components.get(component) else {
+            return false;
+        };
+        let dir = c
+            .roots
+            .first()
+            .map(|r| r.trim_end_matches("**").trim_end_matches('/'))
+            .unwrap_or("");
+        let path = if dir.is_empty() {
+            "package.json".to_string()
+        } else {
+            format!("{dir}/package.json")
+        };
+        let Ok(text) = std::fs::read_to_string(onus_core::paths::native(self.head_root, &path))
+        else {
+            return false;
+        };
+        let Ok(pkg) = serde_json::from_str::<serde_json::Value>(&text) else {
+            return false;
+        };
+        pkg.get("private") != Some(&serde_json::Value::Bool(true))
+            && (pkg.get("files").is_some() || pkg.get("publishConfig").is_some())
     }
 
     /// Head diagnostics in a file.
@@ -239,6 +252,30 @@ impl<'a> Ctx<'a> {
     pub fn explain(&self, file: &str) {
         self.explained.borrow_mut().insert(file.to_string());
     }
+}
+
+fn sites_in(map: &CodebaseMap, symbol: &str) -> Vec<(String, u32)> {
+    let own_file = map
+        .symbols
+        .iter()
+        .find(|s| s.id == symbol)
+        .and_then(|s| s.loc.as_ref())
+        .map(|l| l.file.as_str());
+    let class_prefix = format!("{symbol}.");
+    let mut first: BTreeMap<&str, u32> = BTreeMap::new();
+    for e in &map.edges {
+        if e.to != symbol && !e.to.starts_with(&class_prefix) {
+            continue;
+        }
+        for s in &e.sites {
+            if Some(s.file.as_str()) == own_file {
+                continue;
+            }
+            let line = first.entry(s.file.as_str()).or_insert(s.line);
+            *line = (*line).min(s.line);
+        }
+    }
+    first.into_iter().map(|(f, l)| (f.to_string(), l)).collect()
 }
 
 fn onus_lang_ts_root() -> &'static str {

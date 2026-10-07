@@ -1,6 +1,5 @@
 Dead code is deleted together with its tests. The tests covered nothing that
 still exists, so coverage is not weakened.
-status: open
 
 === both package.json
 { "name": "front", "private": true, "main": "src/index.ts" }

@@ -1,7 +1,6 @@
 An interface gains a required method, and its only implementation is updated
 in the same change. Test doubles that cast (`as Engine`, `as never`) do not
 implement it and do not break. Nothing in the repository breaks.
-status: open
 
 === both package.json
 { "name": "r", "private": true, "workspaces": ["packages/*"] }

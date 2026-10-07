@@ -22,6 +22,20 @@ pub struct TestsResult {
 struct Weakening {
     notes: Vec<String>,
     locations: Vec<Location>,
+    /// Removed cases and removed assertions, decided once the whole change
+    /// is known: they may have moved, or gone with the code they tested.
+    removed: Vec<Removal>,
+}
+
+#[derive(Debug, Clone)]
+struct Removal {
+    /// The base test file.
+    file: String,
+    case: TestCase,
+    /// Removed assertions of a kept case; empty when the whole case went.
+    assertions: Vec<FactSite>,
+    /// The case's whole file was deleted.
+    file_deleted: bool,
 }
 
 fn multiset_minus<'a>(a: &'a [FactSite], b: &[FactSite]) -> Vec<&'a FactSite> {
@@ -80,15 +94,13 @@ fn compare_cases(base: &TestNode, head: Option<&TestNode>, w: &mut Weakening) ->
         let lost = multiset_minus(&b.assertions, &h.assertions);
         let gained = multiset_minus(&h.assertions, &b.assertions);
         if h.assertions.len() < b.assertions.len() {
-            let n = (b.assertions.len() - h.assertions.len()) as u32;
-            w.notes.push(format!(
-                "{} removed from {}",
-                plural(n, "assertion", "assertions"),
-                quote(&h.name)
-            ));
-            for a in lost.iter().take(n as usize) {
-                w.locations.push(Location::base(&base.file, a.line, a.line));
-            }
+            let n = b.assertions.len() - h.assertions.len();
+            w.removed.push(Removal {
+                file: base.file.clone(),
+                case: b.clone(),
+                assertions: lost.iter().take(n).map(|a| (*a).clone()).collect(),
+                file_deleted: false,
+            });
         } else if !lost.is_empty() && lost.len() == gained.len() {
             // Same number of assertions, different expectations.
             let base_expected: Vec<&FactSite> = multiset_minus(&b.expected, &h.expected);
@@ -120,9 +132,12 @@ fn compare_cases(base: &TestNode, head: Option<&TestNode>, w: &mut Weakening) ->
         }
     }
     for b in removed {
-        w.notes.push(format!("test {} removed", quote(&b.name)));
-        w.locations
-            .push(Location::base(&base.file, b.line, b.end_line));
+        w.removed.push(Removal {
+            file: base.file.clone(),
+            case: b.clone(),
+            assertions: vec![],
+            file_deleted: false,
+        });
     }
     unmatched_head.len() as u32
 }
@@ -163,16 +178,86 @@ pub fn analyze(ctx: &Ctx, pairs: &Pairs) -> TestsResult {
         }
         let comp = b.component_id.clone().unwrap_or_else(|| "root".into());
         let w = weak.entry(comp).or_default();
-        if !b.cases.is_empty() {
-            w.notes.push(format!(
-                "test file `{}` deleted ({})",
-                b.file,
-                plural(b.cases.len() as u32, "case", "cases")
-            ));
-            w.locations.push(Location::base(&b.file, 1, 1));
+        for c in &b.cases {
+            w.removed.push(Removal {
+                file: b.file.clone(),
+                case: c.clone(),
+                assertions: vec![],
+                file_deleted: true,
+            });
         }
     }
     special_cases(ctx, pairs, &mut weak);
+    let mut with_code: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut gone = Gone::new(ctx, pairs);
+    for (comp, w) in weak.iter_mut() {
+        let mut deleted_files: BTreeMap<String, (u32, u32)> = BTreeMap::new();
+        for r in std::mem::take(&mut w.removed) {
+            if r.assertions.is_empty() && gone.moved(&r) {
+                continue;
+            }
+            if let Some(name) = gone.tested_removed_code(ctx, &r) {
+                with_code
+                    .entry(comp.clone())
+                    .or_default()
+                    .push(if r.assertions.is_empty() {
+                        format!("{} (`{name}`)", quote(&r.case.name))
+                    } else {
+                        format!(
+                            "{} from {} (`{name}`)",
+                            plural(r.assertions.len() as u32, "assertion", "assertions"),
+                            quote(&r.case.name)
+                        )
+                    });
+                continue;
+            }
+            if r.file_deleted {
+                let e = deleted_files.entry(r.file.clone()).or_default();
+                e.0 += 1;
+                continue;
+            }
+            if r.assertions.is_empty() {
+                w.notes
+                    .push(format!("test {} removed", quote(&r.case.name)));
+                w.locations
+                    .push(Location::base(&r.file, r.case.line, r.case.end_line));
+            } else {
+                w.notes.push(format!(
+                    "{} removed from {}",
+                    plural(r.assertions.len() as u32, "assertion", "assertions"),
+                    quote(&r.case.name)
+                ));
+                for a in &r.assertions {
+                    w.locations.push(Location::base(&r.file, a.line, a.line));
+                }
+            }
+        }
+        for (file, (n, _)) in deleted_files {
+            w.notes.push(format!(
+                "test file `{file}` deleted ({})",
+                plural(n, "case", "cases")
+            ));
+            w.locations.push(Location::base(&file, 1, 1));
+        }
+    }
+    for (comp, items) in with_code {
+        let mut row = change(
+            ChangeKind::Test,
+            "tests-removed-with-code",
+            ChangeLevel::Behavior,
+            &comp,
+            Some(&comp),
+            "Tests removed with code",
+            format!("Tests in `{comp}` removed with the code they tested"),
+            format!(
+                "{}: each covered code this change deletes, so no remaining code loses coverage",
+                capitalize(&crate::ctx::join_some(&items, 4))
+            ),
+            vec![],
+        );
+        row.hints.needs_person = false;
+        result.rows.push(row);
+    }
 
     for (comp, w) in weak {
         if w.notes.is_empty() {
@@ -206,6 +291,111 @@ pub fn analyze(ctx: &Ctx, pairs: &Pairs) -> TestsResult {
         result.rows.push(row);
     }
     result
+}
+
+/// What the whole change removed and added, to tell a test that moved or
+/// went with its code from one that was dropped.
+struct Gone {
+    /// Head test cases that are new to the repository, by body and by
+    /// `(file stem, title)`.
+    new_bodies: BTreeMap<String, u32>,
+    new_titles: BTreeMap<(String, String), u32>,
+    /// Names of symbols this change deletes (and that no other symbol in
+    /// the head tree is called).
+    removed_names: BTreeSet<String>,
+}
+
+/// `src/isGroupable.spec.ts` → `isGroupable`.
+fn stem(file: &str) -> String {
+    let name = file.rsplit('/').next().unwrap_or(file);
+    name.split('.').next().unwrap_or(name).to_string()
+}
+
+impl Gone {
+    fn new(ctx: &Ctx, pairs: &Pairs) -> Gone {
+        let mut bodies: BTreeMap<String, i64> = BTreeMap::new();
+        let mut titles: BTreeMap<(String, String), i64> = BTreeMap::new();
+        for (map, sign) in [(ctx.head, 1), (ctx.base, -1)] {
+            for t in &map.tests {
+                for c in &t.cases {
+                    if !c.fingerprint.is_empty() {
+                        *bodies.entry(c.fingerprint.clone()).or_default() += sign;
+                    }
+                    *titles.entry((stem(&t.file), c.name.clone())).or_default() += sign;
+                }
+            }
+        }
+        let positive = |n: i64| u32::try_from(n).ok().filter(|n| *n > 0);
+        let head_names: BTreeSet<&str> = ctx.head.symbols.iter().map(|s| s.name.as_str()).collect();
+        Gone {
+            new_bodies: bodies
+                .into_iter()
+                .filter_map(|(k, n)| Some((k, positive(n)?)))
+                .collect(),
+            new_titles: titles
+                .into_iter()
+                .filter_map(|(k, n)| Some((k, positive(n)?)))
+                .collect(),
+            removed_names: pairs
+                .removed
+                .iter()
+                .map(|s| s.name.rsplit('.').next().unwrap_or(&s.name).to_string())
+                .filter(|n| n.len() >= 4 && !head_names.contains(n.as_str()))
+                .collect(),
+        }
+    }
+
+    /// The same case (same body, or same title in a file of the same name)
+    /// appears among the change's new cases.
+    fn moved(&mut self, r: &Removal) -> bool {
+        (!r.case.fingerprint.is_empty() && take(&mut self.new_bodies, &r.case.fingerprint))
+            || take(&mut self.new_titles, &(stem(&r.file), r.case.name.clone()))
+    }
+
+    /// A deleted symbol the removed case (or the removed assertions) used.
+    fn tested_removed_code(&self, ctx: &Ctx, r: &Removal) -> Option<String> {
+        if self.removed_names.is_empty() {
+            return None;
+        }
+        let text =
+            std::fs::read_to_string(onus_core::paths::native(ctx.base_root, &r.file)).ok()?;
+        let lines: Vec<&str> = text.lines().collect();
+        let spans: Vec<(u32, u32)> = if r.assertions.is_empty() {
+            vec![(r.case.line, r.case.end_line)]
+        } else {
+            r.assertions.iter().map(|a| (a.line, a.line)).collect()
+        };
+        let mut used = None;
+        for (a, z) in spans {
+            let body = lines
+                .get(a.saturating_sub(1) as usize..(z as usize).min(lines.len()))
+                .map(|l| l.join("\n"))
+                .unwrap_or_default();
+            let hit = self.removed_names.iter().find(|n| contains_word(&body, n));
+            // Every removed assertion must be about deleted code.
+            used = Some(hit?.clone());
+        }
+        used
+    }
+}
+
+/// Takes one occurrence of `key` from `pool`, if there is one.
+fn take<K: Ord>(pool: &mut BTreeMap<K, u32>, key: &K) -> bool {
+    match pool.get_mut(key) {
+        Some(n) if *n > 0 => {
+            *n -= 1;
+            true
+        }
+        _ => false,
+    }
+}
+
+fn contains_word(text: &str, word: &str) -> bool {
+    let ident = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+    text.match_indices(word).any(|(i, _)| {
+        !text[..i].chars().next_back().is_some_and(ident)
+            && !text[i + word.len()..].chars().next().is_some_and(ident)
+    })
 }
 
 fn capitalize(s: &str) -> String {
@@ -348,12 +538,17 @@ mod tests {
         let mut w = Weakening::default();
         let added = compare_cases(&node(cases()), Some(&node(cases())), &mut w);
         assert_eq!(added, 0);
-        assert!(w.notes.is_empty(), "{:?}", w.notes);
+        assert!(w.notes.is_empty() && w.removed.is_empty(), "{w:?}");
 
         // Dropping the second of the two still reads as a removed case.
         let mut w = Weakening::default();
         let fewer = node(vec![case("rejects year %d", 10, "\"too low\"")]);
         compare_cases(&node(cases()), Some(&fewer), &mut w);
-        assert_eq!(w.notes, ["test \"rejects year %d\" removed"]);
+        let removed: Vec<(&str, u32)> = w
+            .removed
+            .iter()
+            .map(|r| (r.case.name.as_str(), r.case.line))
+            .collect();
+        assert_eq!(removed, [("rejects year %d", 20)]);
     }
 }

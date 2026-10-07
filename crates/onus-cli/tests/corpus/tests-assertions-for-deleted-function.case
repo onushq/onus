@@ -1,6 +1,5 @@
 A test keeps its case but drops the assertions about a helper that this
 change deletes; the remaining assertions still cover the kept code.
-status: open
 
 === both package.json
 { "name": "calendar", "private": true, "main": "src/index.ts" }

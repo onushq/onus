@@ -1,7 +1,6 @@
 Types that other code only reads (generated API result types, a GraphQL
 `Mutation` root) gain required fields. Readers are unaffected and nothing in
 the repository builds these values, so nothing breaks.
-status: open
 
 === both package.json
 { "name": "r", "private": true, "workspaces": ["packages/*"] }

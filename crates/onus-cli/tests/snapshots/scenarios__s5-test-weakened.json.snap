@@ -55,7 +55,7 @@ expression: json
       "component": "billing",
       "kindLabel": "Tests weakened",
       "title": "Tests in `billing` were weakened",
-      "whyItMatters": "1 assertion removed from \"applyDiscount › gives loyalty members 10% off large orders\"; \"applyDiscount › does not discount customers outside the loyalty program\" is now skipped; source in `billing` changed in the same pull request; needs a person",
+      "whyItMatters": "\"applyDiscount › does not discount customers outside the loyalty program\" is now skipped; 1 assertion removed from \"applyDiscount › gives loyalty members 10% off large orders\"; source in `billing` changed in the same pull request; needs a person",
       "hints": {
         "labels": [
           "payments"

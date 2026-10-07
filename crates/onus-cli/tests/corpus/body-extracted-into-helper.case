@@ -1,6 +1,5 @@
 A method's body moves into a new private helper that still awaits every
 call and keeps the early exit. Nothing was removed.
-status: open
 
 === both package.json
 { "name": "chat", "private": true, "main": "src/index.ts" }

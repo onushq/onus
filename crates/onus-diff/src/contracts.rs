@@ -584,96 +584,134 @@ pub fn rows(ctx: &Ctx, pairs: &Pairs) -> Vec<SemanticChange> {
     rows
 }
 
-/// The users of a symbol that a breaking change did not touch, test files
-/// first: what to check before the change is done. Returns the sentence for
-/// the row and the locations of those uses.
-///
-/// When the only breaking change is a new required member, code that merely
-/// calls the type is unaffected; only implementations and test doubles
-/// break. Those are found by how they are written (`implements X`,
-/// `satisfies X`, `: X = {`, `as X`, Effect's `Layer.succeed(X, …)` and
-/// `X.of({…})`); when none are found, the test files that use it are listed.
-fn untouched_users(
-    ctx: &Ctx,
-    s: &SymbolNode,
-    deltas: &[Delta],
-    removed: bool,
-) -> (String, Vec<Location>) {
-    const LISTED: usize = 6;
-    if removed {
-        return (String::new(), vec![]);
-    }
+/// Who a breaking change can still break: the files outside this change
+/// that use the symbol, or, when the only breaking change is a new required
+/// member, the ones that implement it (code that merely reads the type is
+/// unaffected).
+#[derive(Debug, Default)]
+struct Reach {
+    /// Files outside the change and the line of use, test files first.
+    left: Vec<(String, u32)>,
+    /// How many of `left` are test files.
+    tests_left: usize,
+    /// Files in the change that use or implement it.
+    updated: Vec<String>,
+    /// `use it` or `implement it`.
+    noun: &'static str,
+    /// Why users Onus cannot see may exist.
+    unseen: Option<String>,
+}
+
+/// Files with the line where they use a symbol.
+type Uses = Vec<(String, u32)>;
+
+fn reach(ctx: &Ctx, s: &SymbolNode, deltas: &[Delta], removed: bool) -> Reach {
     let changed: std::collections::BTreeSet<&str> =
         ctx.text.files.iter().map(|f| f.path.as_str()).collect();
-    let mut uses: Vec<(String, u32)> = ctx
-        .dependent_sites(&s.id)
-        .into_iter()
-        .filter(|(f, _)| !changed.contains(f.as_str()))
-        .collect();
-    let only_new_required = deltas
-        .iter()
-        .filter(|d| d.breaking)
-        .all(|d| d.subkind == "contract-field-added-required");
-    let mut noun = "that use it";
-    if only_new_required {
-        let implementing: Vec<(String, u32)> = uses
+    let sites = if removed {
+        ctx.base_dependent_sites(&s.id)
+    } else {
+        ctx.dependent_sites(&s.id)
+    };
+    let only_new_required = !removed
+        && deltas
+            .iter()
+            .filter(|d| d.breaking)
+            .all(|d| d.subkind == "contract-field-added-required");
+    let (sites, noun) = if only_new_required {
+        let implementing = sites
             .iter()
             .filter_map(|(f, _)| implementation_line(ctx, f, &s.name).map(|l| (f.clone(), l)))
             .collect();
-        if implementing.is_empty() {
-            uses.retain(|(f, _)| ctx.is_test_file(f));
-        } else {
-            uses = implementing;
-            noun = "that implement it";
-        }
-    }
-    type Uses = Vec<(String, u32)>;
-    let (mut tests, mut code): (Uses, Uses) =
-        uses.into_iter().partition(|(f, _)| ctx.is_test_file(f));
-    if tests.is_empty() && code.is_empty() {
-        return (String::new(), vec![]);
-    }
-    let name = |f: &str| format!("`{f}`");
-    let mut shown: Vec<String> = tests
-        .iter()
-        .chain(code.iter())
-        .map(|(f, _)| name(f))
-        .collect();
-    let total = shown.len();
-    shown.truncate(LISTED);
-    let more = if total > LISTED {
-        format!(" and {} more", total - LISTED)
+        (implementing, "implement it")
     } else {
-        String::new()
+        (sites, "use it")
     };
-    let what = match (tests.len(), code.len()) {
-        (0, c) => plural(c as u32, "file", "files"),
-        (t, 0) => plural(t as u32, "test file", "test files"),
-        (t, c) => format!(
-            "{} and {}",
-            plural(t as u32, "test file", "test files"),
-            plural(c as u32, "other file", "other files")
-        ),
-    };
-    let sentence = format!(
-        "; not changed yet: {what} {noun} ({}{more})",
-        shown.join(", ")
-    );
-    tests.append(&mut code);
-    let locations = tests
+    let (updated, left): (Uses, Uses) = sites
         .into_iter()
-        .take(LISTED)
-        .map(|(f, l)| Location::head(&f, l, l))
-        .collect();
-    (sentence, locations)
+        .partition(|(f, _)| changed.contains(f.as_str()));
+    let (mut tests, code): (Uses, Uses) = left.into_iter().partition(|(f, _)| ctx.is_test_file(f));
+    let tests_left = tests.len();
+    tests.extend(code);
+    Reach {
+        left: tests,
+        tests_left,
+        updated: updated.into_iter().map(|(f, _)| f).collect(),
+        noun,
+        unseen: s.component_id.as_deref().and_then(|c| unseen_users(ctx, c)),
+    }
 }
 
-/// The line where `file` (in the head tree) implements `name`, if it does.
+/// Why a component may have users the map does not show: it is published,
+/// or imports of its package could not be resolved.
+fn unseen_users(ctx: &Ctx, component: &str) -> Option<String> {
+    let c = ctx.components.get(component)?;
+    let name = c.package_name.as_deref()?;
+    if ctx.is_published(component) {
+        return Some(format!(
+            "`{name}` is published, so code outside this repository may depend on it"
+        ));
+    }
+    let unresolved = format!("?{name}");
+    let missed = ctx.head.files.iter().any(|f| {
+        f.imports.iter().any(|i| {
+            i.strip_prefix(&unresolved)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+        })
+    });
+    missed.then(|| {
+        format!("some imports of `{name}` could not be resolved, so Onus may not see every user")
+    })
+}
+
+impl Reach {
+    /// `; not changed yet: 1 test file and 2 other files that use it (…)`
+    fn left_sentence(&self) -> String {
+        const LISTED: usize = 6;
+        let code = self.left.len() - self.tests_left;
+        let what = match (self.tests_left, code) {
+            (0, c) => plural(c as u32, "file", "files"),
+            (t, 0) => plural(t as u32, "test file", "test files"),
+            (t, c) => format!(
+                "{} and {}",
+                plural(t as u32, "test file", "test files"),
+                plural(c as u32, "other file", "other files")
+            ),
+        };
+        let mut shown: Vec<String> = self
+            .left
+            .iter()
+            .take(LISTED)
+            .map(|(f, _)| format!("`{f}`"))
+            .collect();
+        if self.left.len() > LISTED {
+            shown.push(format!("{} more", self.left.len() - LISTED));
+        }
+        format!(
+            "; not changed yet: {what} that {} ({})",
+            self.noun,
+            shown.join(", ")
+        )
+    }
+
+    fn locations(&self) -> Vec<Location> {
+        self.left
+            .iter()
+            .take(6)
+            .map(|(f, l)| Location::head(f, *l, *l))
+            .collect()
+    }
+}
+
+/// The line where `file` (in the head tree) implements or builds a value of
+/// `name`, if it does: `implements X`, `satisfies X`, `: X = {`, a function
+/// declared to return `X`, Effect's `Layer.succeed(X, …)` and `X.of({…})`.
+/// A cast (`as X`) does not count: it compiles whatever members `X` gains.
 fn implementation_line(ctx: &Ctx, file: &str, name: &str) -> Option<u32> {
     let text = std::fs::read_to_string(onus_core::paths::native(ctx.head_root, file)).ok()?;
     let n = regex::escape(name);
     let pattern = format!(
-        r"implements[^{{]*\b{n}\b|satisfies\s+{n}\b|:\s*{n}\s*=\s*\{{|\bas\s+{n}\b|Layer\.(?:succeed|effect|scoped|sync)\(\s*{n}\b|\b{n}\.of\("
+        r"implements[^{{]*\b{n}\b|satisfies\s+{n}\b|:\s*{n}\s*(?:\[\]\s*)?=\s*[\{{\[]|\)\s*:\s*(?:Promise<\s*)?{n}\s*>?\s*(?:=>|\{{)|Layer\.(?:succeed|effect|scoped|sync)\(\s*{n}\b|\b{n}\.of\("
     );
     let re = regex::Regex::new(&pattern).ok()?;
     let m = re.find(&text)?;
@@ -773,34 +811,81 @@ fn contract_row(
             s.invariants.join("; ")
         )
     };
+    let reach = if breaking {
+        reach(ctx, s, &deltas, removed)
+    } else {
+        Reach::default()
+    };
+    let mut locations = locations;
     let (kind, kind_label, why) = if !breaking {
         (
             ChangeKind::Additive,
             "Contract change, additive",
             format!("{used}; existing callers unaffected{invariants}"),
         )
+    } else if reach.left.is_empty() && reach.unseen.is_none() {
+        // Nothing outside this change can break.
+        let after = if !reach.updated.is_empty() {
+            let mut files: Vec<String> = reach
+                .updated
+                .iter()
+                .take(4)
+                .map(|f| format!("`{f}`"))
+                .collect();
+            if reach.updated.len() > 4 {
+                files.push(format!("{} more", reach.updated.len() - 4));
+            }
+            format!(
+                "every file that {} was updated in this change ({})",
+                reach.noun,
+                join_and(&files)
+            )
+        } else if reach.noun == "implement it" {
+            "nothing in this repository implements it, and code that only reads it is unaffected"
+                .to_string()
+        } else {
+            "nothing outside this change uses it".to_string()
+        };
+        (
+            ChangeKind::Additive,
+            if reach.updated.is_empty() {
+                "Contract change, no users affected"
+            } else {
+                "Contract change, users updated"
+            },
+            format!("{used}; {after}{invariants}"),
+        )
     } else if subkind == "contract-changed-unverified" {
+        let unseen = reach
+            .unseen
+            .as_ref()
+            .map(|u| format!("; {u}"))
+            .unwrap_or_default();
         (
             ChangeKind::Breaking,
             "Contract change, unverified",
             format!(
-                "{used}; Onus cannot prove the change is compatible, so it is treated as breaking{invariants}"
+                "{used}; Onus cannot prove the change is compatible, so it is treated as breaking{unseen}{invariants}"
             ),
         )
     } else {
+        let left = if reach.left.is_empty() {
+            String::new()
+        } else {
+            reach.left_sentence()
+        };
+        let unseen = reach
+            .unseen
+            .as_ref()
+            .map(|u| format!("; {u}"))
+            .unwrap_or_default();
+        locations.extend(reach.locations());
         (
             ChangeKind::Breaking,
             "Contract change, breaking",
-            format!(
-                "{used}; existing callers may break{}{invariants}",
-                untouched_users(ctx, s, &deltas, removed).0
-            ),
+            format!("{used}; existing callers may break{left}{unseen}{invariants}"),
         )
     };
-    let mut locations = locations;
-    if breaking && subkind != "contract-changed-unverified" {
-        locations.extend(untouched_users(ctx, s, &deltas, removed).1);
-    }
     let mut row = change(
         kind,
         subkind,
