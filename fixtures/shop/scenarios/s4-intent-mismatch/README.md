@@ -1,0 +1,1 @@
+The stated intent is a logger-only change (structured key=value fields), and the logger change matches it. But the same diff also makes billing's `listPayments` write to the `payment` table on every read, which the intent never mentions.

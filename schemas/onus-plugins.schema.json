@@ -1,0 +1,172 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PluginsFile",
+  "description": "The plugins file.",
+  "type": "object",
+  "properties": {
+    "packs": {
+      "description": "Framework packs (YAML files of tree-sitter queries), relative to the\nplugins file.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "plugins": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/PluginSpec"
+      }
+    },
+    "sandbox": {
+      "$ref": "#/$defs/SandboxSpec",
+      "default": {
+        "preset": "auto"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "PluginSpec": {
+      "type": "object",
+      "properties": {
+        "command": {
+          "description": "The command and its arguments. `{root}` is replaced by the tree's\nroot and `{out}` by a fresh, writable temporary directory.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "files": {
+          "description": "For `language` and `lsp`: globs of the files to hand over.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "kind": {
+          "$ref": "#/$defs/SpecKind"
+        },
+        "language_id": {
+          "description": "For `lsp`: the LSP language id of those files (`python`, `go`, ...).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "Recorded in the map's `builtWith.providers`.",
+          "type": "string"
+        },
+        "runs_repo_code": {
+          "description": "Whether the tool may run code from the analyzed repository (build\nscripts, macros, project plugins). Default: true for `scip` and `lsp`,\nfalse otherwise. Such plugins only run in trusted mode, in a sandbox.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "timeout_seconds": {
+          "description": "Default: 300.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "kind",
+        "command"
+      ]
+    },
+    "SandboxPreset": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "bwrap",
+            "sandbox-exec"
+          ]
+        },
+        {
+          "description": "bubblewrap on Linux, sandbox-exec on macOS, nothing elsewhere.",
+          "type": "string",
+          "const": "auto"
+        },
+        {
+          "description": "A container with no network, the tree mounted read-only and `{out}`\nwritable; needs `image` (with the tools in it) and Docker or Podman.",
+          "type": "string",
+          "const": "container"
+        },
+        {
+          "description": "No sandbox: plugins that run repository code then need\n`--allow-unsandboxed`.",
+          "type": "string",
+          "const": "none"
+        }
+      ]
+    },
+    "SandboxSpec": {
+      "description": "How to sandbox plugins that run repository code: a preset, or a custom\ncommand prefix (for example a container runtime) with `{root}` and\n`{out}` placeholders.",
+      "type": "object",
+      "properties": {
+        "command": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "image": {
+          "description": "For `container`: the image to run plugins in.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "preset": {
+          "$ref": "#/$defs/SandboxPreset",
+          "default": "auto"
+        },
+        "runtime": {
+          "description": "For `container`: `docker` or `podman` (default: whichever is on the\nPATH, Docker first).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "SpecKind": {
+      "oneOf": [
+        {
+          "description": "Speaks the plugin protocol and finds components.",
+          "type": "string",
+          "const": "discovery"
+        },
+        {
+          "description": "Speaks the plugin protocol and analyzes the files it handles.",
+          "type": "string",
+          "const": "language"
+        },
+        {
+          "description": "Speaks the plugin protocol and adds facts to the map.",
+          "type": "string",
+          "const": "facts"
+        },
+        {
+          "description": "A SCIP indexer: writes an index to `{out}/index.scip`, which Onus\nimports.",
+          "type": "string",
+          "const": "scip"
+        },
+        {
+          "description": "A language server: Onus talks LSP to it over stdio.",
+          "type": "string",
+          "const": "lsp"
+        }
+      ]
+    }
+  }
+}

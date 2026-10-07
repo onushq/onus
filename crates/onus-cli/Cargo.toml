@@ -1,0 +1,33 @@
+[package]
+name = "onus-cli"
+description = "The onus command line: semantic change reports for pull requests"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "onus"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+onus-core.workspace = true
+onus-diff.workspace = true
+onus-map.workspace = true
+onus-report.workspace = true
+serde_json.workspace = true
+tar.workspace = true
+tempfile.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
+protobuf.workspace = true
+scip.workspace = true
+
+[lints]
+workspace = true

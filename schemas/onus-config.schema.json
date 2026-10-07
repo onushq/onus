@@ -1,0 +1,298 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "OnusConfig",
+  "type": "object",
+  "properties": {
+    "components": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/ComponentConfig"
+      }
+    },
+    "contracts": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/ContractConfig"
+      }
+    },
+    "extractors": {
+      "$ref": "#/$defs/ExtractorsConfig",
+      "default": {}
+    },
+    "labels": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/LabelConfig"
+      }
+    },
+    "rules": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/RuleConfig"
+      }
+    },
+    "tests": {
+      "$ref": "#/$defs/TestsConfig",
+      "default": {}
+    },
+    "version": {
+      "description": "Format version; must be 1.",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "version"
+  ],
+  "$defs": {
+    "ComponentConfig": {
+      "type": "object",
+      "properties": {
+        "entrypoints": {
+          "description": "Source files that define the public surface. Inferred from\n`package.json` when absent.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "kind": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ComponentKind"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "labels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "owners": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "path": {
+          "description": "Glob (or list of globs) of the component's files, e.g. `services/orders/**`.",
+          "$ref": "#/$defs/OneOrMany"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path"
+      ]
+    },
+    "ComponentKind": {
+      "type": "string",
+      "enum": [
+        "package",
+        "service",
+        "module"
+      ]
+    },
+    "ContractConfig": {
+      "type": "object",
+      "properties": {
+        "invariants": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "symbol": {
+          "description": "Map id of the symbol, e.g. `user-preferences:src/types.ts#UserPreferences`.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "symbol"
+      ]
+    },
+    "EventPatterns": {
+      "type": "object",
+      "properties": {
+        "publish": {
+          "description": "Call patterns such as `bus.publish($EVENT, ...)` or `@OnEvent($EVENT)`.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "subscribe": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "ExternalSpec": {
+      "type": "object",
+      "properties": {
+        "category": {
+          "type": "string"
+        },
+        "egress": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "hosts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "vendor": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "vendor",
+        "category"
+      ]
+    },
+    "ExtractorsConfig": {
+      "type": "object",
+      "properties": {
+        "events": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EventPatterns"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "externals": {
+          "description": "Extra external services, keyed by npm package name.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ExternalSpec"
+          }
+        },
+        "packs": {
+          "description": "Framework packs: YAML files of tree-sitter queries, relative to\nonus.yaml (`onus help plugins`).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "prisma": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PrismaConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "LabelConfig": {
+      "type": "object",
+      "properties": {
+        "sensitivity": {
+          "$ref": "#/$defs/Sensitivity"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "sensitivity"
+      ]
+    },
+    "OneOrMany": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "PrismaConfig": {
+      "type": "object",
+      "properties": {
+        "clients": {
+          "description": "Identifiers that hold a Prisma client. Default: `prisma`.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "RuleConfig": {
+      "type": "object",
+      "properties": {
+        "deny": {
+          "$ref": "#/$defs/RuleEndpointsConfig"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "deny"
+      ]
+    },
+    "RuleEndpointsConfig": {
+      "type": "object",
+      "properties": {
+        "from": {
+          "type": "string"
+        },
+        "to": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "from",
+        "to"
+      ]
+    },
+    "Sensitivity": {
+      "type": "string",
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    "TestsConfig": {
+      "type": "object",
+      "properties": {
+        "globs": {
+          "description": "Globs of test files. Defaults cover `*.test.*`, `*.spec.*` and\n`__tests__/`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

@@ -1,0 +1,26 @@
+---
+source: crates/onus-cli/tests/scenarios.rs
+expression: md
+---
+<!-- onus-report -->
+### Onus · 1 meaning-level change · 1 needs attention · 3 lines in 1 file
+
+|   | Change | Kind | Why it matters |
+|---|---|---|---|
+| ● | `billing` reaches into `notifications` internals (`renderTemplate`) | Boundary rule violation | Breaks the declared rule "billing may not use the internals of notifications" with 2 new references; needs a person |
+
+**Intent check:** not stated (add an `onus-intent` block to the pull request) · **Boundary rules:** **1 new violation**
+
+<details><summary>Evidence per row (files and lines)</summary>
+
+1. **`billing` reaches into `notifications` internals (`renderTemplate`)**
+   - kind `breaking` / `rule-violation` · confidence `static` · labels payments · 1 dependent file · rules of the game
+   - `services/billing/src/receipts.ts` lines 2, 8
+
+</details>
+
+<details><summary>Map confidence notes</summary>
+
+Every import, call and event in the changed files was resolved statically.
+
+</details>

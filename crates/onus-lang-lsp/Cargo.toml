@@ -1,0 +1,21 @@
+[package]
+name = "onus-lang-lsp"
+description = "Onus language provider that drives any language server over LSP"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+globset.workspace = true
+lsp-types.workspace = true
+onus-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+url.workspace = true
+
+[lints]
+workspace = true

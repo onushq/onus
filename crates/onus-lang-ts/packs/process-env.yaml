@@ -1,0 +1,46 @@
+# Configuration read from process.env.
+pack: process-env
+rules:
+  - id: member
+    query: |
+      ((member_expression
+         object: (member_expression
+           object: (identifier) @p
+           property: (property_identifier) @e)
+         property: (property_identifier) @key)
+       (#eq? @p "process")
+       (#eq? @e "env"))
+    emit: { config: "{key}" }
+  - id: subscript
+    query: |
+      ((subscript_expression
+         object: (member_expression
+           object: (identifier) @p
+           property: (property_identifier) @e)
+         index: [(string) (template_string)] @key)
+       (#eq? @p "process")
+       (#eq? @e "env"))
+    emit: { config: "{key}" }
+  - id: computed
+    query: |
+      ((subscript_expression
+         object: (member_expression
+           object: (identifier) @p
+           property: (property_identifier) @e)
+         index: [(identifier) (member_expression) (call_expression) (binary_expression)] @key)
+       (#eq? @p "process")
+       (#eq? @e "env"))
+    emit: { diagnostic: dynamic-config-key, message: "process.env is read with a computed key" }
+  - id: destructure
+    query: |
+      ((variable_declarator
+         name: (object_pattern
+           [(shorthand_property_identifier_pattern) @key
+            (pair_pattern key: (property_identifier) @key)
+            (object_assignment_pattern left: (shorthand_property_identifier_pattern) @key)])
+         value: (member_expression
+           object: (identifier) @p
+           property: (property_identifier) @e))
+       (#eq? @p "process")
+       (#eq? @e "env"))
+    emit: { config: "{key}" }

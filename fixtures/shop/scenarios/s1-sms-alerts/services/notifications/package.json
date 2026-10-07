@@ -1,0 +1,19 @@
+{
+  "name": "@shop/notifications",
+  "version": "0.1.0",
+  "private": true,
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@acme/sms": "^2.3.0",
+    "@sendgrid/mail": "^8.1.0",
+    "@shop/events": "workspace:*",
+    "@shop/logger": "workspace:*",
+    "@shop/money": "workspace:*",
+    "@shop/user-preferences": "workspace:*"
+  }
+}

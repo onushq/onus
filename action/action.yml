@@ -1,0 +1,217 @@
+name: Onus report
+description: Report the changes in meaning of a pull request, as a sticky comment and a job summary.
+author: Onus
+branding:
+  icon: eye
+  color: gray-dark
+
+inputs:
+  version:
+    description: >-
+      The Onus release to download, such as v0.1.0. Defaults to the ref this
+      action was used at when that is a release tag (onushq/onus/action@v0.1.0),
+      otherwise the latest release.
+    required: false
+    default: ""
+  onus-path:
+    description: Use this onus binary instead of downloading one.
+    required: false
+    default: ""
+  base:
+    description: The commit before the change (default the pull request's base commit).
+    required: false
+    default: ${{ github.event.pull_request.base.sha }}
+  head:
+    description: The commit after the change (default the pull request's head commit).
+    required: false
+    default: ${{ github.event.pull_request.head.sha }}
+  intent:
+    description: >-
+      Check the change against the intent stated in the pull request body
+      (an onus-intent block). Set to false to skip, or to a file path to use
+      that file instead.
+    required: false
+    default: "true"
+  fail-on:
+    description: Fail the job when this is found, comma separated (rule-violation, secrets).
+    required: false
+    default: none
+  comment:
+    description: Post the report as a pull request comment, updated in place on each push.
+    required: false
+    default: "true"
+  config:
+    description: Use this onus.yaml for both commits (default the base commit's).
+    required: false
+    default: ""
+  working-directory:
+    description: The git repository to analyze.
+    required: false
+    default: "."
+  github-token:
+    description: Token for downloading the release and commenting (needs pull-requests write to comment).
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  report:
+    description: Path of the JSON report (schemas/semantic-report.schema.json).
+    value: ${{ steps.report.outputs.report }}
+  markdown:
+    description: Path of the Markdown report.
+    value: ${{ steps.report.outputs.markdown }}
+  meaning-changes:
+    description: Number of meaning-level changes.
+    value: ${{ steps.report.outputs.meaning-changes }}
+  needs-attention:
+    description: Number of changes that need a person to look.
+    value: ${{ steps.report.outputs.needs-attention }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install onus
+      id: install
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        INPUT_VERSION: ${{ inputs.version }}
+        INPUT_PATH: ${{ inputs.onus-path }}
+        ACTION_REF: ${{ github.action_ref }}
+      run: |
+        set -euo pipefail
+        if [ -n "$INPUT_PATH" ]; then
+          bin="$(cd "$(dirname "$INPUT_PATH")" && pwd)/$(basename "$INPUT_PATH")"
+          "$bin" --version
+          echo "onus=$bin" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        version="$INPUT_VERSION"
+        if [ -z "$version" ]; then
+          case "$ACTION_REF" in v[0-9]*) version="$ACTION_REF" ;; *) version=latest ;; esac
+        fi
+        case "$RUNNER_OS/$RUNNER_ARCH" in
+          Linux/X64) target=x86_64-unknown-linux-musl ;;
+          Linux/ARM64) target=aarch64-unknown-linux-musl ;;
+          macOS/ARM64) target=aarch64-apple-darwin ;;
+          macOS/X64) target=x86_64-apple-darwin ;;
+          Windows/X64) target=x86_64-pc-windows-msvc ;;
+          *) echo "::error::No Onus release for $RUNNER_OS/$RUNNER_ARCH; build it and pass onus-path"; exit 1 ;;
+        esac
+        ext=tar.gz; exe=""
+        if [ "$RUNNER_OS" = Windows ]; then ext=zip; exe=.exe; fi
+        asset="onus-$target.$ext"
+        dir="$RUNNER_TEMP/onus-$version-$target"
+        mkdir -p "$dir"
+        tag_args=()
+        [ "$version" != latest ] && tag_args=("$version")
+        gh release download ${tag_args[@]+"${tag_args[@]}"} --repo onushq/onus \
+          --pattern "$asset" --pattern "$asset.sha256" --dir "$dir" --clobber
+        want=$(cut -d' ' -f1 < "$dir/$asset.sha256")
+        if command -v sha256sum > /dev/null; then
+          got=$(sha256sum "$dir/$asset" | cut -d' ' -f1)
+        else
+          got=$(shasum -a 256 "$dir/$asset" | cut -d' ' -f1)
+        fi
+        if [ "$want" != "$got" ]; then
+          echo "::error::Checksum mismatch for $asset: expected $want, got $got"
+          exit 1
+        fi
+        if [ "$ext" = zip ]; then
+          (cd "$dir" && 7z x -y "$asset" > /dev/null)
+        else
+          tar -xzf "$dir/$asset" -C "$dir"
+        fi
+        bin="$dir/onus-$target/onus$exe"
+        "$bin" --version
+        echo "onus=$bin" >> "$GITHUB_OUTPUT"
+        echo "$dir/onus-$target" >> "$GITHUB_PATH"
+
+    - name: Report
+      id: report
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        ONUS: ${{ steps.install.outputs.onus }}
+        BASE: ${{ inputs.base }}
+        HEAD: ${{ inputs.head }}
+        INTENT: ${{ inputs.intent }}
+        FAIL_ON: ${{ inputs.fail-on }}
+        CONFIG: ${{ inputs.config }}
+        # Passed through the environment, never pasted into the script, so a
+        # pull request body cannot inject commands.
+        PR_BODY: ${{ github.event.pull_request.body }}
+      run: |
+        set -euo pipefail
+        if [ -z "$BASE" ] || [ -z "$HEAD" ]; then
+          echo "::error::No base or head commit. Run on pull_request, or set the base and head inputs."
+          exit 1
+        fi
+        for ref in "$BASE" "$HEAD"; do
+          if ! git cat-file -e "$ref^{commit}" 2> /dev/null; then
+            git fetch --no-tags --depth=1 origin "$ref"
+          fi
+        done
+        out="$RUNNER_TEMP/onus"
+        mkdir -p "$out"
+        args=(--base "$BASE" --head "$HEAD")
+        case "$INTENT" in
+          true)
+            if [ -n "$PR_BODY" ]; then
+              printf '%s' "$PR_BODY" > "$out/pr-body.md"
+              args+=(--intent "$out/pr-body.md")
+            fi
+            ;;
+          false | "") ;;
+          *) args+=(--intent "$INTENT") ;;
+        esac
+        [ -n "$CONFIG" ] && args+=(--config "$CONFIG")
+        "$ONUS" report "${args[@]}" --format md > "$out/onus-report.md"
+        status=0
+        "$ONUS" report "${args[@]}" --format json --fail-on "$FAIL_ON" > "$out/onus-report.json" || status=$?
+        if [ "$status" -ne 0 ] && [ "$status" -ne 2 ]; then
+          exit "$status"
+        fi
+        cat "$out/onus-report.md" >> "$GITHUB_STEP_SUMMARY"
+        summary=$(jq -c .summary "$out/onus-report.json")
+        {
+          echo "report=$out/onus-report.json"
+          echo "markdown=$out/onus-report.md"
+          echo "meaning-changes=$(jq .meaningChanges <<< "$summary")"
+          echo "needs-attention=$(jq .needsAttention <<< "$summary")"
+          echo "failed=$([ "$status" -eq 2 ] && echo true || echo false)"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Comment
+      if: >-
+        inputs.comment == 'true' && github.event.pull_request.number &&
+        github.event.pull_request.head.repo.full_name == github.repository
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        MD: ${{ steps.report.outputs.markdown }}
+        PR: ${{ github.event.pull_request.number }}
+        REPO: ${{ github.repository }}
+      run: |
+        set -euo pipefail
+        # GitHub rejects comments over 65,536 characters.
+        body=$(head -c 60000 "$MD")
+        if [ "$(wc -c < "$MD")" -gt 60000 ]; then
+          body+=$'\n\n…the report is longer than a comment allows; the full report is in the job summary.'
+        fi
+        id=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+          --jq '[.[] | select(.body | startswith("<!-- onus-report -->"))][0].id // empty' | head -n1)
+        if [ -n "$id" ]; then
+          gh api --method PATCH "repos/$REPO/issues/comments/$id" -f body="$body" > /dev/null
+        else
+          gh api --method POST "repos/$REPO/issues/$PR/comments" -f body="$body" > /dev/null
+        fi
+
+    - name: Fail on findings
+      if: steps.report.outputs.failed == 'true'
+      shell: bash
+      env:
+        FAIL_ON: ${{ inputs.fail-on }}
+      run: |
+        echo "::error::Onus found: $FAIL_ON (see the report)"
+        exit 2

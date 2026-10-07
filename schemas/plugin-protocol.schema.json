@@ -1,0 +1,1015 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PluginProtocol",
+  "description": "The request and response together, for schema generation.",
+  "type": "object",
+  "properties": {
+    "request": {
+      "$ref": "#/$defs/PluginRequest"
+    },
+    "response": {
+      "$ref": "#/$defs/PluginResponse"
+    }
+  },
+  "required": [
+    "request",
+    "response"
+  ],
+  "$defs": {
+    "BodyFacts": {
+      "description": "Facts about a function body used to spot notable edits.",
+      "type": "object",
+      "properties": {
+        "awaits": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FactSite"
+          }
+        },
+        "comparisons": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Comparison"
+          }
+        },
+        "emptyCatches": {
+          "description": "`catch` blocks with an empty body.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FactSite"
+          }
+        },
+        "guards": {
+          "description": "Early exits: `if (...) return/throw` without an `else`.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FactSite"
+          }
+        },
+        "throws": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FactSite"
+          }
+        }
+      }
+    },
+    "Comparison": {
+      "type": "object",
+      "properties": {
+        "left": {
+          "type": "string"
+        },
+        "line": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "op": {
+          "type": "string"
+        },
+        "right": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "op",
+        "left",
+        "right",
+        "line"
+      ]
+    },
+    "Component": {
+      "type": "object",
+      "properties": {
+        "confidence": {
+          "$ref": "#/$defs/Confidence"
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/ComponentKind"
+        },
+        "labels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "owners": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "packageName": {
+          "description": "The name other workspaces import this component by, if any.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "publicEntrypoints": {
+          "description": "Source files that define the public surface, relative to the root.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "roots": {
+          "description": "Globs relative to the repository root.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "roots",
+        "publicEntrypoints",
+        "owners",
+        "labels",
+        "confidence"
+      ]
+    },
+    "ComponentKind": {
+      "type": "string",
+      "enum": [
+        "package",
+        "service",
+        "module"
+      ]
+    },
+    "Confidence": {
+      "description": "How a fact in the map is known.\n\nOrdered from most to least trustworthy, so `max()` over a set of facts\ngives the weakest one.",
+      "oneOf": [
+        {
+          "description": "Written down by a person in `onus.yaml`.",
+          "type": "string",
+          "const": "declared"
+        },
+        {
+          "description": "Confirmed by the language's own compiler, indexer or language server.",
+          "type": "string",
+          "const": "compiler"
+        },
+        {
+          "description": "Read directly from the syntax.",
+          "type": "string",
+          "const": "static"
+        },
+        {
+          "description": "Observed at runtime (later phases).",
+          "type": "string",
+          "const": "traced"
+        },
+        {
+          "description": "Guessed from conventions or heuristics.",
+          "type": "string",
+          "const": "inferred"
+        },
+        {
+          "description": "Onus could not resolve it; treat as higher risk.",
+          "type": "string",
+          "const": "low"
+        }
+      ]
+    },
+    "ContractShape": {
+      "description": "A normalized signature, read from the syntax.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/ShapeKind"
+        },
+        "members": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Member"
+          }
+        },
+        "params": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Param"
+          }
+        },
+        "returns": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "typeParams": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "typeText": {
+          "description": "Normalized type text for aliases, consts and heritage clauses.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "unverified": {
+          "description": "True when part of the shape is inferred rather than written.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "kind",
+        "unverified"
+      ]
+    },
+    "Edge": {
+      "type": "object",
+      "properties": {
+        "confidence": {
+          "$ref": "#/$defs/Confidence"
+        },
+        "from": {
+          "description": "A symbol id, or a module id (`<component>:<path>`) for code at the\ntop level of a file.",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/EdgeKind"
+        },
+        "sites": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Site"
+          }
+        },
+        "to": {
+          "description": "A symbol, module, `event:`, `db-table:`, `external:`, `config-key:` or\n`npm:` id.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "from",
+        "to",
+        "kind",
+        "confidence",
+        "sites"
+      ]
+    },
+    "EdgeKind": {
+      "type": "string",
+      "enum": [
+        "imports",
+        "calls",
+        "references-type",
+        "reads",
+        "writes",
+        "publishes",
+        "consumes",
+        "calls-external",
+        "reads-config"
+      ]
+    },
+    "ExternalSpec": {
+      "type": "object",
+      "properties": {
+        "category": {
+          "type": "string"
+        },
+        "egress": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "hosts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "vendor": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "vendor",
+        "category"
+      ]
+    },
+    "FactSite": {
+      "type": "object",
+      "properties": {
+        "line": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "text": {
+          "description": "Normalized source text of the fact.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "text",
+        "line"
+      ]
+    },
+    "Loc": {
+      "type": "object",
+      "properties": {
+        "end": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "file": {
+          "type": "string"
+        },
+        "signatureEnd": {
+          "description": "Last line of the signature, when the symbol has a separate body.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "start": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "file",
+        "start",
+        "end"
+      ]
+    },
+    "MapDiagnostic": {
+      "type": "object",
+      "properties": {
+        "confidence": {
+          "$ref": "#/$defs/Confidence"
+        },
+        "file": {
+          "type": "string"
+        },
+        "kind": {
+          "description": "`unresolved-import`, `dynamic-import`, `dynamic-access`,\n`dynamic-event-name`, `parse-error`, `no-entrypoint`, …",
+          "type": "string"
+        },
+        "line": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "file",
+        "line",
+        "message",
+        "confidence"
+      ]
+    },
+    "Member": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/MemberKind"
+        },
+        "line": {
+          "description": "Line of the member in its file.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "name": {
+          "type": "string"
+        },
+        "optional": {
+          "type": "boolean"
+        },
+        "readonly": {
+          "type": "boolean"
+        },
+        "typeText": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "kind",
+        "optional",
+        "line"
+      ]
+    },
+    "MemberKind": {
+      "type": "string",
+      "enum": [
+        "property",
+        "method",
+        "constructor",
+        "enum-member"
+      ]
+    },
+    "Param": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "optional": {
+          "type": "boolean"
+        },
+        "rest": {
+          "type": "boolean"
+        },
+        "typeText": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "optional"
+      ]
+    },
+    "PartialMap": {
+      "description": "The part of the map one provider contributes.",
+      "type": "object",
+      "properties": {
+        "diagnostics": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/MapDiagnostic"
+          }
+        },
+        "edges": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Edge"
+          }
+        },
+        "files": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/SourceFile"
+          }
+        },
+        "symbols": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/SymbolNode"
+          }
+        },
+        "tests": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/TestNode"
+          }
+        }
+      }
+    },
+    "PluginKind": {
+      "oneOf": [
+        {
+          "description": "Finds components.",
+          "type": "string",
+          "const": "discovery"
+        },
+        {
+          "description": "Turns the files it handles into symbols, references and tests.",
+          "type": "string",
+          "const": "language"
+        },
+        {
+          "description": "Adds facts to the map built so far.",
+          "type": "string",
+          "const": "facts"
+        }
+      ]
+    },
+    "PluginRequest": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/PluginKind"
+        },
+        "map": {
+          "description": "For `facts`: the map built so far.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PartialMap"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "protocol": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "workspace": {
+          "description": "For `language`, `files` lists only the files this plugin handles;\nevery file under `root` can still be read.",
+          "$ref": "#/$defs/Workspace"
+        }
+      },
+      "required": [
+        "protocol",
+        "kind",
+        "workspace"
+      ]
+    },
+    "PluginResponse": {
+      "type": "object",
+      "properties": {
+        "components": {
+          "description": "For `discovery`.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Component"
+          }
+        },
+        "map": {
+          "description": "For `language` and `facts`.",
+          "$ref": "#/$defs/PartialMap",
+          "default": {
+            "diagnostics": [],
+            "edges": [],
+            "files": [],
+            "symbols": [],
+            "tests": []
+          }
+        },
+        "protocol": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "version": {
+          "description": "The plugin's own version, recorded in the map's `builtWith`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "protocol"
+      ]
+    },
+    "ResolvedExternal": {
+      "type": "object",
+      "properties": {
+        "declared": {
+          "type": "boolean"
+        },
+        "slug": {
+          "type": "string"
+        },
+        "spec": {
+          "$ref": "#/$defs/ExternalSpec"
+        }
+      },
+      "required": [
+        "slug",
+        "spec",
+        "declared"
+      ]
+    },
+    "ResolvedExtractors": {
+      "description": "The extractor settings handed to language adapters, with defaults and the\nbuilt-in registry already merged in.",
+      "type": "object",
+      "properties": {
+        "externals": {
+          "description": "npm package name → service.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ResolvedExternal"
+          }
+        },
+        "packs": {
+          "description": "Framework packs (YAML texts) from onus.yaml and the plugins file,\non top of the built-in ones.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "prismaClients": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "publishPatterns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "subscribePatterns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "publishPatterns",
+        "subscribePatterns",
+        "externals",
+        "prismaClients"
+      ]
+    },
+    "ShapeKind": {
+      "type": "string",
+      "enum": [
+        "function",
+        "object",
+        "enum",
+        "alias",
+        "class",
+        "value"
+      ]
+    },
+    "Site": {
+      "type": "object",
+      "properties": {
+        "file": {
+          "type": "string"
+        },
+        "line": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "file",
+        "line"
+      ]
+    },
+    "SourceFile": {
+      "type": "object",
+      "properties": {
+        "componentId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "contentHash": {
+          "description": "Hash of the syntax tokens with comments, formatting and import\nspecifiers removed. Equal hashes mean \"same code, maybe reformatted\".",
+          "type": "string"
+        },
+        "imports": {
+          "description": "Resolved targets of the file's imports, in source order: a file path,\n`npm:<package>`, or `?<specifier>` when unresolved.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "isTest": {
+          "type": "boolean"
+        },
+        "language": {
+          "type": "string"
+        },
+        "lines": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "path": {
+          "description": "Path relative to the repository root, with `/` separators.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "language",
+        "isTest",
+        "lines",
+        "contentHash",
+        "imports"
+      ]
+    },
+    "SymbolKind": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "function",
+            "class",
+            "method",
+            "interface",
+            "type",
+            "enum",
+            "const",
+            "event",
+            "http-route",
+            "db-table",
+            "config-key"
+          ]
+        },
+        {
+          "description": "A top-level `let` or `var`.",
+          "type": "string",
+          "const": "variable"
+        }
+      ]
+    },
+    "SymbolNode": {
+      "type": "object",
+      "properties": {
+        "bodyFingerprint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "componentId": {
+          "description": "Absent for nodes shared by the whole repository (events, tables,\nconfig keys).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "facts": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BodyFacts"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "id": {
+          "description": "Stable id: `<component>:<path in component>#<qualified name>`, or\n`event:<name>`, `db-table:<model>`, `config-key:<KEY>`.",
+          "type": "string"
+        },
+        "invariants": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "kind": {
+          "$ref": "#/$defs/SymbolKind"
+        },
+        "literal": {
+          "description": "The value of a `const` or variable initialized with a string, number\nor boolean literal (secrets redacted).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "loc": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Loc"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "shape": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContractShape"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "visibility": {
+          "$ref": "#/$defs/Visibility"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "name",
+        "visibility"
+      ]
+    },
+    "TestCase": {
+      "type": "object",
+      "properties": {
+        "assertions": {
+          "description": "`expect(...)`/`assert(...)` calls, with their normalized text.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FactSite"
+          }
+        },
+        "endLine": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "expected": {
+          "description": "Literal expected values, as `matcher:value`.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FactSite"
+          }
+        },
+        "fingerprint": {
+          "type": "string"
+        },
+        "line": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "markers": {
+          "description": "`skip`, `only` or `todo`, including markers inherited from a\n`describe` block.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "name": {
+          "description": "Full name, with enclosing `describe` blocks joined by ` › `.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "line",
+        "endLine",
+        "assertions",
+        "fingerprint"
+      ]
+    },
+    "TestNode": {
+      "type": "object",
+      "properties": {
+        "cases": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TestCase"
+          }
+        },
+        "componentId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "exercises": {
+          "description": "Symbols referenced from the test file.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "file": {
+          "type": "string"
+        },
+        "id": {
+          "description": "`<component>:<path in component>`.",
+          "type": "string"
+        },
+        "literals": {
+          "description": "String literals used in the file, to spot source code that\nspecial-cases test inputs. Secrets are redacted.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "file",
+        "cases",
+        "exercises"
+      ]
+    },
+    "Visibility": {
+      "type": "string",
+      "enum": [
+        "public",
+        "internal"
+      ]
+    },
+    "Workspace": {
+      "description": "Everything a provider needs to know about the tree it analyzes.",
+      "type": "object",
+      "properties": {
+        "components": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Component"
+          }
+        },
+        "extractors": {
+          "$ref": "#/$defs/ResolvedExtractors"
+        },
+        "files": {
+          "description": "Files to analyze, sorted by path. Paths are relative with `/`.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WorkspaceFile"
+          }
+        },
+        "packages": {
+          "description": "Workspace packages by name, so imports of `@shop/events` resolve to\nsource instead of third-party nodes.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/WorkspacePackage"
+          }
+        },
+        "root": {
+          "description": "Root of the tree. Providers read files below it and never write.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "root",
+        "files",
+        "components",
+        "packages",
+        "extractors"
+      ]
+    },
+    "WorkspaceFile": {
+      "type": "object",
+      "properties": {
+        "component": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "isTest": {
+          "type": "boolean"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "isTest"
+      ]
+    },
+    "WorkspacePackage": {
+      "type": "object",
+      "properties": {
+        "component": {
+          "type": "string"
+        },
+        "dir": {
+          "description": "Directory of the package, relative to the root.",
+          "type": "string"
+        },
+        "entrypoints": {
+          "description": "Source entrypoints, relative to the root.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "component",
+        "dir",
+        "entrypoints"
+      ]
+    }
+  }
+}

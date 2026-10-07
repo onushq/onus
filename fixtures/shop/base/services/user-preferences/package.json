@@ -1,0 +1,14 @@
+{
+  "name": "@shop/user-preferences",
+  "version": "0.1.0",
+  "private": true,
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.20.0"
+  }
+}

@@ -1,0 +1,1 @@
+A one-character boundary change in billing (`>` becomes `>=` on the discount threshold, so orders of exactly $100.00 now get the discount), bundled with an unrelated internal refactor in orders that extracts a private `subtotalOf` helper.
