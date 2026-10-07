@@ -247,7 +247,11 @@ fn corpus() {
         let fails = failures(&case, &r);
         match (fails.is_empty(), case.open) {
             (true, false) => passed += 1,
-            (false, true) => open += 1,
+            // Naming a case shows why an open case still fails.
+            (false, true) if only.is_none() => open += 1,
+            (false, true) => {
+                problems.push(format!("{} (open):\n  {}", case.name, fails.join("\n  ")))
+            }
             (true, true) => {
                 problems.push(format!("{}: passes now; remove `status: open`", case.name))
             }

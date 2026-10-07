@@ -128,7 +128,7 @@ impl MapCache {
         scip: &[PathBuf],
     ) -> Result<MapCache> {
         let mut key = format!(
-            "onus map cache 2\nonus {}\ncommit {commit}\nconfig {}\ntrusted {} {}\nplugins {}\n",
+            "onus map cache 3\nonus {}\ncommit {commit}\nconfig {}\ntrusted {} {}\nplugins {}\n",
             env!("CARGO_PKG_VERSION"),
             config.map(|c| c.hash.as_str()).unwrap_or("none"),
             providers.trusted,

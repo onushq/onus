@@ -21,4 +21,5 @@ no <subkind> [title~"text"]                       # no such row; `*` = any subki
 attention <n>                                     # exactly n rows need a person
 ```
 
-Run one case with `ONUS_CORPUS_CASE=<part of its name> cargo test -p onus-cli --test corpus`.
+Run one case, and see why it fails even when it is open, with
+`ONUS_CORPUS_CASE=<part of its name> cargo test -p onus-cli --test corpus`.

@@ -1,7 +1,6 @@
 A shared package exposes subpaths whose `exports` point at build output, and
 another package imports one of them. A change in the shared package is used
 by that package; the report must not say nothing depends on it.
-status: open
 
 === both package.json
 { "name": "r", "private": true, "workspaces": ["packages/*"] }
@@ -40,7 +39,7 @@ import { isGroupable } from 'r-shared/utils';
 
 export const groupable = ['createdBy', 'name'].filter(isGroupable);
 === expect
-row contract-param-added-optional title~"`isGroupable`" why~"used in 1 file across 1 component"
+row contract-param-added-optional title~"`isGroupable`" why~"Shared contract used in"
 row internal-changes title~"`shared`" why~"`front`"
 no * why~"no other component depends on it"
 no * why~"no other users"
