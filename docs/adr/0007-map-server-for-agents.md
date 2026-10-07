@@ -53,3 +53,11 @@ This changes what Phase 2 is for, not how the server works:
    - split large packages into components by module.
 4. The gate for Phase 2 becomes a repeat of this evaluation, with at least three runs per condition, on tasks where verification is the hard part (reviewing or extending an existing change). Onus must show a measurable gain in correctness to proceed.
 
+### Second evaluation and the role of MCP (2026-10-07)
+
+After `onus_check` was made precise, a second evaluation (3 runs per condition, [same document](../evaluation/2026-10-07-map-for-agents.md#second-evaluation-a-precise-onus_check)) gave a mixed result:
+- On Marketplace, quality went from 5.7 to 6.7: the checklist's "first use of `Effect.asVoid`; check it exists in `effect` 2.4.19" made two of three agents fix code that would have crashed.
+- On Twenty, quality went from 8.0 to 6.3: the checklist was empty, and the agents stopped sooner.
+
+Onus does not compete with agents or their harnesses. Users bring any agent, and Onus assesses the risk of each change and asks agents for evidence. The MCP server is therefore an **evidence channel**: `onus_check` returns verified facts and a checklist to answer, and says what it does not verify, so a clean result is never read as approval. The navigation tools remain experimental.
+

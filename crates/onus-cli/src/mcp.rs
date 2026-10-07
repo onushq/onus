@@ -290,7 +290,8 @@ impl ServerHandler for OnusMcp {
                  (never generated): where things are, what depends on what, which tests cover \
                  what, who owns it. The map follows the files of this worktree as they change. \
                  Ids look like `component:path#Name`; tools also accept a bare name or a file \
-                 path. Run onus_check before finishing a change.",
+                 path. Run onus_check before finishing a change and include its findings in your \
+                 summary as evidence; it reports facts, it does not approve the change.",
             )
     }
 }

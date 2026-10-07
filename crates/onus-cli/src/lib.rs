@@ -248,6 +248,10 @@ pub fn check_worktree(
         "base": report.base,
         "summary": report.summary,
         "checklist": checklist(&report),
+        // A clean check is evidence for a reviewer, not an approval.
+        "notVerified": "Onus reports what the change means and what it touches. It does not check \
+            logic, edge cases, or whether the code compiles or its tests pass: an empty checklist \
+            means only that none of the checked facts needs a follow-up.",
         "markdown": onus_report::to_markdown(&report, !head_map.rules.is_empty()),
     }))
 }
