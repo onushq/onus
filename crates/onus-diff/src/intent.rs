@@ -44,6 +44,18 @@ pub fn parse(text: &str) -> Result<Option<Intent>, IntentError> {
         .map_err(|e| IntentError::Invalid(e.to_string()))
 }
 
+/// Parses the `onus-intent` block of Markdown, such as a pull request body.
+/// Returns `None` when there is no block: the rest of the text is prose,
+/// never an intent, even when a line of it happens to look like YAML.
+pub fn parse_markdown(text: &str) -> Result<Option<Intent>, IntentError> {
+    match extract_block(text) {
+        Some(b) => serde_yaml_ng::from_str::<Intent>(&b)
+            .map(Some)
+            .map_err(|e| IntentError::Invalid(e.to_string())),
+        None => Ok(None),
+    }
+}
+
 fn looks_like_markdown(text: &str) -> bool {
     text.contains("```")
         || text
@@ -187,5 +199,13 @@ mod tests {
         assert_eq!(intent.touches, ["logger"]);
         assert_eq!(parse("# Title\n\nJust prose.\n").unwrap(), None);
         assert!(parse("summary: x\nunknown: 1\n").is_err());
+    }
+
+    #[test]
+    fn a_body_without_a_block_is_prose_even_when_it_looks_like_yaml() {
+        let body = "The first version of Onus: phase 1.\n\n- **Engine:** the `onus` CLI.\n";
+        assert_eq!(parse_markdown(body).unwrap(), None);
+        let body = "Intro: text\n\n```onus-intent\ntouches: [logger]\n```\n";
+        assert_eq!(parse_markdown(body).unwrap().unwrap().touches, ["logger"]);
     }
 }

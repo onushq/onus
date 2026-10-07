@@ -168,7 +168,15 @@ pub fn diff_dirs(base: &Path, head: &Path, opts: &DiffOptions) -> Result<Outcome
 pub fn read_intent(path: &Path) -> Result<Option<Intent>> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("cannot read intent file {}", path.display()))?;
-    Ok(onus_diff::intent::parse(&text)?)
+    let markdown = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "md" | "markdown" | "txt"));
+    if markdown {
+        Ok(onus_diff::intent::parse_markdown(&text)?)
+    } else {
+        Ok(onus_diff::intent::parse(&text)?)
+    }
 }
 
 /// Whether any `--fail-on` condition is met.

@@ -18,7 +18,7 @@ Or a YAML file with the same keys. Pass either to `--intent`:
     onus report --base main --head HEAD --intent pr-body.md
     onus diff old new --intent intent.yaml
 
-All keys are optional; unknown keys are an error. A Markdown file without an `onus-intent` block skips the check with a warning on stderr.
+All keys are optional; unknown keys are an error. A file ending in `.md`, `.markdown` or `.txt` is read as Markdown: only its `onus-intent` block counts, and without one the check is skipped with a warning on stderr. Other files are read as YAML, unless they look like Markdown and have no block.
 
 ## What each key covers
 
