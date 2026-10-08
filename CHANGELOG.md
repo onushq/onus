@@ -4,6 +4,8 @@ All notable changes to Onus are recorded here. The format follows [Keep a Change
 
 ## Unreleased
 
+## [0.4.0] - 2026-10-08
+
 M7 tuning, from an audit of reports on 20 large real pull requests: fewer wrong facts, flags on the changes that need a person, less noise, faster reports. Audited again afterwards, rows with wrong facts went from 7% to under 1% and the reviewers' usefulness score from 2.1 to 3.0 out of 5 ([evaluation](docs/evaluation/2026-10-08-m7-replay.md)). A regression corpus (`crates/onus-cli/tests/corpus`) reproduces each kind of mistake with invented code and keeps it fixed.
 
 - **Fewer false alarms:**
