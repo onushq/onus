@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
 use onus_core::{Lane, LanesConfig, SemanticReport};
 use onus_lanes::classify::{Classification, classify};
-use onus_lanes::judge::{Verdict, judge};
+use onus_lanes::judge::{Verdict, judge_with};
 use onus_lanes::outcomes::{self, Outcome};
 use onus_lanes::submission::{AgentSetup, Approval, ScopeUsed, Submission};
 
@@ -341,7 +341,9 @@ pub fn judge_cmd(args: LaneArgs) -> Result<i32> {
     let run = |repo: &Path, commit: &str, image: &str, setup: Option<&str>, command: &str| {
         onus_doors::runner::run(repo, commit, image, setup, command)
     };
-    let j = judge(&sub, &c, &config, &args.repo, &run);
+    // Runs recorded in an environment are checked against their manifests.
+    let store = onus_env::store::Store::for_repo(&args.repo).ok();
+    let j = judge_with(&sub, &c, &config, &args.repo, &run, store.as_ref());
     let out = serde_json::json!({ "classification": c, "judgment": j });
     println!("{}", serde_json::to_string_pretty(&out)?);
     Ok(match j.verdict {

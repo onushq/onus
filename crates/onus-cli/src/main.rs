@@ -341,6 +341,17 @@ Examples:
     /// Run a test command at a commit in a throwaway container with no network
     /// (the test runner escalations use to reproduce failing tests).
     RunTest(doors::RunTestArgs),
+    /// Environments: containers built from a commit that run commands and
+    /// record evidence (create, run, list, destroy).
+    Env {
+        #[command(subcommand)]
+        cmd: envs::EnvCmd,
+    },
+    /// The evidence store: manifests and artifacts of runs in environments.
+    Evidence {
+        #[command(subcommand)]
+        cmd: envs::EvidenceCmd,
+    },
     /// Bundle a change for review: report, changed files, evidence, scope and agent setup.
     Submit(lanes::SubmitArgs),
     /// Which lane a change takes (auto-merge, judge, human, blocked), and why.
@@ -520,6 +531,7 @@ fn backend(root: &std::path::Path, no_server: bool) -> std::sync::Arc<dyn onus_c
 }
 
 mod doors;
+mod envs;
 mod lanes;
 
 fn main() -> ExitCode {
@@ -716,6 +728,8 @@ fn run(cli: Cli) -> Result<i32> {
         Cmd::Outcomes { cmd } => lanes::outcomes_cmd(cmd),
         Cmd::Escalation { cmd } => doors::escalation(cmd),
         Cmd::RunTest(args) => doors::run_test(args),
+        Cmd::Env { cmd } => envs::env_cmd(cmd),
+        Cmd::Evidence { cmd } => envs::evidence_cmd(cmd),
         Cmd::Help { topic } => help(topic.as_deref()),
         Cmd::Mcp {
             repo,

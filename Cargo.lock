@@ -1364,6 +1364,7 @@ dependencies = [
  "onus-core",
  "onus-diff",
  "onus-doors",
+ "onus-env",
  "onus-index",
  "onus-lanes",
  "onus-map",
@@ -1424,8 +1425,23 @@ dependencies = [
  "serde_json",
  "serde_yaml_ng",
  "sha2 0.11.0",
+ "tar",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "onus-env"
+version = "0.7.0"
+dependencies = [
+ "anyhow",
+ "onus-core",
+ "onus-doors",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
 ]
 
 [[package]]
@@ -1447,6 +1463,7 @@ dependencies = [
  "anyhow",
  "onus-core",
  "onus-doors",
+ "onus-env",
  "serde",
  "serde_json",
  "sha2 0.11.0",
