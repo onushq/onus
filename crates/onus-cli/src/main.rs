@@ -294,6 +294,26 @@ Examples:
         #[arg(long, default_value_t = 1800, value_name = "SECONDS")]
         idle: u64,
     },
+    /// Task tokens: keys, minting from a task plan, attenuation, inspection.
+    Token {
+        #[command(subcommand)]
+        cmd: doors::TokenCmd,
+    },
+    /// Scopes for task plans.
+    Scope {
+        #[command(subcommand)]
+        cmd: doors::ScopeCmd,
+    },
+    /// The git gateway that enforces a task's write scope.
+    Gateway {
+        #[command(subcommand)]
+        cmd: doors::GatewayCmd,
+    },
+    /// Check an audit log's hash chain.
+    Audit {
+        /// The audit log (JSONL).
+        log: PathBuf,
+    },
     /// Show help for a command, or a topic from the guide.
     #[command(after_long_help = "\
 Examples:
@@ -454,6 +474,8 @@ fn backend(root: &std::path::Path, no_server: bool) -> std::sync::Arc<dyn onus_c
     let _ = (root, no_server);
     std::sync::Arc::new(onus_cli::daemon::Server::new())
 }
+
+mod doors;
 
 fn main() -> ExitCode {
     let cli = match Cli::try_parse() {
@@ -626,6 +648,10 @@ fn run(cli: Cli) -> Result<i32> {
             eprintln!("onus: wrote {}", path.display());
             Ok(0)
         }
+        Cmd::Token { cmd } => doors::token(cmd),
+        Cmd::Scope { cmd } => doors::scope(cmd),
+        Cmd::Gateway { cmd } => doors::gateway(cmd),
+        Cmd::Audit { log } => doors::audit_verify(&log),
         Cmd::Help { topic } => help(topic.as_deref()),
         Cmd::Mcp {
             repo,
