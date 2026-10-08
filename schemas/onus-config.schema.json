@@ -25,6 +25,17 @@
         "$ref": "#/$defs/LabelConfig"
       }
     },
+    "lanes": {
+      "description": "Risk lanes: what happens to a change after it is reported\n(`onus help lanes`).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/LanesConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "rules": {
       "type": "array",
       "items": {
@@ -54,6 +65,34 @@
     "version"
   ],
   "$defs": {
+    "CheckCommand": {
+      "description": "A command run in a container against the change.",
+      "type": "object",
+      "properties": {
+        "command": {
+          "description": "The command, run with `sh -c` and no network.",
+          "type": "string"
+        },
+        "image": {
+          "description": "The container image. Default `node:22`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "setup": {
+          "description": "A setup command run first, with network (such as `npm ci`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "command"
+      ]
+    },
     "ComponentConfig": {
       "type": "object",
       "properties": {
@@ -225,6 +264,130 @@
         "sensitivity"
       ]
     },
+    "Lane": {
+      "description": "What happens to a change, from least to most scrutiny.",
+      "oneOf": [
+        {
+          "description": "Merged once required checks pass.",
+          "type": "string",
+          "const": "auto-merge"
+        },
+        {
+          "description": "Verified by the judge (`onus judge`), then merged or escalated.",
+          "type": "string",
+          "const": "judge"
+        },
+        {
+          "description": "A person reviews it.",
+          "type": "string",
+          "const": "human"
+        },
+        {
+          "description": "It may not merge as it is.",
+          "type": "string",
+          "const": "blocked"
+        }
+      ]
+    },
+    "LaneRule": {
+      "type": "object",
+      "properties": {
+        "components": {
+          "description": "Components; empty matches any.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "kinds": {
+          "description": "Row kinds (`internal`, `additive`, `config`, …); empty matches any.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "labels": {
+          "description": "Sensitivity labels; empty matches any.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "lane": {
+          "$ref": "#/$defs/Lane"
+        },
+        "match": {
+          "description": "`any` (default): the rule applies when any row matches. `every`: when\nevery row matches (and the change has rows).",
+          "$ref": "#/$defs/RuleMatch",
+          "default": "any"
+        },
+        "subkinds": {
+          "description": "Row subkinds (`migration-changed`, …); empty matches any.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "lane"
+      ]
+    },
+    "LanesConfig": {
+      "type": "object",
+      "properties": {
+        "auditRate": {
+          "description": "The share of `auto-merge` changes sent to a person anyway, chosen by\na hash of the head commit (0 to 1). Default 0.05.",
+          "type": "number",
+          "format": "double",
+          "default": 0.05
+        },
+        "default": {
+          "description": "The lane of a change no rule speaks about. Default `judge`.",
+          "$ref": "#/$defs/Lane",
+          "default": "judge"
+        },
+        "heldOut": {
+          "description": "Checks the author never saw, run by the judge in a container.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CheckCommand"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "minRecord": {
+          "description": "Changes an agent setup needs on record before it may use the\n`auto-merge` lane. Default 10.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 10,
+          "minimum": 0
+        },
+        "rules": {
+          "description": "Rules, in any order: a rule with `match: every` can set a lower\nstarting lane when every row of the change matches it; every other\nrule and the hard floors only move a change up.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/LaneRule"
+          }
+        },
+        "taste": {
+          "description": "An optional reviewer command for taste, run last by the judge. It can\nraise concerns that send the change to a person, never approve it.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TasteCommand"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
     "OneOrMany": {
       "anyOf": [
         {
@@ -280,12 +443,36 @@
         "to"
       ]
     },
+    "RuleMatch": {
+      "type": "string",
+      "enum": [
+        "any",
+        "every"
+      ]
+    },
     "Sensitivity": {
       "type": "string",
       "enum": [
         "low",
         "medium",
         "high"
+      ]
+    },
+    "TasteCommand": {
+      "description": "A reviewer program run on the operator's machine: it gets the\nsubmission (without the author's reasoning) as JSON on stdin and prints\none concern per line starting with `concern:`.",
+      "type": "object",
+      "properties": {
+        "command": {
+          "description": "The program and its arguments.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "command"
       ]
     },
     "TestsConfig": {

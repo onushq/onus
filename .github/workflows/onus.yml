@@ -27,6 +27,7 @@ jobs:
         with:
           onus-path: target/release/onus
           fail-on: secrets
+          lanes: true
       - uses: actions/upload-artifact@v7
         if: always() && steps.onus.outputs.report
         with:

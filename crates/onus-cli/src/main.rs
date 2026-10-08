@@ -332,6 +332,18 @@ Examples:
     /// Run a test command at a commit in a throwaway container with no network
     /// (the test runner escalations use to reproduce failing tests).
     RunTest(doors::RunTestArgs),
+    /// Bundle a change for review: report, changed files, evidence, scope and agent setup.
+    Submit(lanes::SubmitArgs),
+    /// Which lane a change takes (auto-merge, judge, human, blocked), and why.
+    Classify(lanes::LaneArgs),
+    /// Verify a submission: re-run evidence, intent, contracts, tests, held-out
+    /// checks, then taste. Exit 0 approve, 2 reject, 3 escalate to a person.
+    Judge(lanes::LaneArgs),
+    /// Record outcomes of changes and summarize them per agent setup and judge.
+    Outcomes {
+        #[command(subcommand)]
+        cmd: lanes::OutcomesCmd,
+    },
     /// Check an audit log's hash chain.
     Audit {
         /// The audit log (JSONL).
@@ -499,6 +511,7 @@ fn backend(root: &std::path::Path, no_server: bool) -> std::sync::Arc<dyn onus_c
 }
 
 mod doors;
+mod lanes;
 
 fn main() -> ExitCode {
     let cli = match Cli::try_parse() {
@@ -676,6 +689,10 @@ fn run(cli: Cli) -> Result<i32> {
         Cmd::Gateway { cmd } => doors::gateway(cmd),
         Cmd::Audit { log } => doors::audit_verify(&log),
         Cmd::Escalate(args) => doors::escalate(args),
+        Cmd::Submit(args) => lanes::submit(args),
+        Cmd::Classify(args) => lanes::classify_cmd(args),
+        Cmd::Judge(args) => lanes::judge_cmd(args),
+        Cmd::Outcomes { cmd } => lanes::outcomes_cmd(cmd),
         Cmd::Escalation { cmd } => doors::escalation(cmd),
         Cmd::RunTest(args) => doors::run_test(args),
         Cmd::Help { topic } => help(topic.as_deref()),

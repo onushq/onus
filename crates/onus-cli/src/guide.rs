@@ -56,6 +56,11 @@ pub const TOPICS: &[Topic] = &[
         text: include_str!("../guide/scopes.md"),
     },
     Topic {
+        name: "lanes",
+        summary: "Risk lanes, change submissions, the verifying judge and outcome records",
+        text: include_str!("../guide/lanes.md"),
+    },
+    Topic {
         name: "plugins",
         summary: "New languages and frameworks, SCIP indexes, language servers, trusted mode",
         text: include_str!("../guide/plugins.md"),

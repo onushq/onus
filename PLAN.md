@@ -418,6 +418,8 @@ Runtime traces, running tests, LLM-written report rows, GitHub App hosting, lang
 
 ### Phase 4: Risk lanes and the verifying judge
 
+**Status (2026-10-08): done** ([ADR 0009](docs/adr/0009-risk-lanes-and-the-judge.md), `onus help lanes`). Change submissions (`onus submit`), a rules-first classifier with hard floors, track records and random audits (`onus classify`, `lanes:` in onus.yaml), the verifying judge (`onus judge`: evidence re-run in containers, intent, contracts, tests, held-out checks, optional taste that can only escalate), GitHub integration in the action (`lanes`, `apply-lane`, `auto-merge`), and outcome records with the gate's metrics (`onus outcomes`: audit miss rate and human-lane share per agent setup and judge configuration). **Gate:** measured from outcome records once lanes are used on real pull requests; the miss-rate threshold is yours to set.
+
 - **Change application (`change.submit`):** contains the intent, the semantic report, the evidence, the scope used, escalations granted, and the agent setup (tool + model + config + team).
 - **Classifier, rules first:** a declarative policy in `onus.yaml` decides auto-merge, judge, human or blocked.
   - Hard floors: anything labeled `auth`, `payments` or `pii` goes to a human. Writes out of scope, secrets, and tests weakened without approval are blocked.

@@ -30,6 +30,144 @@ pub struct OnusConfig {
     /// committed secrets.
     #[serde(default, rename = "testData", skip_serializing_if = "Vec::is_empty")]
     pub test_data: Vec<String>,
+    /// Risk lanes: what happens to a change after it is reported
+    /// (`onus help lanes`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lanes: Option<LanesConfig>,
+}
+
+/// What happens to a change, from least to most scrutiny.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum Lane {
+    /// Merged once required checks pass.
+    AutoMerge,
+    /// Verified by the judge (`onus judge`), then merged or escalated.
+    Judge,
+    /// A person reviews it.
+    Human,
+    /// It may not merge as it is.
+    Blocked,
+}
+
+impl Lane {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Lane::AutoMerge => "auto-merge",
+            Lane::Judge => "judge",
+            Lane::Human => "human",
+            Lane::Blocked => "blocked",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct LanesConfig {
+    /// The lane of a change no rule speaks about. Default `judge`.
+    #[serde(default = "default_lane")]
+    pub default: Lane,
+    /// Rules, in any order: a rule with `match: every` can set a lower
+    /// starting lane when every row of the change matches it; every other
+    /// rule and the hard floors only move a change up.
+    #[serde(default)]
+    pub rules: Vec<LaneRule>,
+    /// The share of `auto-merge` changes sent to a person anyway, chosen by
+    /// a hash of the head commit (0 to 1). Default 0.05.
+    #[serde(default = "default_audit_rate")]
+    pub audit_rate: f64,
+    /// Changes an agent setup needs on record before it may use the
+    /// `auto-merge` lane. Default 10.
+    #[serde(default = "default_min_record")]
+    pub min_record: u32,
+    /// Checks the author never saw, run by the judge in a container.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_out: Option<CheckCommand>,
+    /// An optional reviewer command for taste, run last by the judge. It can
+    /// raise concerns that send the change to a person, never approve it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub taste: Option<TasteCommand>,
+}
+
+fn default_lane() -> Lane {
+    Lane::Judge
+}
+
+fn default_audit_rate() -> f64 {
+    0.05
+}
+
+fn default_min_record() -> u32 {
+    10
+}
+
+impl Default for LanesConfig {
+    fn default() -> Self {
+        LanesConfig {
+            default: default_lane(),
+            rules: vec![],
+            audit_rate: default_audit_rate(),
+            min_record: default_min_record(),
+            held_out: None,
+            taste: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct LaneRule {
+    pub lane: Lane,
+    /// `any` (default): the rule applies when any row matches. `every`: when
+    /// every row matches (and the change has rows).
+    #[serde(default, rename = "match")]
+    pub match_: RuleMatch,
+    /// Row kinds (`internal`, `additive`, `config`, …); empty matches any.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kinds: Vec<String>,
+    /// Row subkinds (`migration-changed`, …); empty matches any.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subkinds: Vec<String>,
+    /// Components; empty matches any.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub components: Vec<String>,
+    /// Sensitivity labels; empty matches any.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum RuleMatch {
+    #[default]
+    Any,
+    Every,
+}
+
+/// A command run in a container against the change.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CheckCommand {
+    /// The command, run with `sh -c` and no network.
+    pub command: String,
+    /// The container image. Default `node:22`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    /// A setup command run first, with network (such as `npm ci`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup: Option<String>,
+}
+
+/// A reviewer program run on the operator's machine: it gets the
+/// submission (without the author's reasoning) as JSON on stdin and prints
+/// one concern per line starting with `concern:`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TasteCommand {
+    /// The program and its arguments.
+    pub command: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
