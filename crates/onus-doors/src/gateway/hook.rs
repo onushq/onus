@@ -119,6 +119,16 @@ pub fn check_push(gw: &Gateway, state: &TaskState, updates: &[Update]) -> Result
                     problems.push(format!("`{}` is outside your write scope", ch.path));
                     continue;
                 }
+                // Guards come from the token's signed first block only, so
+                // no attenuation can remove them.
+                let guarded = token.rights.iter().any(|r| r.allows(Kind::Guard, &ch.path));
+                if guarded && !can(Kind::Unlock, &ch.path) {
+                    problems.push(format!(
+                        "`{}` declares a contract; changing it needs a granted escalation first",
+                        ch.path
+                    ));
+                    continue;
+                }
                 let lower = ch.path.to_lowercase();
                 if let Some(other) = by_lower
                     .get(&lower)
@@ -150,6 +160,16 @@ pub fn refusal_message(state: &TaskState, problems: &[String]) -> String {
         "Your write scope: {}\n",
         list(state.scope.of(Kind::Write))
     ));
+    if let Some(path) = problems.iter().find_map(|p| {
+        let rest = p.strip_prefix('`')?;
+        let (path, tail) = rest.split_once('`')?;
+        tail.contains("declares a contract").then_some(path)
+    }) {
+        out.push_str(&format!(
+            "To change the contract, ask a person with evidence:\n  onus escalate --task {} --kind permission --scope unlock:path:{path} --evidence failing-test:<test file> --reason \"…\"\n",
+            state.task
+        ));
+    }
     if let Some(path) = problems.iter().find_map(|p| {
         let rest = p.strip_prefix('`')?;
         let (path, tail) = rest.split_once('`')?;

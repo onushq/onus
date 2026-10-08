@@ -39,6 +39,17 @@ pub struct Plan {
     pub refs: Vec<String>,
     #[serde(default)]
     pub ttl: Option<String>,
+    /// Components the task writes (`notifications`), or only their internal
+    /// files (`notifications.internal`): files that declare no public symbol.
+    #[serde(default, rename = "writeComponents")]
+    pub write_components: Vec<String>,
+    /// Declared contracts (onus.yaml `contracts:`) whose files the task reads.
+    #[serde(default, rename = "readContracts")]
+    pub read_contracts: Vec<String>,
+    /// Contracts (`contract:<name glob>`) whose files need a granted
+    /// escalation before they change, even when writable.
+    #[serde(default, rename = "escalateBefore")]
+    pub escalate_before: Vec<String>,
 }
 
 impl Plan {
@@ -52,8 +63,10 @@ impl Plan {
         {
             bail!("the task id must be letters, digits, `-`, `_` or `.`");
         }
-        if plan.writes.is_empty() {
-            bail!("a plan lists the paths the task writes (`writes`)");
+        if plan.writes.is_empty() && plan.write_components.is_empty() {
+            bail!(
+                "a plan lists the paths or components the task writes (`writes`, `writeComponents`)"
+            );
         }
         Ok(plan)
     }
@@ -105,9 +118,83 @@ impl Plan {
     }
 
     pub fn grant(&self, now: u64) -> Result<Grant> {
+        if self.needs_map() {
+            bail!("the plan names components or contracts; mint it with the repository's map");
+        }
         Ok(Grant {
             task: self.task.clone(),
             rights: self.rights()?,
+            expires: now + self.ttl_seconds()?,
+        })
+    }
+
+    /// Whether the plan names components or contracts, which only the map
+    /// can turn into paths.
+    pub fn needs_map(&self) -> bool {
+        !self.write_components.is_empty()
+            || !self.read_contracts.is_empty()
+            || !self.escalate_before.is_empty()
+    }
+
+    /// The plan's rights with components and contracts resolved through the
+    /// map: the files they cover today become path rights.
+    pub fn grant_with_map(
+        &self,
+        now: u64,
+        map: &CodebaseMap,
+        contracts: &std::collections::BTreeMap<String, String>,
+    ) -> Result<Grant> {
+        let mut rights = self.rights()?;
+        let public_files: BTreeSet<&str> = map
+            .symbols
+            .iter()
+            .filter(|s| s.visibility == onus_core::Visibility::Public)
+            .filter_map(|s| s.loc.as_ref().map(|l| l.file.as_str()))
+            .collect();
+        for entry in &self.write_components {
+            let (component, internal) = match entry.strip_suffix(".internal") {
+                Some(c) => (c, true),
+                None => (entry.as_str(), false),
+            };
+            if !map.components.iter().any(|c| c.id == component) {
+                bail!("`{component}` is not a component of this repository");
+            }
+            let files: Vec<&str> = map
+                .files
+                .iter()
+                .filter(|f| f.component_id.as_deref() == Some(component))
+                .map(|f| f.path.as_str())
+                .filter(|p| !internal || !public_files.contains(p))
+                .collect();
+            for f in files {
+                rights.push(Right::new(Kind::Write, f.to_string()));
+            }
+        }
+        let contract_file = |name: &str| -> Result<String> {
+            let symbol = contracts
+                .get(name)
+                .with_context(|| format!("`{name}` is not a contract declared in onus.yaml"))?;
+            map.symbols
+                .iter()
+                .find(|s| &s.id == symbol)
+                .and_then(|s| s.loc.as_ref().map(|l| l.file.clone()))
+                .with_context(|| format!("the symbol of contract `{name}` is not in the map"))
+        };
+        for name in &self.read_contracts {
+            rights.push(Right::new(Kind::Read, contract_file(name)?));
+        }
+        for entry in &self.escalate_before {
+            let pattern = entry.strip_prefix("contract:").with_context(|| {
+                format!("`{entry}`: write escalateBefore entries as contract:<name glob>")
+            })?;
+            let re = regex::Regex::new(&glob_regex(pattern))?;
+            for name in contracts.keys().filter(|n| re.is_match(n)) {
+                rights.push(Right::new(Kind::Guard, contract_file(name)?));
+            }
+        }
+        Ok(Grant {
+            task: self.task.clone(),
+            rights,
             expires: now + self.ttl_seconds()?,
         })
     }
