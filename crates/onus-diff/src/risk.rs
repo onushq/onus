@@ -32,6 +32,12 @@ pub fn rows(ctx: &Ctx) -> Vec<SemanticChange> {
             rows.extend(migration_row(ctx, f));
             continue;
         }
+        if is_migration_metadata(&f.path) {
+            // Snapshots and journals a migration tool writes next to the
+            // migration it describes.
+            ctx.explain(&f.path);
+            continue;
+        }
         rows.extend(graphql_rows(ctx, f));
         rows.extend(route_rows(ctx, f));
     }
@@ -94,6 +100,14 @@ pub fn is_migration(path: &str) -> bool {
     migration_kind(path).is_some()
 }
 
+/// Files a migration tool writes beside its migrations: Drizzle's
+/// `drizzle/meta/*.json`, Prisma's `migration_lock.toml`.
+fn is_migration_metadata(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    (lower.contains("drizzle/meta/") && lower.ends_with(".json"))
+        || lower.ends_with("migrations/migration_lock.toml")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MigrationKind {
     /// One step of the migration history: runs once per database.
@@ -129,7 +143,9 @@ fn migration_kind(path: &str) -> Option<MigrationKind> {
     let in_folder = dirs
         .iter()
         .any(|d| matches!(*d, "migrations" | "migration" | "migrate"))
-        || lower.contains("alembic/versions/");
+        || lower.contains("alembic/versions/")
+        // Drizzle Kit writes `drizzle/0001_name.sql`.
+        || (parent == "drizzle" && name.ends_with(".sql"));
     if !in_folder {
         return None;
     }
@@ -170,6 +186,7 @@ fn migration_effects(text: &str) -> (Vec<String>, bool) {
             (format!(r"(?i)\bdelete\s+from\s+{id}(?:\s|;|$|`)"), "deletes rows from"),
             (format!(r"(?i)\btruncate\s+(?:table\s+)?{id}(?:\s|;|$|`)"), "empties table"),
             (format!(r"(?i)\bupdate\s+{id}\s+set\b"), "updates rows in"),
+            (format!(r"(?i)\bcreate\s+(?:unique\s+)?index\s+(?:concurrently\s+)?(?:if\s+not\s+exists\s+)?{id}\s+on\s+(?:only\s+)?{id}[\s(]"), "creates index"),
             (format!(r"(?i)\bgrant\s+[\w\s,]+?\s+on\s+(?:table\s+)?{id}(?:\s|;|$|`)"), "grants access to"),
             (format!(r"(?i)\brevoke\s+[\w\s,]+?\s+on\s+(?:table\s+)?{id}(?:\s|;|$|`)"), "revokes access to"),
             (r#"createTable\(\s*(?:new\s+Table\(\s*\{\s*name:\s*)?['"`]([\w.]+)['"`]"#.to_string(), "creates table"),
@@ -185,6 +202,13 @@ fn migration_effects(text: &str) -> (Vec<String>, bool) {
     for (re, what) in patterns {
         for c in re.captures_iter(text) {
             let target = match (c.get(1), c.get(2)) {
+                (Some(i), Some(table)) if *what == "creates index" => {
+                    found.push((
+                        c.get(0).map_or(0, |m| m.start()),
+                        format!("creates index `{}` on `{}`", i.as_str(), table.as_str()),
+                    ));
+                    continue;
+                }
                 (Some(t), Some(col)) => format!("{}.{}", t.as_str(), col.as_str()),
                 (Some(t), None) => t.as_str().to_string(),
                 _ => continue,
@@ -933,9 +957,12 @@ fn route_rows(ctx: &Ctx, f: &FileChange) -> Vec<SemanticChange> {
             comp.as_deref(),
             "HTTP route",
             format!(
-                "New HTTP {} {}",
+                "New HTTP {} {}{}",
                 if added.len() == 1 { "route" } else { "routes" },
-                join_some(&names, 5)
+                join_some(&names, 5),
+                comp.as_ref()
+                    .map(|c| format!(" in `{c}`"))
+                    .unwrap_or_default()
             ),
             why.join("; "),
             added
@@ -957,13 +984,16 @@ fn route_rows(ctx: &Ctx, f: &FileChange) -> Vec<SemanticChange> {
             comp.as_deref(),
             "HTTP route",
             format!(
-                "HTTP {} {} removed",
+                "HTTP {} {} removed{}",
                 if removed.len() == 1 {
                     "route"
                 } else {
                     "routes"
                 },
-                join_some(&names, 5)
+                join_some(&names, 5),
+                comp.as_ref()
+                    .map(|c| format!(" from `{c}`"))
+                    .unwrap_or_default()
             ),
             "Clients that still call it get errors; check that none do".into(),
             removed

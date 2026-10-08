@@ -44,6 +44,7 @@ Contracts are the public symbols of a component: everything reachable from its e
 | contract-param-added-optional | additive | An optional or rest parameter is added. |
 | contract-param-now-optional | additive | A required parameter becomes optional. |
 | contract-key-added | additive | A public value without a type annotation gains a key: its initializer is an object literal, or a call such as `Schema.struct({...})` or `z.object({...})`, and the object gains a key. |
+| contract-type-widened | additive | A field, method or result type changes only by gaining optional parameters or optional fields (`(p: string) => R` becomes `(p: string, opts?: O) => R`); callers and implementations keep compiling. |
 | contract-union-widened | additive | A union type accepts more members (`'A' \| 'B'` becomes `'A' \| 'B' \| 'C'`). |
 | export-added | additive | A symbol becomes public. Several new exports of one component are one row. |
 | contract-field-added-required | breaking | A required field or method is added to an interface or type, and an implementation outside this change was not updated. |
@@ -72,7 +73,7 @@ Renaming a parameter is not a contract change. When a contract declared in onus.
 |---|---|---|
 | rename | internal | A symbol is renamed with an identical body. The row counts the call sites and files updated. |
 | rename-incomplete | breaking | The same, but some references still use the old name. |
-| moved-between-components | internal or breaking | Symbols moved from one component to another: one row per pair of components ("17 symbols moved from `orders-core` to `billing-shared`"). Symbols edited while moving (same name and kind, most members in common) are included, and their contract changes are listed in the row; breaking when any of those changes is breaking. The row also says when the old component no longer exports them. |
+| moved-between-components | internal or breaking | Symbols moved from one component to another: one row per pair of components ("17 symbols moved from `orders-core` to `billing-shared`"). Exported symbols edited while moving (same name and kind, most members in common) are included, and their contract changes are listed in the row; breaking when any of those changes is breaking. The row also says when the old component no longer exports them. |
 | moved-incomplete | breaking | The same, but some references still point at the old place. |
 
 A symbol or file that moved inside one component without other changes, and a file whose only changes are formatting, comments or import paths, is not a row: it is listed under "Structure only".
@@ -81,7 +82,7 @@ A symbol or file that moved inside one component without other changes, and a fi
 
 | Subkind | Kind | When |
 |---|---|---|
-| new-dependency | dependency | A package.json gains a third-party package. Novelty `new-package:<name>` when no other component used it. |
+| new-dependency | dependency | A package.json gains a third-party package. Novelty `new-package:<name>` when no other component used it. A package new to the repository that several components add is one row, and new packages added to the same components share a row. |
 | dependency-version-changed | dependency | A declared version range changed. |
 | dependency-removed | dependency | A package is removed. |
 | lockfile-changed | dependency | A lockfile changed while no manifest dependency did. The row lists the installed versions that change (read from pnpm-lock.yaml, package-lock.json and yarn.lock), or says that none do when only patch hashes, checksums or resolution changed. |
@@ -91,7 +92,7 @@ Workspace packages (your own `@scope/...` packages) are not third-party: dependi
 
 | Subkind | Kind | When |
 |---|---|---|
-| external-api-first-use | internal | Production code uses an API of a package the repository already depends on (`Effect.retry` from `effect`) that no other code in the repository uses. The row names the version the repository pins, to check the API exists in it: code written from memory of another version often calls functions that are not there. Node's built-in modules are left out, and an API counts as used when the repository already reaches it another way (`RawData` imported by name, `WebSocket.RawData` through the default import). |
+| external-api-first-use | internal | Production code uses an API of a package the repository already depends on (`Effect.retry` from `effect`) that no other code in the repository uses. The row names the version the repository pins, to check the API exists in it: code written from memory of another version often calls functions that are not there. Node's built-in modules and framework virtual modules (`$app/…`, `$env/…`) are left out, and an API counts as used when the repository already reaches it another way (`RawData` imported by name, `WebSocket.RawData` through the default import). |
 
 ## Risk classes
 
@@ -99,7 +100,7 @@ Some changes need a person whatever their size or shape, so they get their own r
 
 | Subkind | Kind | When |
 |---|---|---|
-| migration-changed | config | A database migration is added, edited or removed: files in a `migrations`, `migration` or `migrate` folder, `*.migration.*`, Flyway `V1__name.sql`, Alembic versions, and versioned upgrade commands (`upgrade…/…command…<timestamp>…`). The row says what the migration does to stored data, read from its SQL and TypeORM calls (creates or drops tables, adds or drops columns, deletes or updates rows, grants), and mentions `ON DELETE CASCADE`. The `down` step is left out. Editing a migration that already ran is called out. |
+| migration-changed | config | A database migration is added, edited or removed: versioned files in a `migrations`, `migration` or `migrate` folder, `*.migration.*`, Flyway `V1__name.sql`, Drizzle `drizzle/0001_name.sql`, Alembic versions, and versioned upgrade commands (`upgrade…/…command…<timestamp>…`). The row says what the migration does to stored data, read from its SQL and TypeORM calls (creates or drops tables, adds or drops columns, creates indexes, deletes or updates rows, grants), and mentions `ON DELETE CASCADE`. The `down` step is left out. Editing a migration that already ran is called out. Snapshots and journals the tool writes beside it (`drizzle/meta/`, Prisma's `migration_lock.toml`) are part of the migration, and other code in a migrations folder gets a row only when it touches stored data. |
 | public-api-changed | security-sensitive, additive or breaking | GraphQL queries, mutations or subscriptions are added, removed or change their signature, in schema files (`.graphql`, `.gql`), `gql` templates or code-first resolvers (`@Query`, `@Mutation`, `@Subscription`). Operations that skip authentication (`@skipAuth`, `@Public()` and similar) get their own security-sensitive row. Always needs a person. |
 | route-added | security-sensitive | New HTTP routes: SvelteKit `+server` files, Next.js `route` files and `pages/api`, and controller decorators (`@Controller('users')` with `@Get(':id')`). The row names the methods and paths, and the `cache-control` header the route sets. |
 | route-removed | breaking | HTTP routes removed. |
@@ -148,7 +149,7 @@ Found in functions and methods that exist on both sides. Security-sensitive in a
 | condition-constant-changed | A comparison keeps its operator but compares against a different constant. |
 | constant-changed | A `const` or variable initialized with a literal changes value: `LOYALTY_RATE` from 0.1 to 0.15. |
 | guard-removed | A function has fewer early exits (`if (...) return/throw`) or fewer `throw`s. An edited guard is not a removed guard. |
-| await-removed | A function awaits less, and a specific await disappeared. |
+| await-removed | A function awaits less, and a specific await disappeared. Awaiting calls together (`await Promise.all([...])`) is not a removal. |
 | error-swallowed | A new empty `catch` block. |
 
 ## Secrets

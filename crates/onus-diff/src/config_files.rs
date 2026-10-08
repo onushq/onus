@@ -337,7 +337,7 @@ pub fn rows(ctx: &Ctx) -> Vec<SemanticChange> {
             };
             class
         };
-        if class.subkind == "lockfile-changed" && ctx.explained.borrow().contains(&f.path) {
+        if ctx.explained.borrow().contains(&f.path) {
             continue;
         }
         let component = ctx.component_of_path(&f.path);

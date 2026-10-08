@@ -1,6 +1,7 @@
-New code uses a Node built-in and a type the repository already uses through
-a namespace (`WebSocket.RawData` before, `RawData` now). Neither is a first
-use of a third-party API.
+New code uses a Node built-in, a type the repository already uses through
+a namespace (`WebSocket.RawData` before, `RawData` now) and a SvelteKit
+virtual module (`$app/environment`). None is a first use of a third-party
+API.
 
 === both package.json
 { "name": "live", "private": true, "main": "src/index.ts", "dependencies": { "ws": "8.18.0" } }
@@ -9,7 +10,10 @@ import { createServer } from 'node:http';
 import { existsSync } from 'fs';
 import WebSocket from 'ws';
 
+import { browser } from '$app/environment';
+
 export const server = createServer();
+export const onClient = browser;
 export const exists = existsSync('/tmp');
 
 export function size(data: WebSocket.RawData): number {
@@ -21,9 +25,11 @@ export { size } from './socket';
 import { STATUS_CODES } from 'node:http';
 import { readFileSync } from 'fs';
 import type { RawData } from 'ws';
+import { dev } from '$app/environment';
 
 export { size } from './socket';
 export const notFound = STATUS_CODES[404];
+export const isDev = dev;
 export const read = (p: string) => readFileSync(p, 'utf8');
 export function isText(data: RawData): boolean {
   return typeof data === 'string';

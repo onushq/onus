@@ -1,0 +1,31 @@
+Two pages each declare small private state with the same initial value: one
+page drops `dbLoading`, another adds `drawerOpen`. They share a body by
+coincidence; neither is a rename or a move of the other.
+
+=== both package.json
+{ "name": "r", "private": true, "workspaces": ["apps/*"] }
+=== both apps/admin/package.json
+{ "name": "@r/admin", "private": true, "main": "src/index.ts" }
+=== both apps/admin/src/index.ts
+export const admin = true;
+=== base apps/admin/src/tables.ts
+let dbLoading = false;
+export function loadingState(): boolean {
+  return dbLoading;
+}
+=== head apps/admin/src/tables.ts
+export function loadingState(): boolean {
+  return false;
+}
+=== base apps/admin/src/layout.ts
+export function layout(): string {
+  return 'main';
+}
+=== head apps/admin/src/layout.ts
+let drawerOpen = false;
+export function layout(): string {
+  return drawerOpen ? 'drawer' : 'main';
+}
+=== expect
+no rename
+no moved-between-components

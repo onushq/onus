@@ -363,3 +363,30 @@ fn both_trees_of_a_report_match_their_commits() {
         assert_eq!(read(base, "src/new.ts"), None);
     }
 }
+
+#[test]
+fn one_run_writes_both_formats() {
+    let s = Scenario::new("s8-secret");
+    let dir = tempfile::tempdir().unwrap();
+    let md_path = dir.path().join("report.md");
+    let out = onus()
+        .arg("diff")
+        .arg(s.base())
+        .arg(s.head())
+        .args(["--format", "json", "--fail-on", "secrets", "--markdown-out"])
+        .arg(&md_path)
+        .output()
+        .unwrap();
+    // The exit code still reflects --fail-on, and the Markdown is written.
+    assert_eq!(out.status.code(), Some(2));
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["summary"]["secrets"], 1);
+    let md = std::fs::read_to_string(&md_path).unwrap();
+    let alone = onus()
+        .arg("diff")
+        .arg(s.base())
+        .arg(s.head())
+        .output()
+        .unwrap();
+    assert_eq!(md, String::from_utf8(alone.stdout).unwrap());
+}

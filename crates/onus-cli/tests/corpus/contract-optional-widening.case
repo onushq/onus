@@ -1,0 +1,36 @@
+An interface method gains an optional parameter and its result gains an
+optional field, while an implementation in another package is untouched.
+Callers and the implementation keep compiling: the change is compatible.
+
+=== both package.json
+{ "name": "r", "private": true, "workspaces": ["packages/*"] }
+=== both packages/images/package.json
+{ "name": "@r/images", "private": true, "main": "src/index.ts" }
+=== both packages/app/package.json
+{ "name": "@r/app", "private": true, "main": "src/index.ts", "dependencies": { "@r/images": "*" } }
+=== base packages/images/src/index.ts
+export interface ImageProvider {
+  generateImage(prompt: string): Promise<{ bytes: string; mimeType: string }>;
+}
+=== head packages/images/src/index.ts
+export interface ImageOptions {
+  size?: number;
+}
+export interface ImageProvider {
+  generateImage(
+    prompt: string,
+    opts?: ImageOptions,
+  ): Promise<{ bytes: string; mimeType: string; seed?: number }>;
+}
+=== both packages/app/src/google.ts
+import type { ImageProvider } from '@r/images';
+
+export class GoogleImageProvider implements ImageProvider {
+  async generateImage(prompt: string) {
+    return { bytes: prompt, mimeType: 'image/png' };
+  }
+}
+=== expect
+row contract-type-widened ○ title~"`generateImage` gains an optional `opts` parameter" title~"optional field `seed`"
+no contract-changed-unverified
+attention 0

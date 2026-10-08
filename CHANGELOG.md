@@ -4,6 +4,19 @@ All notable changes to Onus are recorded here. The format follows [Keep a Change
 
 ## Unreleased
 
+## [0.4.1] - 2026-10-08
+
+- From replaying every commit of three SvelteKit and TypeScript monorepos:
+  - Private declarations that share a name or a small body in different files are no longer reported as renames or moves.
+  - A type that only gains optional parameters or fields is a compatible change (`contract-type-widened`).
+  - Drizzle migrations are recognized, with the indexes they create.
+  - Awaits merged into `Promise.all`, rewritten away or deduplicated are not "removed".
+  - Guards that moved with renamed variables are matched by their shape.
+  - A new package added to several components is one row.
+  - Route rows name their component, and first-use rows skip `$app` and `$env`.
+- `--markdown-out <file>` writes the Markdown report alongside the JSON, so the action runs each report once instead of twice.
+- The action's `plugins` input passes a plugins file (such as the Svelte plugin) without reading it from the analyzed repository.
+
 ## [0.4.0] - 2026-10-08
 
 M7 tuning, from an audit of reports on 20 large real pull requests: fewer wrong facts, flags on the changes that need a person, less noise, faster reports. Audited again afterwards, rows with wrong facts went from 7% to under 1% and the reviewers' usefulness score from 2.1 to 3.0 out of 5 ([evaluation](docs/evaluation/2026-10-08-m7-replay.md)). A regression corpus (`crates/onus-cli/tests/corpus`) reproduces each kind of mistake with invented code and keeps it fixed.

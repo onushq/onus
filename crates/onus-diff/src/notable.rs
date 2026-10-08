@@ -44,6 +44,7 @@ impl Gained {
             ] {
                 for f in multiset_minus(h, b) {
                     *into.entry(f.text.clone()).or_default() += 1;
+                    *into.entry(shape_key(&f.text)).or_default() += 1;
                 }
             }
         };
@@ -61,6 +62,13 @@ impl Gained {
         g
     }
 
+    /// Takes one occurrence of `text`, or of a fact of the same shape (a
+    /// guard moved into a class checks `this.baseDir` where it checked
+    /// `deps.env.STORAGE_DIR`), from `pool`, if there is one.
+    fn take_shaped(pool: &mut BTreeMap<String, u32>, text: &str) -> bool {
+        Gained::take(pool, text) || Gained::take(pool, &shape_key(text))
+    }
+
     /// Takes one occurrence of `text` from `pool`, if there is one.
     fn take(pool: &mut BTreeMap<String, u32>, text: &str) -> bool {
         match pool.get_mut(text) {
@@ -71,6 +79,23 @@ impl Gained {
             _ => false,
         }
     }
+}
+
+/// A fact's text with the plain values it works on replaced: the
+/// arguments that are names or member chains, and string literals.
+/// `!full.startsWith(normalize(deps.env.DIR))` → `~!full.startsWith(normalize(_))`.
+fn shape_key(text: &str) -> String {
+    static ARG: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let arg =
+        ARG.get_or_init(|| regex::Regex::new(r#"\(\s*[\w$.]+\s*\)|"[^"]*"|'[^']*'"#).unwrap());
+    let shaped = arg.replace_all(text, |c: &regex::Captures| {
+        if c[0].starts_with('(') {
+            "(_)".to_string()
+        } else {
+            "\"_\"".to_string()
+        }
+    });
+    format!("~{shaped}")
 }
 
 fn multiset_minus<'a>(a: &'a [FactSite], b: &[FactSite]) -> Vec<&'a FactSite> {
@@ -144,6 +169,7 @@ fn edits<'a>(
     base_file: &str,
     head_file: &str,
     moved: &mut Gained,
+    head_body: &str,
 ) -> Vec<Edit> {
     let mut out = Vec::new();
     let name = &sym.name;
@@ -206,11 +232,11 @@ fn edits<'a>(
     };
     let throws: Vec<&FactSite> = fewer(&b.throws, &h.throws)
         .into_iter()
-        .filter(|f| !Gained::take(&mut moved.throws, &f.text))
+        .filter(|f| !Gained::take_shaped(&mut moved.throws, &f.text))
         .collect();
     let guards: Vec<&FactSite> = fewer(&b.guards, &h.guards)
         .into_iter()
-        .filter(|f| !Gained::take(&mut moved.guards, &f.text))
+        .filter(|f| !Gained::take_shaped(&mut moved.guards, &f.text))
         .collect();
     if !throws.is_empty() || !guards.is_empty() {
         let mut what: Vec<String> = guards
@@ -233,10 +259,28 @@ fn edits<'a>(
     }
     let awaits = multiset_minus(&b.awaits, &h.awaits);
     let new_awaits = multiset_minus(&h.awaits, &b.awaits);
+    // Awaiting calls together (`await Promise.all([a(), b()])`) still
+    // awaits each of them.
+    let awaits_together = new_awaits.iter().any(|n| {
+        matches!(
+            n.text.as_str(),
+            "Promise.all" | "Promise.allSettled" | "Promise.race" | "Promise.any"
+        )
+    });
     let removed_awaits: Vec<&&FactSite> = awaits
         .iter()
+        .filter(|_| !awaits_together)
         .filter(|a| !new_awaits.iter().any(|n| n.text == a.text))
         .filter(|a| !Gained::take(&mut moved.awaits, &a.text))
+        // The risk is a call that still runs without being awaited; a call
+        // that is gone, or still awaited as often as it is made, was
+        // rewritten, not left unawaited. Unawaited calls remain only when the function makes more of
+        // those calls than it awaits.
+        .filter(|a| {
+            let calls = head_body.matches(&format!("{}(", a.text)).count();
+            let awaited = h.awaits.iter().filter(|n| n.text == a.text).count();
+            calls > awaited
+        })
         .collect();
     if !removed_awaits.is_empty() && h.awaits.len() < b.awaits.len() {
         let what: Vec<String> = removed_awaits
@@ -313,7 +357,16 @@ pub fn rows(ctx: &Ctx, pairs: &Pairs) -> Vec<SemanticChange> {
         };
         let component = h.component_id.clone().unwrap_or_default();
         let labels = ctx.labels(&component);
-        let mut all = edits(h, bf, hf, &bl.file, &hl.file, &mut moved);
+        let head_body = std::fs::read_to_string(onus_core::paths::native(ctx.head_root, &hl.file))
+            .map(|text| {
+                text.lines()
+                    .skip(hl.start.saturating_sub(1) as usize)
+                    .take((hl.end + 1).saturating_sub(hl.start) as usize)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default();
+        let mut all = edits(h, bf, hf, &bl.file, &hl.file, &mut moved, &head_body);
         all.extend(constant_edit(b, h));
         for e in all {
             let sensitive = !labels.is_empty();
@@ -389,7 +442,7 @@ mod tests {
     fn detects_flipped_operators() {
         let b = facts(vec![cmp(">", "order.subtotalCents", "LIMIT")]);
         let h = facts(vec![cmp(">=", "order.subtotalCents", "LIMIT")]);
-        let e = edits(&sym(), &b, &h, "a.ts", "a.ts", &mut Gained::default());
+        let e = edits(&sym(), &b, &h, "a.ts", "a.ts", &mut Gained::default(), "");
         assert_eq!(e.len(), 1);
         assert_eq!(e[0].subkind, "boundary-condition-changed");
         assert!(
@@ -402,7 +455,7 @@ mod tests {
     fn mirrored_comparisons_are_equal() {
         let b = facts(vec![cmp(">", "a", "b")]);
         let h = facts(vec![cmp("<", "b", "a")]);
-        assert!(edits(&sym(), &b, &h, "a.ts", "a.ts", &mut Gained::default()).is_empty());
+        assert!(edits(&sym(), &b, &h, "a.ts", "a.ts", &mut Gained::default(), "").is_empty());
     }
 
     #[test]
@@ -413,7 +466,7 @@ mod tests {
             line: 2,
         }];
         let h = facts(vec![cmp(">", "total", "5000")]);
-        let e = edits(&sym(), &b, &h, "a.ts", "a.ts", &mut Gained::default());
+        let e = edits(&sym(), &b, &h, "a.ts", "a.ts", &mut Gained::default(), "");
         let kinds: Vec<&str> = e.iter().map(|e| e.subkind).collect();
         assert_eq!(kinds, ["condition-constant-changed", "guard-removed"]);
     }

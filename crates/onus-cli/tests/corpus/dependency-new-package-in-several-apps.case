@@ -1,0 +1,26 @@
+The same new third-party packages are added to three apps at once. It is
+one new supply-chain entry per package, read once.
+
+=== both package.json
+{ "name": "r", "private": true, "workspaces": ["apps/*"] }
+=== base apps/admin/package.json
+{ "name": "@r/admin", "private": true, "main": "src/index.ts" }
+=== head apps/admin/package.json
+{ "name": "@r/admin", "private": true, "main": "src/index.ts", "dependencies": { "rich-editor": "^2.11.0", "rich-editor-image": "^2.11.0" } }
+=== base apps/portal/package.json
+{ "name": "@r/portal", "private": true, "main": "src/index.ts" }
+=== head apps/portal/package.json
+{ "name": "@r/portal", "private": true, "main": "src/index.ts", "dependencies": { "rich-editor": "^2.11.0", "rich-editor-image": "^2.11.0" } }
+=== base apps/site/package.json
+{ "name": "@r/site", "private": true, "main": "src/index.ts" }
+=== head apps/site/package.json
+{ "name": "@r/site", "private": true, "main": "src/index.ts", "dependencies": { "rich-editor": "^2.11.0", "rich-editor-image": "^2.11.0" } }
+=== both apps/admin/src/index.ts
+export const a = 1;
+=== both apps/portal/src/index.ts
+export const p = 1;
+=== both apps/site/src/index.ts
+export const s = 1;
+=== expect
+row new-dependency ○ title~"`admin`, `portal` and `site` add 2 npm packages new to the repository" why~"`rich-editor` (^2.11.0)"
+no new-dependency title~"`admin` adds"

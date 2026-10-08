@@ -1,0 +1,34 @@
+A path check moves from a route handler into a storage class, where it
+reads the class's base directory instead of the environment. The check
+still guards every read.
+
+=== both package.json
+{ "name": "api", "private": true, "main": "src/index.ts" }
+=== base src/index.ts
+import { join, normalize } from 'node:path';
+
+export function readEvidence(deps: { env: { STORAGE_DIR: string } }, rel: string): string | null {
+  const full = normalize(join(deps.env.STORAGE_DIR, rel));
+  if (!full.startsWith(normalize(deps.env.STORAGE_DIR))) {
+    return null;
+  }
+  return full;
+}
+=== head src/index.ts
+import { join, normalize } from 'node:path';
+
+export class LocalStorage {
+  constructor(private readonly baseDir: string) {}
+
+  resolve(rel: string): string | null {
+    const full = normalize(join(this.baseDir, rel));
+    if (!full.startsWith(normalize(this.baseDir))) return null;
+    return full;
+  }
+}
+
+export function readEvidence(deps: { env: { STORAGE_DIR: string } }, rel: string): string | null {
+  return new LocalStorage(deps.env.STORAGE_DIR).resolve(rel);
+}
+=== expect
+no guard-removed
