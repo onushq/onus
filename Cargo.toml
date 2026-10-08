@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.4.1"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.97"
 license = "Apache-2.0"
@@ -12,14 +12,14 @@ homepage = "https://onushq.com"
 authors = ["The Onus contributors"]
 
 [workspace.dependencies]
-onus-core = { path = "crates/onus-core", version = "0.4.1" }
-onus-lang-lsp = { path = "crates/onus-lang-lsp", version = "0.4.1" }
-onus-lang-scip = { path = "crates/onus-lang-scip", version = "0.4.1" }
-onus-lang-ts = { path = "crates/onus-lang-ts", version = "0.4.1" }
-onus-map = { path = "crates/onus-map", version = "0.4.1" }
-onus-diff = { path = "crates/onus-diff", version = "0.4.1" }
-onus-report = { path = "crates/onus-report", version = "0.4.1" }
-onus-index = { path = "crates/onus-index", version = "0.4.1" }
+onus-core = { path = "crates/onus-core", version = "0.5.0" }
+onus-lang-lsp = { path = "crates/onus-lang-lsp", version = "0.5.0" }
+onus-lang-scip = { path = "crates/onus-lang-scip", version = "0.5.0" }
+onus-lang-ts = { path = "crates/onus-lang-ts", version = "0.5.0" }
+onus-map = { path = "crates/onus-map", version = "0.5.0" }
+onus-diff = { path = "crates/onus-diff", version = "0.5.0" }
+onus-report = { path = "crates/onus-report", version = "0.5.0" }
+onus-index = { path = "crates/onus-index", version = "0.5.0" }
 
 anyhow = "1.0.100"
 clap = { version = "4.6", features = ["derive"] }

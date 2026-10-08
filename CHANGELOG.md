@@ -4,6 +4,8 @@ All notable changes to Onus are recorded here. The format follows [Keep a Change
 
 ## Unreleased
 
+## [0.5.0] - 2026-10-08
+
 Phase 2 complete:
 
 - `onus_impact` (`onus query impact <target> --change remove|rename|change-signature|add-required-member|change-behavior`): before a change, the files that break or need a check, one site each (for a new required member only the implementations, found in the source text), and the tests that exercise the target.
