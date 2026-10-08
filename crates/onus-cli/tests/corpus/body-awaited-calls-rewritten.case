@@ -1,0 +1,33 @@
+A function is rewritten to use a client: the calls it used to await are gone
+altogether, not left running unawaited. Another merges two identical awaited
+reads into one, still awaited.
+
+=== both package.json
+{ "name": "web", "private": true, "main": "src/index.ts" }
+=== base src/index.ts
+export async function load(res: Response, other: Response) {
+  const stats = await res.json();
+  const views = await other.json();
+  return { stats, views };
+}
+=== head src/index.ts
+export async function load(client: { getStats(): Promise<unknown> }) {
+  const stats = await client.getStats();
+  return { stats, views: null };
+}
+=== base src/config.ts
+export async function loadConfig(db: { rows(id: string): Promise<string[]> }, id: string, fresh: boolean) {
+  if (fresh) {
+    const rows = await db.rows(id);
+    return rows;
+  }
+  const rows = await db.rows(id);
+  return rows.slice(0, 1);
+}
+=== head src/config.ts
+export async function loadConfig(db: { rows(id: string): Promise<string[]> }, id: string, fresh: boolean) {
+  const rows = await db.rows(id);
+  return fresh ? rows : rows.slice(0, 1);
+}
+=== expect
+no await-removed

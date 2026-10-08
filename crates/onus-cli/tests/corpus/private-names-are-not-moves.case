@@ -1,0 +1,34 @@
+Two apps each have a page-local, unexported declaration with the same name.
+One is deleted and the other added in the same change. They are unrelated,
+not a move between components.
+
+=== both package.json
+{ "name": "r", "private": true, "workspaces": ["apps/*"] }
+=== both apps/admin/package.json
+{ "name": "@r/admin", "private": true, "main": "src/index.ts" }
+=== both apps/portal/package.json
+{ "name": "@r/portal", "private": true, "main": "src/index.ts" }
+=== both apps/admin/src/index.ts
+export const admin = true;
+=== both apps/portal/src/index.ts
+export const portal = true;
+=== base apps/admin/src/settings.ts
+const tabs = [{ id: 'general', label: 'General' }, { id: 'billing', label: 'Billing' }];
+export function firstTab(): string {
+  return tabs[0].id;
+}
+=== head apps/admin/src/settings.ts
+export function firstTab(): string {
+  return 'general';
+}
+=== base apps/portal/src/layout.ts
+export function title(): string {
+  return 'Site';
+}
+=== head apps/portal/src/layout.ts
+const tabs = [{ id: 'overview', label: 'Overview' }, { id: 'activity', label: 'Activity' }];
+export function title(): string {
+  return tabs.map((t) => t.label).join(' · ');
+}
+=== expect
+no moved-between-components

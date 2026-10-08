@@ -78,6 +78,14 @@ pub fn match_symbols<'a>(ctx: &Ctx<'a>) -> Pairs<'a> {
                             // The same definition under the same name in
                             // another component: moved between components.
                             || a.name == r.name)
+                        // Private declarations with the same small body in
+                        // other files (`let open = $state(false)` in two
+                        // pages) are a coincidence, not a rename or a move.
+                        && (a.visibility == Visibility::Public
+                            || r.visibility == Visibility::Public
+                            || file(a) == file(r)
+                            || moves.get(file(a)).map(String::as_str) == Some(file(r))
+                            || (a.name == r.name && a.component_id == r.component_id))
                 })
                 .collect();
             let best = if is_method {
@@ -129,6 +137,11 @@ pub fn match_symbols<'a>(ctx: &Ctx<'a>) -> Pairs<'a> {
                     && a.kind == r.kind
                     && a.name == r.name
                     && file(a) != file(r)
+                    // Two private declarations that share a name in different
+                    // components (a page's local `tabs`) are a coincidence.
+                    && (a.component_id == r.component_id
+                        || (a.visibility == Visibility::Public
+                            && r.visibility == Visibility::Public))
                     && shapes_overlap(r, a)
             })
             .collect();

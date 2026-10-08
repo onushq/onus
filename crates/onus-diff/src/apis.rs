@@ -54,7 +54,12 @@ pub fn rows(ctx: &Ctx) -> Vec<SemanticChange> {
             let Some((pkg, name)) = api.split_once(' ') else {
                 continue;
             };
-            if !base_packages.contains(pkg) || is_node_builtin(pkg) || known(pkg, name) {
+            // `$app/…` and `$env/…` are framework virtual modules, not packages.
+            if !base_packages.contains(pkg)
+                || is_node_builtin(pkg)
+                || pkg.starts_with('$')
+                || known(pkg, name)
+            {
                 continue;
             }
             first

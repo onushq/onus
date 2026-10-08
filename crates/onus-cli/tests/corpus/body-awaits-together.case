@@ -1,0 +1,18 @@
+Two sequential awaits become one `await Promise.all([...])`. Both calls are
+still awaited.
+
+=== both package.json
+{ "name": "web", "private": true, "main": "src/index.ts" }
+=== base src/index.ts
+export async function load(stats: Response, views: Response) {
+  const s = await stats.json();
+  const v = await views.json();
+  return { s, v };
+}
+=== head src/index.ts
+export async function load(stats: Response, views: Response) {
+  const [s, v] = await Promise.all([stats.json(), views.json()]);
+  return { s, v };
+}
+=== expect
+no await-removed

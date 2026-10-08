@@ -5,7 +5,7 @@
 //! A type that changed in a way Onus cannot prove compatible → breaking,
 //! subkind `contract-changed-unverified`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use onus_core::{
     ChangeKind, ChangeLevel, Confidence, ContractShape, Location, Member, MemberKind, Param,
@@ -97,7 +97,12 @@ fn diff_members(owner: SymbolKind, base: &[Member], head: &[Member]) -> Vec<Delt
                 }
             }
             Some(old) => {
-                if !same_type(&old.type_text, &m.type_text) {
+                if let Some(w) = widening(&old.type_text, &m.type_text) {
+                    out.push(Delta::additive(
+                        "contract-type-widened",
+                        format!("`{}` {w}", m.name),
+                    ));
+                } else if !same_type(&old.type_text, &m.type_text) {
                     out.push(Delta::unverified(format!(
                         "`{}` changes type from `{}` to `{}`",
                         m.name,
@@ -205,7 +210,12 @@ fn diff_shapes(kind: SymbolKind, b: &ContractShape, h: &ContractShape) -> Vec<De
     match h.kind {
         ShapeKind::Function => {
             out.extend(diff_params(&b.params, &h.params));
-            if !same_type(&b.returns, &h.returns) {
+            if let Some(w) = widening(&b.returns, &h.returns) {
+                out.push(Delta::additive(
+                    "contract-type-widened",
+                    format!("its result {w}"),
+                ));
+            } else if !same_type(&b.returns, &h.returns) {
                 out.push(Delta::unverified(format!(
                     "return type changes from `{}` to `{}`",
                     type_or_unknown(&b.returns),
@@ -345,6 +355,93 @@ fn same_type(a: &Option<String>, b: &Option<String>) -> bool {
         (Some(a), Some(b)) => a == b || canonical(a) == canonical(b),
         (a, b) => a == b,
     }
+}
+
+/// How `new` extends `old` compatibly, when it does and the types differ:
+/// a function type that only gains optional parameters, and an object type
+/// (also inside the same wrapper, such as `Promise<{…}[]>`) that only gains
+/// optional members. Callers and implementations keep compiling.
+fn widening(old: &Option<String>, new: &Option<String>) -> Option<String> {
+    let (Some(old), Some(new)) = (old, new) else {
+        return None;
+    };
+    let (old, new) = (canonical(old), canonical(new));
+    if old == new {
+        return None;
+    }
+    let parts = widen(&old, &new)?;
+    (!parts.is_empty()).then(|| join_and(&parts))
+}
+
+/// The inside of the bracket opening at `open` and the text after it.
+fn bracketed(chars: &[char], open: usize) -> Option<(String, String)> {
+    let end = closing(chars, open)?;
+    Some((
+        chars[open + 1..end].iter().collect(),
+        chars[end + 1..].iter().collect(),
+    ))
+}
+
+/// The phrases of a compatible widening of canonical type texts, or `None`
+/// when the change is anything else.
+fn widen(old: &str, new: &str) -> Option<Vec<String>> {
+    if old == new {
+        return Some(vec![]);
+    }
+    let oc: Vec<char> = old.chars().collect();
+    let nc: Vec<char> = new.chars().collect();
+    // Function types: `(a:A)=>R`.
+    if oc.first() == Some(&'(') && nc.first() == Some(&'(') {
+        let (oparams, orest) = bracketed(&oc, 0)?;
+        let (nparams, nrest) = bracketed(&nc, 0)?;
+        let (oret, nret) = (orest.strip_prefix("=>")?, nrest.strip_prefix("=>")?);
+        let op = split_top(&oparams, &[',']);
+        let np = split_top(&nparams, &[',']);
+        if np.len() < op.len() || op.iter().zip(&np).any(|(a, b)| a != b) {
+            return None;
+        }
+        let mut out = Vec::new();
+        for extra in &np[op.len()..] {
+            let name = extra.split(':').next().unwrap_or(extra);
+            if let Some(n) = name.strip_suffix('?') {
+                out.push(format!("gains an optional `{n}` parameter"));
+            } else {
+                let n = name.strip_prefix("...")?;
+                out.push(format!("gains a rest parameter `{n}`"));
+            }
+        }
+        out.extend(
+            widen(oret, nret)?
+                .into_iter()
+                .map(|r| format!("its result {r}")),
+        );
+        return Some(out);
+    }
+    // The same text around one object type: `Promise<{…}[]>`.
+    let (os, ns) = (
+        oc.iter().position(|c| *c == '{')?,
+        nc.iter().position(|c| *c == '{')?,
+    );
+    let (oinner, oafter) = bracketed(&oc, os)?;
+    let (ninner, nafter) = bracketed(&nc, ns)?;
+    if oc[..os] != nc[..ns] || oafter != nafter {
+        return None;
+    }
+    let om: BTreeSet<String> = split_top(&oinner, &[',']).into_iter().collect();
+    let nm: BTreeSet<String> = split_top(&ninner, &[',']).into_iter().collect();
+    if !om.is_subset(&nm) {
+        return None;
+    }
+    let mut added = Vec::new();
+    for m in nm.difference(&om) {
+        let name = split_top(m, &[':']).into_iter().next()?;
+        added.push(format!("`{}`", name.strip_suffix('?')?));
+    }
+    Some(vec![format!(
+        "gains optional {} {}",
+        if added.len() == 1 { "field" } else { "fields" },
+        join_and(&added)
+    )])
 }
 
 /// A type text with object members and union members sorted, recursively:
@@ -1220,6 +1317,30 @@ mod tests {
         assert!(!same("Map<string, number>", "Map<number, string>"));
         assert!(!same("{ a: string }", "{ a: number }"));
         assert!(!same("{ a: string }", "{ a?: string }"));
+    }
+
+    #[test]
+    fn optional_parameters_and_fields_widen_compatibly() {
+        let w = |a: &str, b: &str| widening(&Some(a.into()), &Some(b.into()));
+        assert_eq!(
+            w(
+                "(bucket:string)=>Promise<{key:string,size:number}[]>",
+                "(bucket:string,prefix?:string)=>Promise<{key:string,size:number,lastModified?:Date}[]>"
+            )
+            .as_deref(),
+            Some(
+                "gains an optional `prefix` parameter and its result gains optional field `lastModified`"
+            )
+        );
+        assert_eq!(
+            w("(p:string)=>Promise<B>", "(p:string,opts?:O)=>Promise<B>").as_deref(),
+            Some("gains an optional `opts` parameter")
+        );
+        // A new required parameter or field, or a changed one, is not a widening.
+        assert_eq!(w("(p:string)=>R", "(p:string,q:number)=>R"), None);
+        assert_eq!(w("{a:string}", "{a:string,b:number}"), None);
+        assert_eq!(w("{a:string}", "{a:number,b?:number}"), None);
+        assert_eq!(w("(p:string)=>R", "(p:number)=>R"), None);
     }
 
     #[test]

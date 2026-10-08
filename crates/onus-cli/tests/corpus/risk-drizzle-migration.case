@@ -1,0 +1,23 @@
+A Drizzle Kit migration adds an index; the tool also writes a snapshot and
+updates its journal. The SQL file is the migration; the metadata is not
+configuration of its own.
+
+=== both package.json
+{ "name": "r", "private": true, "workspaces": ["packages/*"] }
+=== both packages/db/package.json
+{ "name": "@r/db", "private": true, "main": "src/index.ts" }
+=== both packages/db/src/index.ts
+export const tables = ['rfqs'];
+=== both packages/db/drizzle/0000_init.sql
+CREATE TABLE "rfqs" ("id" uuid PRIMARY KEY, "lot_id" uuid);
+=== head packages/db/drizzle/0001_green_index.sql
+CREATE INDEX "rfqs_lot_idx" ON "rfqs" USING btree ("lot_id");
+=== base packages/db/drizzle/meta/_journal.json
+{ "entries": [{ "idx": 0, "tag": "0000_init" }] }
+=== head packages/db/drizzle/meta/_journal.json
+{ "entries": [{ "idx": 0, "tag": "0000_init" }, { "idx": 1, "tag": "0001_green_index" }] }
+=== head packages/db/drizzle/meta/0001_snapshot.json
+{ "tables": { "rfqs": { "indexes": { "rfqs_lot_idx": {} } } } }
+=== expect
+row migration-changed ● title~"0001_green_index.sql" title~"creates index `rfqs_lot_idx` on `rfqs`"
+no config-changed

@@ -133,6 +133,7 @@ pub fn rows(ctx: &Ctx, rows: &mut Vec<SemanticChange>) {
         row.id = format!("dependency-removed:npm:{name}@{comp}");
         new_rows.push(row);
     }
+    let new_rows = merge_new_packages(new_rows);
     let any_dependency_change = !touched_manifests.is_empty();
     // Packages already in the repository (a migration moving dependencies
     // into each package) and bulk removals or upgrades read as one row per
@@ -167,6 +168,87 @@ pub fn rows(ctx: &Ctx, rows: &mut Vec<SemanticChange>) {
             }
         }
     }
+}
+
+/// Packages new to the repository read once however many components add
+/// them, and several added to the same components read as one row.
+fn merge_new_packages(rows: Vec<SemanticChange>) -> Vec<SemanticChange> {
+    let is_new = |r: &SemanticChange| {
+        r.subkind == "new-dependency"
+            && r.hints
+                .novelty
+                .iter()
+                .any(|n| n.starts_with("new-package:"))
+    };
+    let (new, mut out): (Vec<SemanticChange>, Vec<SemanticChange>) =
+        rows.into_iter().partition(is_new);
+    // Package → its rows, one per component.
+    let mut by_package: BTreeMap<String, Vec<SemanticChange>> = BTreeMap::new();
+    for r in new {
+        by_package.entry(r.subject.clone()).or_default().push(r);
+    }
+    // Components → packages added to exactly those components.
+    let mut by_components: BTreeMap<Vec<String>, Vec<Vec<SemanticChange>>> = BTreeMap::new();
+    for (_, rows) in by_package {
+        let mut comps: Vec<String> = rows
+            .iter()
+            .map(|r| r.component.clone().unwrap_or_else(|| "root".into()))
+            .collect();
+        comps.sort();
+        comps.dedup();
+        by_components.entry(comps).or_default().push(rows);
+    }
+    for (comps, packages) in by_components {
+        if comps.len() == 1 && packages.len() == 1 {
+            out.extend(packages.into_iter().flatten());
+            continue;
+        }
+        let place =
+            crate::ctx::join_and(&comps.iter().map(|c| component_label(c)).collect::<Vec<_>>());
+        let names: Vec<String> = packages
+            .iter()
+            .map(|rows| {
+                let name = onus_core::ids::name_of(&rows[0].subject);
+                let version = rows[0]
+                    .title
+                    .rsplit_once('(')
+                    .map(|(_, v)| v.trim_end_matches(')').to_string())
+                    .unwrap_or_default();
+                format!("`{name}` ({version})")
+            })
+            .collect();
+        let verb = if comps.len() == 1 { "adds" } else { "add" };
+        let mut row = packages[0][0].clone();
+        row.component = (comps.len() == 1).then(|| comps[0].clone());
+        if packages.len() == 1 {
+            row.title = format!("{place} {verb} the npm package {}", names[0]);
+            row.why_it_matters = format!(
+                "New third-party code in the supply chain; {} is not used anywhere else in this repository",
+                names[0].split(' ').next().unwrap_or("")
+            );
+            row.id = format!("new-dependency:{}", row.subject);
+        } else {
+            row.subject = "npm-packages".into();
+            row.title = format!(
+                "{place} {verb} {} npm packages new to the repository",
+                packages.len()
+            );
+            row.why_it_matters = format!(
+                "New third-party code in the supply chain: {}",
+                crate::ctx::join_some(&names, 5)
+            );
+            row.id = format!("new-dependency:{}", comps.join("+"));
+        }
+        let all = packages.iter().flatten();
+        row.locations = all.clone().flat_map(|r| r.locations.clone()).collect();
+        row.locations.sort();
+        row.locations.dedup();
+        row.hints.novelty = all.flat_map(|r| r.hints.novelty.clone()).collect();
+        row.hints.novelty.sort();
+        row.hints.novelty.dedup();
+        out.push(row);
+    }
+    out
 }
 
 pub const LOCKFILES: &[&str] = &[
