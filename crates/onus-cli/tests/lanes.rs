@@ -134,14 +134,9 @@ fn changes_take_the_lane_their_rows_and_floors_decide() {
     assert!(c.to_string().contains("payments"), "{c}");
 
     // A committed secret is blocked.
-    change(
-        r,
-        "secret",
-        &[(
-            "services/orders/src/key.ts",
-            "export const KEY = 'AKIAIOSFODNN7EXAMPLE';\n",
-        )],
-    );
+    // An AWS-shaped key, assembled here so this file holds no secret.
+    let key = format!("export const KEY = '{}{}';\n", "AKIA", "IOSFODNN7EXAMPLE");
+    change(r, "secret", &[("services/orders/src/key.ts", &key)]);
     let c = lane_of(r, "secret");
     assert_eq!(c["lane"], "blocked", "{c}");
 
