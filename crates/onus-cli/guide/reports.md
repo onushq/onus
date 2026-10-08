@@ -27,7 +27,7 @@ Each row is one change in meaning, computed from the code and described with a f
 
 ## Order
 
-Rows are ranked so the one that deserves attention comes first:
+Rows are ranked so the one that deserves attention comes first. Changes outside the stated intent come first, then every row that needs a person (●), then the rest; within each of those, by kind:
 
 1. changes outside the stated intent
 2. security-sensitive changes

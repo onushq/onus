@@ -1,0 +1,17 @@
+An existing SQL migration is edited after the fact, and a new one drops a
+column. Both change stored data.
+
+=== both package.json
+{ "name": "api", "private": true, "main": "src/index.ts" }
+=== both src/index.ts
+export const ok = true;
+=== base db/migrations/0001_init.sql
+CREATE TABLE users (id serial PRIMARY KEY, email text NOT NULL);
+=== head db/migrations/0001_init.sql
+CREATE TABLE users (id serial PRIMARY KEY, email text NOT NULL, name text);
+=== head db/migrations/0002_drop_legacy.sql
+ALTER TABLE users DROP COLUMN legacy_flag;
+DELETE FROM sessions WHERE expired = true;
+=== expect
+row migration-changed ● title~"`db/migrations/0001_init.sql`" title~"edited"
+row migration-changed ● title~"`db/migrations/0002_drop_legacy.sql`" why~"rops column `users.legacy_flag`" why~"deletes rows from `sessions`"

@@ -36,15 +36,17 @@ The passes run in this order:
 
 1. **Matching.** Symbols with the same id are the same symbol. Of the rest, a removed and an added symbol with the same fingerprint are the same code: a move (same name, possibly into another component) or a rename (new name). A symbol with the same name and kind in another file whose members mostly overlap was moved and edited at once. Files that moved with identical content, or with only formatting and import-path changes, are matched too.
 2. **Renames** become one row with the number of call sites updated; moves between components become one row per pair of components.
-3. **Contracts.** Shapes of public symbols are compared: optional additions are additive; removals, new required members and unprovable type changes are breaking.
+3. **Contracts.** Shapes of public symbols are compared, ignoring the order of object and union members: optional additions are additive; removals, new required members and unprovable type changes are breaking when a user or implementation outside the change was not updated.
 4. **Boundary rules** from onus.yaml are checked on the new map; violations that already existed are dropped.
 5. **Relationships** are compared per component: events published and consumed, tables read and written, external services called, and dependencies between components. A new vendor or a new kind of data leaving the system is security-sensitive.
-6. **Packages.** New, changed and removed npm dependencies. An SDK of a newly reported external service is folded into that row.
-7. **Configuration** files are classified, and CI, policies, onus.yaml and CODEOWNERS are flagged as rules of the game.
-8. **Tests** are compared case by case for weakening.
-9. **Notable edits** inside functions on both sides: flipped comparisons, changed constants, removed guards, throws and awaits, swallowed errors.
-10. **Secrets** in added lines.
-11. **Internal rows.** Every row lists the lines it explains; changed lines no row explains collapse into one internal row per component.
+6. **Packages.** New, changed and removed npm dependencies, and patched packages. An SDK of a newly reported external service is folded into that row.
+7. **Risk classes.** Migrations, GraphQL operations, HTTP routes and authentication or authorization code get their own rows.
+8. **Configuration** files are classified and the keys that changed are named; CI, policies, onus.yaml and CODEOWNERS are flagged as rules of the game, root build config and infrastructure as needing a person.
+9. **Tests** are compared case by case for weakening; tests that moved, or went with the code they tested, are told apart.
+10. **Notable edits** inside functions on both sides: flipped comparisons, changed constants, removed guards, throws and awaits (unless they moved into another function), swallowed errors.
+11. **Secrets** in added lines.
+12. **Generated code.** Rows about files a tool wrote become one row per component.
+13. **Internal rows.** Every row lists the lines it explains; changed lines no row explains collapse into one internal row per component.
 
 Then rows that say the same thing are grouped (`onus help changes`), hints are filled in (labels, blast radius, confidence), the intent check marks mismatches, and the rows are ranked (`onus help reports`).
 

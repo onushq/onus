@@ -157,7 +157,8 @@ Examples:
     #[command(
         long_about = "Report the changes in meaning between two git refs. Each ref is extracted \
                       with `git archive` into a temporary directory that is removed afterwards; \
-                      the repository itself is never modified.",
+                      the repository itself is never modified. Only the paths git reports as \
+                      different are compared line by line.",
         after_long_help = REPORT_HELP
     )]
     Report {
@@ -472,6 +473,8 @@ fn run(cli: Cli) -> Result<i32> {
                 base_scip,
                 head_scip,
                 cache_dir: None,
+                changed_paths: None,
+                complete_base: None,
             };
             let outcome = onus_cli::diff_dirs(&base, &head, &opts)?;
             for note in &outcome.notes {
@@ -498,8 +501,18 @@ fn run(cli: Cli) -> Result<i32> {
             providers,
         } => {
             let providers = providers.load()?;
-            let b = onus_cli::materialize(&repo, &base)?;
-            let h = onus_cli::materialize(&repo, &head)?;
+            // A cached base map needs only the changed files of the base.
+            let pair = std::sync::Arc::new(onus_cli::materialize_pair(
+                &repo,
+                &base,
+                &head,
+                cache_dir.is_some(),
+            )?);
+            let (b, h) = (&pair.base, &pair.head);
+            let completer = {
+                let pair = pair.clone();
+                onus_cli::BaseCompleter(std::sync::Arc::new(move || pair.complete_base()))
+            };
             let opts = DiffOptions {
                 config,
                 intent: intent(intent_path.as_ref())?,
@@ -511,6 +524,8 @@ fn run(cli: Cli) -> Result<i32> {
                 base_scip,
                 head_scip,
                 cache_dir,
+                changed_paths: Some(pair.changed.clone()),
+                complete_base: Some(completer),
             };
             let outcome = onus_cli::diff_dirs(b.dir.path(), h.dir.path(), &opts)?;
             for note in &outcome.notes {

@@ -97,7 +97,7 @@ fn diff_members(owner: SymbolKind, base: &[Member], head: &[Member]) -> Vec<Delt
                 }
             }
             Some(old) => {
-                if old.type_text != m.type_text {
+                if !same_type(&old.type_text, &m.type_text) {
                     out.push(Delta::unverified(format!(
                         "`{}` changes type from `{}` to `{}`",
                         m.name,
@@ -154,7 +154,7 @@ fn diff_params(base: &[Param], head: &[Param]) -> Vec<Delta> {
                 }
             }
             Some(old) => {
-                if old.type_text != p.type_text {
+                if !same_type(&old.type_text, &p.type_text) {
                     out.push(Delta::unverified(format!(
                         "parameter `{}` changes type from `{}` to `{}`",
                         p.name,
@@ -205,7 +205,7 @@ fn diff_shapes(kind: SymbolKind, b: &ContractShape, h: &ContractShape) -> Vec<De
     match h.kind {
         ShapeKind::Function => {
             out.extend(diff_params(&b.params, &h.params));
-            if b.returns != h.returns {
+            if !same_type(&b.returns, &h.returns) {
                 out.push(Delta::unverified(format!(
                     "return type changes from `{}` to `{}`",
                     type_or_unknown(&b.returns),
@@ -214,7 +214,7 @@ fn diff_shapes(kind: SymbolKind, b: &ContractShape, h: &ContractShape) -> Vec<De
             }
         }
         ShapeKind::Object | ShapeKind::Class | ShapeKind::Enum => {
-            if b.type_text != h.type_text {
+            if !same_type(&b.type_text, &h.type_text) {
                 out.push(Delta::unverified(format!(
                     "changes `{}` to `{}`",
                     b.type_text.as_deref().unwrap_or("no heritage"),
@@ -224,7 +224,7 @@ fn diff_shapes(kind: SymbolKind, b: &ContractShape, h: &ContractShape) -> Vec<De
             out.extend(diff_members(kind, &b.members, &h.members));
         }
         ShapeKind::Alias | ShapeKind::Value => {
-            if b.type_text != h.type_text {
+            if !same_type(&b.type_text, &h.type_text) {
                 match (
                     b.type_text.as_deref().and_then(union_members),
                     h.type_text.as_deref().and_then(union_members),
@@ -308,15 +308,19 @@ fn union_members(t: &str) -> Option<Vec<String>> {
 
 /// Members a union gained or lost; reordering is no change.
 fn diff_unions(base: &[String], head: &[String]) -> Vec<Delta> {
+    let canon = |list: &[String]| -> Vec<String> { list.iter().map(|m| canonical(m)).collect() };
+    let (b, h) = (canon(base), canon(head));
     let added: Vec<String> = head
         .iter()
-        .filter(|m| !base.contains(m))
-        .map(|m| format!("`{}`", compact(m)))
+        .zip(&h)
+        .filter(|(_, c)| !b.contains(c))
+        .map(|(m, _)| format!("`{}`", compact(m)))
         .collect();
     let removed: Vec<String> = base
         .iter()
-        .filter(|m| !head.contains(m))
-        .map(|m| format!("`{}`", compact(m)))
+        .zip(&b)
+        .filter(|(_, c)| !h.contains(c))
+        .map(|(m, _)| format!("`{}`", compact(m)))
         .collect();
     let mut out = Vec::new();
     if !added.is_empty() {
@@ -332,6 +336,158 @@ fn diff_unions(base: &[String], head: &[String]) -> Vec<Delta> {
         ));
     }
     out
+}
+
+/// Whether two type texts denote the same type up to the order of object
+/// members and union members (generated code reorders both).
+fn same_type(a: &Option<String>, b: &Option<String>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => a == b || canonical(a) == canonical(b),
+        (a, b) => a == b,
+    }
+}
+
+/// A type text with object members and union members sorted, recursively:
+/// `{b:B,a:A|C}` and `{a:C|A;b:B}` both become `{a:A|C,b:B}`. Parameter
+/// and type argument order is kept, since it matters.
+fn canonical(t: &str) -> String {
+    let t = t.trim();
+    if let Some(members) = union_members(t) {
+        let mut m: Vec<String> = members.iter().map(|m| canonical(m)).collect();
+        m.sort();
+        m.dedup();
+        return m.join("|");
+    }
+    let chars: Vec<char> = t.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        match c {
+            '\'' | '"' | '`' => {
+                let end = closing_quote(&chars, i);
+                out.extend(&chars[i..=end]);
+                i = end + 1;
+            }
+            '{' | '(' | '[' | '<' => {
+                let Some(end) = closing(&chars, i) else {
+                    out.extend(&chars[i..]);
+                    break;
+                };
+                let inner: String = chars[i + 1..end].iter().collect();
+                let parts: Vec<String> = split_top(&inner, &[',', ';'])
+                    .into_iter()
+                    .map(|p| {
+                        if c == '{' {
+                            canonical_member(&p)
+                        } else {
+                            canonical(&p)
+                        }
+                    })
+                    .collect();
+                let mut parts = parts;
+                if c == '{' {
+                    parts.sort();
+                }
+                out.push(c);
+                out.push_str(&parts.join(","));
+                out.push(chars[end]);
+                i = end + 1;
+            }
+            c if c.is_whitespace() => i += 1,
+            c => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// `name?: Type` with the type in canonical form.
+fn canonical_member(m: &str) -> String {
+    let parts = split_top(m, &[':']);
+    match parts.split_first() {
+        Some((name, rest)) if !rest.is_empty() => {
+            format!("{}:{}", canonical(name), canonical(&rest.join(":")))
+        }
+        _ => canonical(m),
+    }
+}
+
+/// The index of the quote closing the one at `open`.
+fn closing_quote(chars: &[char], open: usize) -> usize {
+    let q = chars[open];
+    let mut i = open + 1;
+    while i < chars.len() {
+        if chars[i] == q && chars[i - 1] != '\\' {
+            return i;
+        }
+        i += 1;
+    }
+    chars.len() - 1
+}
+
+/// The index of the bracket closing the one at `open`; `=>` closes nothing.
+fn closing(chars: &[char], open: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    let mut i = open;
+    while i < chars.len() {
+        match chars[i] {
+            '\'' | '"' | '`' => i = closing_quote(chars, i),
+            '>' if i > 0 && chars[i - 1] == '=' => {}
+            '{' | '(' | '[' | '<' => depth += 1,
+            '}' | ')' | ']' | '>' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Splits at separators outside brackets and quotes, dropping empty parts.
+fn split_top(s: &str, seps: &[char]) -> Vec<String> {
+    let chars: Vec<char> = s.chars().collect();
+    let mut parts = Vec::new();
+    let mut cur = String::new();
+    let mut depth = 0i32;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        match c {
+            '\'' | '"' | '`' => {
+                let end = closing_quote(&chars, i);
+                cur.extend(&chars[i..=end]);
+                i = end + 1;
+                continue;
+            }
+            '>' if i > 0 && chars[i - 1] == '=' => cur.push(c),
+            '{' | '(' | '[' | '<' => {
+                depth += 1;
+                cur.push(c);
+            }
+            '}' | ')' | ']' | '>' => {
+                depth -= 1;
+                cur.push(c);
+            }
+            c if depth == 0 && seps.contains(&c) => {
+                parts.push(std::mem::take(&mut cur));
+            }
+            c => cur.push(c),
+        }
+        i += 1;
+    }
+    parts.push(cur);
+    parts
+        .into_iter()
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect()
 }
 
 /// Keys an unannotated value's initializer gained, lost or changed.
@@ -584,100 +740,191 @@ pub fn rows(ctx: &Ctx, pairs: &Pairs) -> Vec<SemanticChange> {
     rows
 }
 
-/// The users of a symbol that a breaking change did not touch, test files
-/// first: what to check before the change is done. Returns the sentence for
-/// the row and the locations of those uses.
-///
-/// When the only breaking change is a new required member, code that merely
-/// calls the type is unaffected; only implementations and test doubles
-/// break. Those are found by how they are written (`implements X`,
-/// `satisfies X`, `: X = {`, `as X`, Effect's `Layer.succeed(X, …)` and
-/// `X.of({…})`); when none are found, the test files that use it are listed.
-fn untouched_users(
-    ctx: &Ctx,
-    s: &SymbolNode,
-    deltas: &[Delta],
-    removed: bool,
-) -> (String, Vec<Location>) {
-    const LISTED: usize = 6;
-    if removed {
-        return (String::new(), vec![]);
-    }
+/// Who a breaking change can still break: the files outside this change
+/// that use the symbol, or, when the only breaking change is a new required
+/// member, the ones that implement it (code that merely reads the type is
+/// unaffected).
+#[derive(Debug, Default)]
+struct Reach {
+    /// Files outside the change and the line of use, test files first.
+    left: Vec<(String, u32)>,
+    /// How many of `left` are test files.
+    tests_left: usize,
+    /// Files in the change that use or implement it.
+    updated: Vec<String>,
+    /// `use it` or `implement it`.
+    noun: &'static str,
+    /// Why users Onus cannot see may exist.
+    unseen: Option<String>,
+}
+
+/// Files with the line where they use a symbol.
+type Uses = Vec<(String, u32)>;
+
+fn reach(ctx: &Ctx, s: &SymbolNode, deltas: &[Delta], removed: bool) -> Reach {
     let changed: std::collections::BTreeSet<&str> =
         ctx.text.files.iter().map(|f| f.path.as_str()).collect();
-    let mut uses: Vec<(String, u32)> = ctx
-        .dependent_sites(&s.id)
-        .into_iter()
-        .filter(|(f, _)| !changed.contains(f.as_str()))
-        .collect();
-    let only_new_required = deltas
-        .iter()
-        .filter(|d| d.breaking)
-        .all(|d| d.subkind == "contract-field-added-required");
-    let mut noun = "that use it";
-    if only_new_required {
-        let implementing: Vec<(String, u32)> = uses
+    let sites = if removed {
+        ctx.base_dependent_sites(&s.id)
+    } else {
+        ctx.dependent_sites(&s.id)
+    };
+    let only_new_required = !removed
+        && deltas
+            .iter()
+            .filter(|d| d.breaking)
+            .all(|d| d.subkind == "contract-field-added-required");
+    let (sites, noun) = if only_new_required {
+        let implementing = sites
             .iter()
             .filter_map(|(f, _)| implementation_line(ctx, f, &s.name).map(|l| (f.clone(), l)))
             .collect();
-        if implementing.is_empty() {
-            uses.retain(|(f, _)| ctx.is_test_file(f));
-        } else {
-            uses = implementing;
-            noun = "that implement it";
-        }
-    }
-    type Uses = Vec<(String, u32)>;
-    let (mut tests, mut code): (Uses, Uses) =
-        uses.into_iter().partition(|(f, _)| ctx.is_test_file(f));
-    if tests.is_empty() && code.is_empty() {
-        return (String::new(), vec![]);
-    }
-    let name = |f: &str| format!("`{f}`");
-    let mut shown: Vec<String> = tests
-        .iter()
-        .chain(code.iter())
-        .map(|(f, _)| name(f))
-        .collect();
-    let total = shown.len();
-    shown.truncate(LISTED);
-    let more = if total > LISTED {
-        format!(" and {} more", total - LISTED)
+        (implementing, "implement it")
     } else {
-        String::new()
+        (sites, "use it")
     };
-    let what = match (tests.len(), code.len()) {
-        (0, c) => plural(c as u32, "file", "files"),
-        (t, 0) => plural(t as u32, "test file", "test files"),
-        (t, c) => format!(
-            "{} and {}",
-            plural(t as u32, "test file", "test files"),
-            plural(c as u32, "other file", "other files")
-        ),
-    };
-    let sentence = format!(
-        "; not changed yet: {what} {noun} ({}{more})",
-        shown.join(", ")
-    );
-    tests.append(&mut code);
-    let locations = tests
+    let (updated, left): (Uses, Uses) = sites
         .into_iter()
-        .take(LISTED)
-        .map(|(f, l)| Location::head(&f, l, l))
-        .collect();
-    (sentence, locations)
+        .partition(|(f, _)| changed.contains(f.as_str()));
+    let (mut tests, code): (Uses, Uses) = left.into_iter().partition(|(f, _)| ctx.is_test_file(f));
+    let tests_left = tests.len();
+    tests.extend(code);
+    Reach {
+        left: tests,
+        tests_left,
+        updated: updated.into_iter().map(|(f, _)| f).collect(),
+        noun,
+        unseen: s.component_id.as_deref().and_then(|c| unseen_users(ctx, c)),
+    }
 }
 
-/// The line where `file` (in the head tree) implements `name`, if it does.
+/// Why a component may have users the map does not show: it is published,
+/// or imports of its package could not be resolved.
+fn unseen_users(ctx: &Ctx, component: &str) -> Option<String> {
+    let c = ctx.components.get(component)?;
+    let name = c.package_name.as_deref()?;
+    if ctx.is_published(component) {
+        return Some(format!(
+            "`{name}` is published, so code outside this repository may depend on it"
+        ));
+    }
+    let unresolved = format!("?{name}");
+    let missed = ctx.head.files.iter().any(|f| {
+        f.imports.iter().any(|i| {
+            i.strip_prefix(&unresolved)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+        })
+    });
+    missed.then(|| {
+        format!("some imports of `{name}` could not be resolved, so Onus may not see every user")
+    })
+}
+
+impl Reach {
+    /// `; not changed yet: 1 test file and 2 other files that use it (…)`
+    fn left_sentence(&self) -> String {
+        const LISTED: usize = 6;
+        let code = self.left.len() - self.tests_left;
+        let what = match (self.tests_left, code) {
+            (0, c) => plural(c as u32, "file", "files"),
+            (t, 0) => plural(t as u32, "test file", "test files"),
+            (t, c) => format!(
+                "{} and {}",
+                plural(t as u32, "test file", "test files"),
+                plural(c as u32, "other file", "other files")
+            ),
+        };
+        let mut shown: Vec<String> = self
+            .left
+            .iter()
+            .take(LISTED)
+            .map(|(f, _)| format!("`{f}`"))
+            .collect();
+        if self.left.len() > LISTED {
+            shown.push(format!("{} more", self.left.len() - LISTED));
+        }
+        format!(
+            "; not changed yet: {what} that {} ({})",
+            self.noun,
+            shown.join(", ")
+        )
+    }
+
+    fn locations(&self) -> Vec<Location> {
+        self.left
+            .iter()
+            .take(6)
+            .map(|(f, l)| Location::head(f, *l, *l))
+            .collect()
+    }
+}
+
+/// The line where `file` (in the head tree) implements or builds a value of
+/// `name`, if it does: `implements X`, `satisfies X`, `: X = {`, a function
+/// declared to return `X` that returns an object literal, Effect's
+/// `Layer.succeed(X, …)` and `X.of({…})`. A cast does not count: neither
+/// `as X` nor an object literal cast afterwards (`{ … } as never`) is
+/// checked against `X`, so they compile whatever members `X` gains.
 fn implementation_line(ctx: &Ctx, file: &str, name: &str) -> Option<u32> {
     let text = std::fs::read_to_string(onus_core::paths::native(ctx.head_root, file)).ok()?;
     let n = regex::escape(name);
     let pattern = format!(
-        r"implements[^{{]*\b{n}\b|satisfies\s+{n}\b|:\s*{n}\s*=\s*\{{|\bas\s+{n}\b|Layer\.(?:succeed|effect|scoped|sync)\(\s*{n}\b|\b{n}\.of\("
+        r"implements[^{{]*\b{n}\b|satisfies\s+{n}\b|:\s*{n}\s*(?:\[\]\s*)?=\s*[\{{\[]|\)\s*:\s*(?:Promise<\s*)?{n}\s*>?\s*(?:=>\s*\(\s*\{{|\{{\s*return\s*\{{)|Layer\.(?:succeed|effect|scoped|sync)\(\s*{n}\b(?:\s*,\s*\{{)?|\b{n}\.of\(\s*\{{"
     );
     let re = regex::Regex::new(&pattern).ok()?;
-    let m = re.find(&text)?;
-    Some(text[..m.start()].matches('\n').count() as u32 + 1)
+    for m in re.find_iter(&text) {
+        if m.as_str().ends_with(['{', '[']) {
+            let open = m.end() - 1;
+            if let Some(close) = closing_bracket(&text, open)
+                && is_cast(&text[close + 1..])
+            {
+                continue;
+            }
+        }
+        return Some(text[..m.start()].matches('\n').count() as u32 + 1);
+    }
+    None
+}
+
+/// The byte index of the bracket closing the one at `open`, skipping
+/// strings.
+fn closing_bracket(text: &str, open: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut depth = 0i32;
+    let mut quote: Option<u8> = None;
+    let mut i = open;
+    while i < bytes.len() {
+        let c = bytes[i];
+        match quote {
+            Some(q) => {
+                if c == b'\\' {
+                    i += 1;
+                } else if c == q {
+                    quote = None;
+                }
+            }
+            None => match c {
+                b'\'' | b'"' | b'`' => quote = Some(c),
+                b'{' | b'[' | b'(' => depth += 1,
+                b'}' | b']' | b')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(i);
+                    }
+                }
+                _ => {}
+            },
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Whether `rest` starts with a cast (`as never`, `as unknown as X`).
+fn is_cast(rest: &str) -> bool {
+    let rest = rest.trim_start();
+    rest.strip_prefix("as")
+        .is_some_and(|r| r.starts_with(char::is_whitespace))
 }
 
 /// One row for public symbols whose bodies changed but whose types are
@@ -773,34 +1020,81 @@ fn contract_row(
             s.invariants.join("; ")
         )
     };
+    let reach = if breaking {
+        reach(ctx, s, &deltas, removed)
+    } else {
+        Reach::default()
+    };
+    let mut locations = locations;
     let (kind, kind_label, why) = if !breaking {
         (
             ChangeKind::Additive,
             "Contract change, additive",
             format!("{used}; existing callers unaffected{invariants}"),
         )
+    } else if reach.left.is_empty() && reach.unseen.is_none() {
+        // Nothing outside this change can break.
+        let after = if !reach.updated.is_empty() {
+            let mut files: Vec<String> = reach
+                .updated
+                .iter()
+                .take(4)
+                .map(|f| format!("`{f}`"))
+                .collect();
+            if reach.updated.len() > 4 {
+                files.push(format!("{} more", reach.updated.len() - 4));
+            }
+            format!(
+                "every file that {} was updated in this change ({})",
+                reach.noun,
+                join_and(&files)
+            )
+        } else if reach.noun == "implement it" {
+            "nothing outside this change implements it, and code that only reads it is unaffected"
+                .to_string()
+        } else {
+            "nothing outside this change uses it".to_string()
+        };
+        (
+            ChangeKind::Additive,
+            if reach.updated.is_empty() {
+                "Contract change, no users affected"
+            } else {
+                "Contract change, users updated"
+            },
+            format!("{used}; {after}{invariants}"),
+        )
     } else if subkind == "contract-changed-unverified" {
+        let unseen = reach
+            .unseen
+            .as_ref()
+            .map(|u| format!("; {u}"))
+            .unwrap_or_default();
         (
             ChangeKind::Breaking,
             "Contract change, unverified",
             format!(
-                "{used}; Onus cannot prove the change is compatible, so it is treated as breaking{invariants}"
+                "{used}; Onus cannot prove the change is compatible, so it is treated as breaking{unseen}{invariants}"
             ),
         )
     } else {
+        let left = if reach.left.is_empty() {
+            String::new()
+        } else {
+            reach.left_sentence()
+        };
+        let unseen = reach
+            .unseen
+            .as_ref()
+            .map(|u| format!("; {u}"))
+            .unwrap_or_default();
+        locations.extend(reach.locations());
         (
             ChangeKind::Breaking,
             "Contract change, breaking",
-            format!(
-                "{used}; existing callers may break{}{invariants}",
-                untouched_users(ctx, s, &deltas, removed).0
-            ),
+            format!("{used}; existing callers may break{left}{unseen}{invariants}"),
         )
     };
-    let mut locations = locations;
-    if breaking && subkind != "contract-changed-unverified" {
-        locations.extend(untouched_users(ctx, s, &deltas, removed).1);
-    }
     let mut row = change(
         kind,
         subkind,
@@ -904,6 +1198,28 @@ mod tests {
         );
         // Renaming a parameter is not a contract change.
         assert!(diff_params(&base, &[param("recipient", "string", false)]).is_empty());
+    }
+
+    #[test]
+    fn member_and_union_order_is_no_change() {
+        let same = |a: &str, b: &str| same_type(&Some(a.into()), &Some(b.into()));
+        assert!(same(
+            "{__args:{clientId:string,redirectUrl:string,scope?:string}}",
+            "{__args:{redirectUrl:string,clientId:string,scope?:string}}"
+        ));
+        assert!(same("{ a: 'x' | 'y'; b: number }", "{b:number;a:'y'|'x'}"));
+        assert!(same(
+            "'A' | 'B' | Foo<{ x: 1, y: 2 }>",
+            "Foo<{y:2,x:1}> | 'B' | 'A'"
+        ));
+        // Parameter and type argument order matters.
+        assert!(!same(
+            "(a: string, b: number) => void",
+            "(b: number, a: string) => void"
+        ));
+        assert!(!same("Map<string, number>", "Map<number, string>"));
+        assert!(!same("{ a: string }", "{ a: number }"));
+        assert!(!same("{ a: string }", "{ a?: string }"));
     }
 
     #[test]

@@ -1,0 +1,28 @@
+An Nx `project.json` gains a test target and the workspace catalog changes a
+version. These are build and workspace settings, not runtime configuration.
+
+=== both package.json
+{ "name": "r", "private": true, "workspaces": ["apps/*"] }
+=== both apps/web/package.json
+{ "name": "@r/web", "private": true, "main": "src/index.ts" }
+=== both apps/web/src/index.ts
+export const ok = true;
+=== base apps/web/project.json
+{ "name": "web", "targets": { "build": { "executor": "nx:run-commands" } } }
+=== head apps/web/project.json
+{ "name": "web", "targets": { "build": { "executor": "nx:run-commands" }, "test:unit": { "executor": "nx:run-commands" } } }
+=== base pnpm-workspace.yaml
+packages:
+  - apps/*
+catalog:
+  react: 18.2.0
+=== head pnpm-workspace.yaml
+packages:
+  - apps/*
+catalog:
+  react: 18.3.1
+=== expect
+no config-changed why~"Runtime configuration"
+row build-config-changed ○ title~"`apps/web/project.json`" title~"`targets`"
+row workspace-config-changed ○ title~"`pnpm-workspace.yaml`" title~"`catalog`"
+attention 0

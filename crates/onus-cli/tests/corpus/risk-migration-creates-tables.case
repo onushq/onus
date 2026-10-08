@@ -1,0 +1,42 @@
+A new database migration creates tables with cascading deletes. It changes
+stored data and the deploy order, so it gets its own row that needs a person.
+The registry that lists the migrations is ordinary code, not a migration.
+
+=== both package.json
+{ "name": "r", "private": true, "workspaces": ["libs/*"] }
+=== both libs/db/package.json
+{ "name": "@r/db", "private": true, "main": "src/index.ts" }
+=== base libs/db/src/index.ts
+export const migrations = ['1790000012000-addPublisherLinks'];
+=== head libs/db/src/index.ts
+export const migrations = ['1790000012000-addPublisherLinks', '1790000013000-createPosts'];
+=== base libs/db/src/migrations/registry.ts
+export const registry = ['1790000012000-addPublisherLinks'];
+=== head libs/db/src/migrations/registry.ts
+export const registry = ['1790000012000-addPublisherLinks', '1790000013000-createPosts'];
+=== both libs/db/src/migrations/1790000012000-addPublisherLinks.ts
+export const up = `ALTER TABLE publishers ADD COLUMN link text`;
+=== head libs/db/src/migrations/1790000013000-createPosts.ts
+import type { MigrationInterface, QueryRunner } from 'typeorm';
+
+export class CreatePosts1790000013000 implements MigrationInterface {
+  async up(q: QueryRunner): Promise<void> {
+    await q.query(`
+      CREATE TABLE posts (
+        id uuid PRIMARY KEY,
+        publisher_id uuid NOT NULL REFERENCES publishers(id) ON DELETE CASCADE,
+        body text NOT NULL
+      )
+    `);
+    await q.query(`CREATE TABLE post_comments (id uuid PRIMARY KEY, post_id uuid REFERENCES posts(id) ON DELETE CASCADE)`);
+    await q.query(`ALTER TABLE publishers ADD COLUMN cv_pdf bytea`);
+  }
+
+  async down(q: QueryRunner): Promise<void> {
+    await q.query(`DROP TABLE post_comments`);
+    await q.query(`DROP TABLE posts`);
+  }
+}
+=== expect
+no migration-changed title~"registry.ts"
+row migration-changed ● title~"1790000013000-createPosts.ts`" title~"creates tables `posts` and `post_comments`" why~"ON DELETE CASCADE" why~"adds column `publishers.cv_pdf`"

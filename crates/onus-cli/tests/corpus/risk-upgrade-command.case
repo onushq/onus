@@ -1,0 +1,16 @@
+A versioned upgrade command (a data migration written as code) creates
+fields in every workspace. It is a migration even though it holds no SQL.
+
+=== both package.json
+{ "name": "server", "private": true, "main": "src/index.ts" }
+=== both src/index.ts
+export const ok = true;
+=== head src/upgrade-version-command/2-46/2-46-workspace-command-1791322315043-add-subscriptions.command.ts
+export class AddSubscriptionsCommand {
+  async runOnWorkspace(workspaceId: string, fields: { create(name: string): Promise<void> }) {
+    await fields.create('isSubscribed');
+    await fields.create('lastMentionedAt');
+  }
+}
+=== expect
+row migration-changed ● title~"2-46-workspace-command-1791322315043-add-subscriptions.command.ts`"

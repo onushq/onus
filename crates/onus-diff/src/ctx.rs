@@ -205,26 +205,39 @@ impl<'a> Ctx<'a> {
     /// first line of use in each, sorted by path. The symbol's own file is
     /// left out.
     pub fn dependent_sites(&self, symbol: &str) -> Vec<(String, u32)> {
-        let own_file = self
-            .head_syms
-            .get(symbol)
-            .and_then(|s| s.loc.as_ref())
-            .map(|l| l.file.as_str());
-        let class_prefix = format!("{symbol}.");
-        let mut first: BTreeMap<&str, u32> = BTreeMap::new();
-        for e in &self.head.edges {
-            if e.to != symbol && !e.to.starts_with(&class_prefix) {
-                continue;
-            }
-            for s in &e.sites {
-                if Some(s.file.as_str()) == own_file {
-                    continue;
-                }
-                let line = first.entry(s.file.as_str()).or_insert(s.line);
-                *line = (*line).min(s.line);
-            }
-        }
-        first.into_iter().map(|(f, l)| (f.to_string(), l)).collect()
+        sites_in(self.head, symbol)
+    }
+
+    /// The same, in the base map: for things the change removed.
+    pub fn base_dependent_sites(&self, symbol: &str) -> Vec<(String, u32)> {
+        sites_in(self.base, symbol)
+    }
+
+    /// Whether the component's package is published: its `package.json` is
+    /// not private and says what to publish (`files` or `publishConfig`).
+    pub fn is_published(&self, component: &str) -> bool {
+        let Some(c) = self.components.get(component) else {
+            return false;
+        };
+        let dir = c
+            .roots
+            .first()
+            .map(|r| r.trim_end_matches("**").trim_end_matches('/'))
+            .unwrap_or("");
+        let path = if dir.is_empty() {
+            "package.json".to_string()
+        } else {
+            format!("{dir}/package.json")
+        };
+        let Ok(text) = std::fs::read_to_string(onus_core::paths::native(self.head_root, &path))
+        else {
+            return false;
+        };
+        let Ok(pkg) = serde_json::from_str::<serde_json::Value>(&text) else {
+            return false;
+        };
+        pkg.get("private") != Some(&serde_json::Value::Bool(true))
+            && (pkg.get("files").is_some() || pkg.get("publishConfig").is_some())
     }
 
     /// Head diagnostics in a file.
@@ -239,6 +252,30 @@ impl<'a> Ctx<'a> {
     pub fn explain(&self, file: &str) {
         self.explained.borrow_mut().insert(file.to_string());
     }
+}
+
+fn sites_in(map: &CodebaseMap, symbol: &str) -> Vec<(String, u32)> {
+    let own_file = map
+        .symbols
+        .iter()
+        .find(|s| s.id == symbol)
+        .and_then(|s| s.loc.as_ref())
+        .map(|l| l.file.as_str());
+    let class_prefix = format!("{symbol}.");
+    let mut first: BTreeMap<&str, u32> = BTreeMap::new();
+    for e in &map.edges {
+        if e.to != symbol && !e.to.starts_with(&class_prefix) {
+            continue;
+        }
+        for s in &e.sites {
+            if Some(s.file.as_str()) == own_file {
+                continue;
+            }
+            let line = first.entry(s.file.as_str()).or_insert(s.line);
+            *line = (*line).min(s.line);
+        }
+    }
+    first.into_iter().map(|(f, l)| (f.to_string(), l)).collect()
 }
 
 fn onus_lang_ts_root() -> &'static str {
@@ -283,6 +320,24 @@ pub fn change(
         locations,
         stats: None,
     }
+}
+
+/// The kind of edit a row's title names (`` `module` `` in "Build config
+/// `a/tsconfig.json` changes `module`"), or "" when it names none.
+pub fn edit_pattern(title: &str) -> String {
+    let at = [" changes ", " change "]
+        .iter()
+        .find_map(|w| title.find(w).map(|i| i + w.len()));
+    let Some(at) = at else {
+        return String::new();
+    };
+    let mut rest = &title[at..];
+    for tail in [" in `", " at the repository root"] {
+        if let Some(i) = rest.rfind(tail) {
+            rest = &rest[..i];
+        }
+    }
+    rest.to_string()
 }
 
 /// `1,404`
@@ -345,19 +400,34 @@ pub fn group_rows(
     item: impl Fn(&SemanticChange) -> String,
     why: impl Fn(&SemanticChange, &str) -> String,
 ) -> Vec<SemanticChange> {
+    group_rows_by(rows, groupable, |_| String::new(), title, item, why)
+}
+
+/// [`group_rows`], keeping rows apart that differ in `key` (the kind of
+/// edit, for config files).
+pub fn group_rows_by(
+    rows: Vec<SemanticChange>,
+    groupable: impl Fn(&SemanticChange) -> bool,
+    key: impl Fn(&SemanticChange) -> String,
+    title: impl Fn(&SemanticChange, usize, &str) -> String,
+    item: impl Fn(&SemanticChange) -> String,
+    why: impl Fn(&SemanticChange, &str) -> String,
+) -> Vec<SemanticChange> {
     let mut out = Vec::new();
-    let mut groups: BTreeMap<(Option<String>, String), Vec<SemanticChange>> = BTreeMap::new();
+    type Key = (Option<String>, String, String);
+    let mut groups: BTreeMap<Key, Vec<SemanticChange>> = BTreeMap::new();
     for r in rows {
         if groupable(&r) {
             groups
-                .entry((r.component.clone(), r.subkind.clone()))
+                .entry((r.component.clone(), r.subkind.clone(), key(&r)))
                 .or_default()
                 .push(r);
         } else {
             out.push(r);
         }
     }
-    for ((component, subkind), mut members) in groups {
+    let mut ids: BTreeMap<String, u32> = BTreeMap::new();
+    for ((component, subkind, _), mut members) in groups {
         if members.len() == 1 {
             out.extend(members);
             continue;
@@ -373,7 +443,13 @@ pub fn group_rows(
         row.title = title(first, members.len(), &place);
         row.why_it_matters = why(first, &join_some(&items, 4));
         row.subject = component.clone().unwrap_or_else(|| "root".into());
-        row.id = format!("{subkind}:{}", row.subject);
+        let n = ids.entry(format!("{subkind}:{}", row.subject)).or_default();
+        *n += 1;
+        row.id = if *n == 1 {
+            format!("{subkind}:{}", row.subject)
+        } else {
+            format!("{subkind}:{}#{n}", row.subject)
+        };
         row.locations = members.iter().flat_map(|m| m.locations.clone()).collect();
         row.locations.sort();
         row.locations.dedup();

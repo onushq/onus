@@ -1,0 +1,20 @@
+Control: an `await` and a guard really disappear from a function.
+
+=== both package.json
+{ "name": "billing", "private": true, "main": "src/index.ts" }
+=== base src/index.ts
+export async function charge(id: string, save: (id: string) => Promise<void>) {
+  if (id.length === 0) {
+    throw new Error('missing id');
+  }
+  await save(id);
+  return id;
+}
+=== head src/index.ts
+export async function charge(id: string, save: (id: string) => Promise<void>) {
+  save(id);
+  return id;
+}
+=== expect
+row await-removed title~"`charge` no longer awaits"
+row guard-removed title~"`charge` no longer has"

@@ -42,7 +42,7 @@ steps:
   - uses: actions/checkout@v7
     with:
       fetch-depth: 0
-  - uses: onushq/onus/action@v0.3.0
+  - uses: onushq/onus/action@v0.4.0
     with:
       fail-on: secrets          # optional: rule-violation, secrets
 ```

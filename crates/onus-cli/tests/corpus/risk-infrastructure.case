@@ -1,0 +1,33 @@
+Infrastructure definitions change: a Terraform file and a Kubernetes
+manifest. They change how production runs.
+
+=== both package.json
+{ "name": "svc", "private": true, "main": "src/index.ts" }
+=== both src/index.ts
+export const ok = true;
+=== base infra/main.tf
+resource "aws_s3_bucket" "files" {
+  bucket = "files"
+}
+=== head infra/main.tf
+resource "aws_s3_bucket" "files" {
+  bucket = "files"
+  acl    = "public-read"
+}
+=== base deploy/api.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+spec:
+  replicas: 2
+=== head deploy/api.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+spec:
+  replicas: 1
+=== expect
+row infrastructure-changed ● title~"`infra/main.tf`"
+row infrastructure-changed ● title~"`deploy/api.yaml`" title~"`spec`"

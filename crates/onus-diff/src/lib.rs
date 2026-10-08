@@ -10,12 +10,16 @@ mod collapse;
 pub mod config_files;
 mod contracts;
 mod ctx;
+mod generated;
 pub mod intent;
 mod internal;
+mod lockfiles;
 mod matching;
 mod notable;
 mod packages;
+mod patches;
 mod relations;
+mod risk;
 mod rules;
 mod secrets_scan;
 mod tests_diff;
@@ -45,11 +49,18 @@ pub struct DiffInput<'a> {
     pub intent: Option<&'a Intent>,
     pub base_label: &'a str,
     pub head_label: &'a str,
+    /// The paths that differ, when the caller knows them (from git): only
+    /// those are read and compared.
+    pub changed_paths: Option<&'a BTreeSet<String>>,
 }
 
 pub fn diff(input: &DiffInput) -> SemanticReport {
-    let base_files = walk::list_files(input.base_root);
-    let head_files = walk::list_files(input.head_root);
+    let mut base_files = walk::list_files(input.base_root);
+    let mut head_files = walk::list_files(input.head_root);
+    if let Some(changed) = input.changed_paths {
+        base_files.retain(|f| changed.contains(f));
+        head_files.retain(|f| changed.contains(f));
+    }
     let text = text::diff_trees(input.base_root, &base_files, input.head_root, &head_files);
     let ctx = ctx::Ctx::new(
         input.base_map,
@@ -69,6 +80,8 @@ pub fn diff(input: &DiffInput) -> SemanticReport {
     let violations = rules::rows(&ctx, &pairs);
     rows.extend(relations::rows(&ctx, &violations));
     packages::rows(&ctx, &mut rows);
+    rows.extend(patches::rows(&ctx));
+    rows.extend(risk::rows(&ctx));
     rows.extend(config_files::rows(&ctx));
     let tests = tests_diff::analyze(&ctx, &pairs);
     rows.extend(tests.rows.iter().cloned());
@@ -76,6 +89,7 @@ pub fn diff(input: &DiffInput) -> SemanticReport {
     rows.extend(secrets_scan::rows(&ctx));
     rows.extend(apis::rows(&ctx));
     rows.extend(violations);
+    let mut rows = generated::collapse(&ctx, rows);
     let (internal_rows, structure) = internal::rows(&ctx, &rows, &tests);
     rows.extend(internal_rows);
     let mut rows = collapse::widespread(rows);

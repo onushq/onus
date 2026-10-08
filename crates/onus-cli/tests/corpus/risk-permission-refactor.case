@@ -1,0 +1,25 @@
+Permission checks are refactored into one helper. Even when behavior is
+meant to stay the same, authorization code needs a person.
+
+=== both package.json
+{ "name": "server", "private": true, "main": "src/index.ts" }
+=== both src/index.ts
+export { canRead } from './permissions/permissions.utils';
+=== base src/permissions/permissions.utils.ts
+export function canRead(role: string, shared: boolean, gated: boolean): boolean {
+  if (role === 'admin') return true;
+  return shared && !gated;
+}
+=== head src/permissions/permissions.utils.ts
+import { resolveSharing } from './resolve-sharing.util';
+
+export function canRead(role: string, shared: boolean, gated: boolean): boolean {
+  if (role === 'admin') return true;
+  return resolveSharing(shared, gated).grantedBeyondRole;
+}
+=== head src/permissions/resolve-sharing.util.ts
+export function resolveSharing(shared: boolean, gated: boolean) {
+  return { grantedBeyondRole: shared && !gated };
+}
+=== expect
+row auth-code-changed ● title~"`src/permissions/permissions.utils.ts`"

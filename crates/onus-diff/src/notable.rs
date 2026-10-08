@@ -22,6 +22,57 @@ struct Edit {
     location: Location,
 }
 
+/// Awaits, guards and throws that this change adds to other functions: a
+/// body extracted into a helper takes them along, so their disappearance
+/// from the original function is a move, not a removal.
+#[derive(Debug, Default)]
+struct Gained {
+    awaits: BTreeMap<String, u32>,
+    guards: BTreeMap<String, u32>,
+    throws: BTreeMap<String, u32>,
+}
+
+impl Gained {
+    fn collect(pairs: &Pairs) -> Gained {
+        let mut g = Gained::default();
+        let empty = BodyFacts::default();
+        let mut add = |base: &BodyFacts, head: &BodyFacts| {
+            for (into, b, h) in [
+                (&mut g.awaits, &base.awaits, &head.awaits),
+                (&mut g.guards, &base.guards, &head.guards),
+                (&mut g.throws, &base.throws, &head.throws),
+            ] {
+                for f in multiset_minus(h, b) {
+                    *into.entry(f.text.clone()).or_default() += 1;
+                }
+            }
+        };
+        for (b, h, _) in &pairs.pairs {
+            if b.body_fingerprint != h.body_fingerprint {
+                add(
+                    b.facts.as_ref().unwrap_or(&empty),
+                    h.facts.as_ref().unwrap_or(&empty),
+                );
+            }
+        }
+        for a in &pairs.added {
+            add(&empty, a.facts.as_ref().unwrap_or(&empty));
+        }
+        g
+    }
+
+    /// Takes one occurrence of `text` from `pool`, if there is one.
+    fn take(pool: &mut BTreeMap<String, u32>, text: &str) -> bool {
+        match pool.get_mut(text) {
+            Some(n) if *n > 0 => {
+                *n -= 1;
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
 fn multiset_minus<'a>(a: &'a [FactSite], b: &[FactSite]) -> Vec<&'a FactSite> {
     let mut counts: BTreeMap<&str, i32> = BTreeMap::new();
     for x in b {
@@ -92,6 +143,7 @@ fn edits<'a>(
     h: &BodyFacts,
     base_file: &str,
     head_file: &str,
+    moved: &mut Gained,
 ) -> Vec<Edit> {
     let mut out = Vec::new();
     let name = &sym.name;
@@ -152,8 +204,14 @@ fn edits<'a>(
         let n = base.len().saturating_sub(head.len());
         multiset_minus(base, head).into_iter().take(n).collect()
     };
-    let throws = fewer(&b.throws, &h.throws);
-    let guards = fewer(&b.guards, &h.guards);
+    let throws: Vec<&FactSite> = fewer(&b.throws, &h.throws)
+        .into_iter()
+        .filter(|f| !Gained::take(&mut moved.throws, &f.text))
+        .collect();
+    let guards: Vec<&FactSite> = fewer(&b.guards, &h.guards)
+        .into_iter()
+        .filter(|f| !Gained::take(&mut moved.guards, &f.text))
+        .collect();
     if !throws.is_empty() || !guards.is_empty() {
         let mut what: Vec<String> = guards
             .iter()
@@ -178,6 +236,7 @@ fn edits<'a>(
     let removed_awaits: Vec<&&FactSite> = awaits
         .iter()
         .filter(|a| !new_awaits.iter().any(|n| n.text == a.text))
+        .filter(|a| !Gained::take(&mut moved.awaits, &a.text))
         .collect();
     if !removed_awaits.is_empty() && h.awaits.len() < b.awaits.len() {
         let what: Vec<String> = removed_awaits
@@ -241,6 +300,7 @@ fn constant_edit(b: &SymbolNode, h: &SymbolNode) -> Option<Edit> {
 
 pub fn rows(ctx: &Ctx, pairs: &Pairs) -> Vec<SemanticChange> {
     let mut rows = Vec::new();
+    let mut moved = Gained::collect(pairs);
     for (b, h, _) in &pairs.pairs {
         if b.body_fingerprint == h.body_fingerprint {
             continue;
@@ -253,7 +313,7 @@ pub fn rows(ctx: &Ctx, pairs: &Pairs) -> Vec<SemanticChange> {
         };
         let component = h.component_id.clone().unwrap_or_default();
         let labels = ctx.labels(&component);
-        let mut all = edits(h, bf, hf, &bl.file, &hl.file);
+        let mut all = edits(h, bf, hf, &bl.file, &hl.file, &mut moved);
         all.extend(constant_edit(b, h));
         for e in all {
             let sensitive = !labels.is_empty();
@@ -329,7 +389,7 @@ mod tests {
     fn detects_flipped_operators() {
         let b = facts(vec![cmp(">", "order.subtotalCents", "LIMIT")]);
         let h = facts(vec![cmp(">=", "order.subtotalCents", "LIMIT")]);
-        let e = edits(&sym(), &b, &h, "a.ts", "a.ts");
+        let e = edits(&sym(), &b, &h, "a.ts", "a.ts", &mut Gained::default());
         assert_eq!(e.len(), 1);
         assert_eq!(e[0].subkind, "boundary-condition-changed");
         assert!(
@@ -342,7 +402,7 @@ mod tests {
     fn mirrored_comparisons_are_equal() {
         let b = facts(vec![cmp(">", "a", "b")]);
         let h = facts(vec![cmp("<", "b", "a")]);
-        assert!(edits(&sym(), &b, &h, "a.ts", "a.ts").is_empty());
+        assert!(edits(&sym(), &b, &h, "a.ts", "a.ts", &mut Gained::default()).is_empty());
     }
 
     #[test]
@@ -353,7 +413,7 @@ mod tests {
             line: 2,
         }];
         let h = facts(vec![cmp(">", "total", "5000")]);
-        let e = edits(&sym(), &b, &h, "a.ts", "a.ts");
+        let e = edits(&sym(), &b, &h, "a.ts", "a.ts", &mut Gained::default());
         let kinds: Vec<&str> = e.iter().map(|e| e.subkind).collect();
         assert_eq!(kinds, ["condition-constant-changed", "guard-removed"]);
     }

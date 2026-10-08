@@ -1,0 +1,66 @@
+An interface gains a required method, and its only implementation is updated
+in the same change. Test doubles that cast (`as Engine`, `{ … } as never`,
+also inside `Layer.succeed`) and factories that return another call do not
+implement it and do not break. Nothing in the repository breaks.
+
+=== both package.json
+{ "name": "r", "private": true, "workspaces": ["packages/*"] }
+=== both packages/engine/package.json
+{ "name": "@r/engine", "private": true, "main": "src/index.ts" }
+=== both packages/app/package.json
+{ "name": "@r/app", "private": true, "main": "src/index.ts", "dependencies": { "@r/engine": "*" } }
+=== base packages/engine/src/index.ts
+export interface Engine {
+  start(): void;
+}
+export { createEngine } from './live';
+=== head packages/engine/src/index.ts
+export interface Engine {
+  start(): void;
+  refresh(): Promise<void>;
+}
+export { createEngine } from './live';
+=== base packages/engine/src/live.ts
+import type { Engine } from './index';
+
+export function createEngine(): Engine {
+  return {
+    start() {},
+  };
+}
+=== head packages/engine/src/live.ts
+import type { Engine } from './index';
+
+export function createEngine(): Engine {
+  return {
+    start() {},
+    async refresh() {},
+  };
+}
+=== both packages/app/src/index.ts
+import { createEngine, type Engine } from '@r/engine';
+
+export const engine: Engine = createEngine();
+export function boot(): void {
+  engine.start();
+}
+=== both packages/app/src/boot.spec.ts
+import { Layer } from 'effect';
+import { createEngine, type Engine } from '@r/engine';
+import { boot } from './index';
+
+const fake = { start: () => {} } as Engine;
+const other = {} as never;
+const layer = Layer.succeed(Engine, {
+  start: () => {},
+} as never);
+const make = (): Engine => createEngine();
+
+it('boots', () => {
+  boot();
+  expect(fake).toBeDefined();
+  expect(other).toBeUndefined();
+});
+=== expect
+row contract-field-added-required ○ title~"`Engine` gains a required `refresh` method" why~"updated in this change"
+attention 0

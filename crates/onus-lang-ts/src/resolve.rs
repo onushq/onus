@@ -40,6 +40,9 @@ pub struct Resolver {
     files: BTreeSet<String>,
     tsconfigs: BTreeMap<String, TsConfig>,
     packages: BTreeMap<String, WorkspacePackage>,
+    /// Package name → its `exports` subpaths (`./utils`, `./*`) and their
+    /// targets, relative to the root.
+    subpaths: BTreeMap<String, Vec<(String, Vec<String>)>>,
 }
 
 const TRY_EXTENSIONS: &[&str] = &[
@@ -65,10 +68,15 @@ impl Resolver {
                 }
             }
         }
+        let subpaths = packages
+            .values()
+            .filter_map(|p| Some((p.name.clone(), read_subpaths(root, &p.dir)?)))
+            .collect();
         Resolver {
             files,
             tsconfigs,
             packages,
+            subpaths,
         }
     }
 
@@ -116,8 +124,7 @@ impl Resolver {
                 }
                 return Resolution::Unresolved;
             }
-            let candidate = join(&pkg.dir, &format!(".{sub}"));
-            return self.try_target(&candidate);
+            return self.package_subpath(pkg, &format!(".{sub}"));
         }
         if let Some(cfg) = self.nearest_tsconfig(from)
             && let Some(base) = &cfg.base_url
@@ -126,6 +133,47 @@ impl Resolver {
             return Resolution::File(f);
         }
         Resolution::Npm(package_name(spec).to_string())
+    }
+
+    /// `pkg/sub`: the source file `exports` names for `./sub` (mapped back
+    /// from build output to source), else `./sub` or `./src/sub` in the
+    /// package's folder.
+    fn package_subpath(&self, pkg: &WorkspacePackage, sub: &str) -> Resolution {
+        for (pattern, targets) in self.subpaths.get(&pkg.name).into_iter().flatten() {
+            let Some(star) = match_pattern(pattern, sub) else {
+                continue;
+            };
+            for target in targets {
+                let target = target.replace('*', star);
+                if let Some(f) = self.to_source(&join(&pkg.dir, &target)) {
+                    return Resolution::File(f);
+                }
+            }
+        }
+        match self.try_target(&join(&pkg.dir, sub)) {
+            Resolution::Unresolved => {}
+            found => return found,
+        }
+        match self.try_file(&join(&join(&pkg.dir, "src"), sub)) {
+            Some(f) => Resolution::File(f),
+            None => Resolution::Unresolved,
+        }
+    }
+
+    /// A build output path (`dist/utils/index.d.ts`) as the source file it
+    /// is built from (`src/utils/index.ts`), or the path itself when it is
+    /// source.
+    fn to_source(&self, path: &str) -> Option<String> {
+        let stem = strip_output_ext(path);
+        if let Some(f) = self.try_file(stem) {
+            return Some(f);
+        }
+        let mut parts: Vec<&str> = stem.split('/').collect();
+        let out = parts
+            .iter()
+            .position(|p| matches!(*p, "dist" | "build" | "lib" | "out" | "esm" | "cjs"))?;
+        parts[out] = "src";
+        self.try_file(&parts.join("/"))
     }
 
     /// A code file (with extension and index probing), else any existing
@@ -295,6 +343,49 @@ pub fn join(dir: &str, rel: &str) -> String {
     parts.join("/")
 }
 
+/// `x.d.ts`, `x.mjs`, `x.js` → `x`.
+fn strip_output_ext(path: &str) -> &str {
+    for ext in [".d.ts", ".d.mts", ".d.cts", ".js", ".mjs", ".cjs"] {
+        if let Some(stem) = path.strip_suffix(ext) {
+            return stem;
+        }
+    }
+    path
+}
+
+/// The `exports` subpaths of the package in `dir` with every target they
+/// name under any condition, in order.
+fn read_subpaths(root: &Path, dir: &str) -> Option<Vec<(String, Vec<String>)>> {
+    let rel = if dir.is_empty() {
+        "package.json".to_string()
+    } else {
+        format!("{dir}/package.json")
+    };
+    let text = std::fs::read_to_string(onus_core::paths::native(root, &rel)).ok()?;
+    let pkg = jsonc::parse(&text)?;
+    let serde_json::Value::Object(exports) = pkg.get("exports")? else {
+        return None;
+    };
+    fn targets(v: &serde_json::Value, out: &mut Vec<String>) {
+        match v {
+            serde_json::Value::String(s) => out.push(s.clone()),
+            serde_json::Value::Object(m) => m.values().for_each(|v| targets(v, out)),
+            serde_json::Value::Array(a) => a.iter().for_each(|v| targets(v, out)),
+            _ => {}
+        }
+    }
+    let out: Vec<(String, Vec<String>)> = exports
+        .iter()
+        .filter(|(k, _)| k.starts_with("./"))
+        .map(|(k, v)| {
+            let mut t = Vec::new();
+            targets(v, &mut t);
+            (k.clone(), t)
+        })
+        .collect();
+    (!out.is_empty()).then_some(out)
+}
+
 fn read_tsconfig(root: &Path, rel: &str, depth: u32) -> Option<TsConfig> {
     if depth > 5 {
         return None;
@@ -437,6 +528,47 @@ mod tests {
         assert_eq!(
             r.resolve("services/a/src/x.ts", "date-fns"),
             Resolution::Npm("date-fns".into())
+        );
+    }
+
+    #[test]
+    fn resolves_package_subpaths_through_exports() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("packages/events")).unwrap();
+        std::fs::write(
+            tmp.path().join("packages/events/package.json"),
+            r#"{ "name": "@shop/events", "exports": {
+                ".": { "types": "./dist/index.d.ts" },
+                "./testing": { "types": "./dist/testing/index.d.ts", "import": "./dist/testing.mjs" },
+                "./schemas/*": "./build/schemas/*.js"
+            } }"#,
+        )
+        .unwrap();
+        let r = resolver(
+            tmp.path(),
+            &[
+                "packages/events/package.json",
+                "packages/events/src/index.ts",
+                "packages/events/src/testing/index.ts",
+                "packages/events/src/schemas/order.ts",
+                "packages/events/src/bus.ts",
+                "services/a/src/x.ts",
+            ],
+            None,
+        );
+        let from = "services/a/src/x.ts";
+        assert_eq!(
+            r.resolve(from, "@shop/events/testing"),
+            Resolution::File("packages/events/src/testing/index.ts".into())
+        );
+        assert_eq!(
+            r.resolve(from, "@shop/events/schemas/order"),
+            Resolution::File("packages/events/src/schemas/order.ts".into())
+        );
+        // Not in `exports`: the folder, then `src/`.
+        assert_eq!(
+            r.resolve(from, "@shop/events/bus"),
+            Resolution::File("packages/events/src/bus.ts".into())
         );
     }
 

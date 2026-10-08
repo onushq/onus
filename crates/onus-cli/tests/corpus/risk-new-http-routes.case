@@ -1,0 +1,23 @@
+New HTTP endpoints defined by file-based routing (a SvelteKit `+server.ts`
+and a Next.js `route.ts`) serve files. Each is public surface.
+
+=== both package.json
+{ "name": "web", "private": true, "main": "src/index.ts" }
+=== both src/index.ts
+export const ok = true;
+=== both svelte.config.js
+export default {};
+=== head src/routes/vault/[artifactId]/file/+server.ts
+export async function GET({ params }: { params: { artifactId: string } }) {
+  return new Response(params.artifactId, { headers: { 'cache-control': 'public, max-age=60' } });
+}
+=== head app/api/cv/[slug]/route.ts
+export async function GET(_req: Request, ctx: { params: { slug: string } }) {
+  return new Response(ctx.params.slug);
+}
+export async function DELETE() {
+  return new Response(null, { status: 204 });
+}
+=== expect
+row route-added ● title~"`GET /vault/[artifactId]/file`"
+row route-added ● title~"`GET /api/cv/[slug]`" title~"`DELETE /api/cv/[slug]`"

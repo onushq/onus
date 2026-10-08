@@ -18,7 +18,7 @@ The Onus action downloads the release binary for the runner, checks its SHA-256,
           - uses: actions/checkout@v7
             with:
               fetch-depth: 0
-          - uses: onushq/onus/action@v0.3.0
+          - uses: onushq/onus/action@v0.4.0
             id: onus
             with:
               fail-on: rule-violation,secrets
@@ -59,6 +59,8 @@ Most of a report's time goes into mapping the two commits. A pull request is rep
 
 The cached map's file name is a hash of everything that shapes it: the base commit, the Onus version, the onus.yaml and its packs, the plugins file and trusted mode, and any `--base-scip` indexes. A change to any of them builds a new map; a cached file is never updated in place, and one that cannot be read is ignored. The report is byte for byte the same with or without the cache.
 
+With a cached base map, Onus extracts only the base commit's changed files (plus `onus.yaml`, its packs and `.gitignore` files), which roughly halves the time of a report on a large repository: about 12 seconds instead of 22 for a pull request in a 31,000-file repository.
+
 ## Was the report useful? 👍 👎 and /onus caught
 
 The Phase 1 question is whether reviewers prefer the report to the raw diff. Two signals answer it, both left on the pull request itself:
@@ -82,7 +84,7 @@ To acknowledge those replies with a 🚀, add a second workflow; the same action
         if: github.event.issue.pull_request && startsWith(github.event.comment.body, '/onus caught')
         runs-on: ubuntu-latest
         steps:
-          - uses: onushq/onus/action@v0.3.0
+          - uses: onushq/onus/action@v0.4.0
 
 The comment also carries the report's metrics line in a hidden HTML comment. `scripts/onus-metrics.sh` in the Onus repository reads all of it back with the GitHub CLI, one JSON line per pull request, or one line of totals with `--summary` (reports, large reports, the share of 👍 on large pull requests, the catch rate, changed lines per row, time to first review):
 

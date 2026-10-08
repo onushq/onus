@@ -1,0 +1,26 @@
+Control: a test case is removed while the code it tested stays.
+
+=== both package.json
+{ "name": "pricing", "private": true, "main": "src/index.ts" }
+=== both src/index.ts
+export function discount(total: number): number {
+  return total > 100 ? 10 : 0;
+}
+=== base src/index.spec.ts
+import { discount } from './index';
+
+it('discounts large orders', () => {
+  expect(discount(200)).toBe(10);
+});
+it('does not discount small orders', () => {
+  expect(discount(50)).toBe(0);
+});
+=== head src/index.spec.ts
+import { discount } from './index';
+
+it('discounts large orders', () => {
+  expect(discount(200)).toBe(10);
+});
+=== expect
+row test-weakened ● title~"weakened"
+attention 1

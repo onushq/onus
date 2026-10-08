@@ -4,6 +4,22 @@ All notable changes to Onus are recorded here. The format follows [Keep a Change
 
 ## Unreleased
 
+## [0.4.0] - 2026-10-08
+
+M7 tuning, from an audit of reports on 20 large real pull requests: fewer wrong facts, flags on the changes that need a person, less noise, faster reports. Audited again afterwards, rows with wrong facts went from 7% to under 1% and the reviewers' usefulness score from 2.1 to 3.0 out of 5 ([evaluation](docs/evaluation/2026-10-08-m7-replay.md)). A regression corpus (`crates/onus-cli/tests/corpus`) reproduces each kind of mistake with invented code and keeps it fixed.
+
+- **Fewer false alarms:**
+  - A contract change is breaking only when a user or implementation outside the change was not updated. Casts (`as X`) no longer count as implementations; published packages and packages with unresolved imports stay breaking.
+  - Types are compared with object and union members sorted, so regenerated code that only reorders is no change.
+  - An await, guard or throw that moved into another function (a body extracted into a helper) is not reported as removed.
+  - Tests that moved, or went with the code they tested, no longer read as weakened; the latter get a quiet `tests-removed-with-code` row.
+  - Imports of package subpaths (`pkg/utils`) resolve through `exports`, mapping build output back to source, so users of shared packages are no longer missed.
+  - Lockfile rows list the installed versions that change, or say none do (patch hashes and checksums are not versions).
+  - First-use rows skip Node's built-in modules and APIs already used through a namespace.
+- **Flags by risk class**, each its own row that needs a person: migrations (with what they do to stored data), GraphQL operations (separately when they skip authentication), HTTP routes from file-based routing and controllers, authentication and authorization code, patched dependencies, root build config and infrastructure. Rows that need a person rank first.
+- **Less noise:** generated code is one quiet row per component; config rows name the keys or Dockerfile instructions that changed; build-tool and workspace files have their own classes instead of "runtime configuration"; widespread config edits are grouped by the keys they change.
+- **Faster reports:** `onus report` compares only the paths git reports as different, writes both trees on all cores, shares parsed facts between the two maps, and with a cached base map extracts only the base's changed files. On a 31,000-file repository a report takes about 22 s instead of 29 s, and about 12 s with the cache.
+
 ## [0.3.0] - 2026-10-07
 
 - **Sharper reports and `onus_check`:**

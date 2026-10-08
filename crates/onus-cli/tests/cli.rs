@@ -293,3 +293,73 @@ fn help_for_an_unknown_name_fails_with_the_list() {
     assert!(err.contains("no command or guide topic named `nope`"));
     assert!(err.contains("getting-started"));
 }
+
+#[test]
+fn both_trees_of_a_report_match_their_commits() {
+    let repo = tempfile::tempdir().unwrap();
+    let r = repo.path();
+    git(r, &["init", "-q", "-b", "main"]);
+    let write = |p: &str, text: &str| {
+        let path = r.join(p);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    write("onus.yaml", "components: {}\n");
+    write("src/.gitignore", "*.log\n");
+    write("src/kept.ts", "export const kept = 1;\n");
+    write("src/changed.ts", "export const v = 1;\n");
+    write("src/gone.ts", "export const gone = 1;\n");
+    write("src/odd name[1].ts", "export const odd = 1;\n");
+    git(r, &["add", "-A"]);
+    git(r, &["commit", "-q", "-m", "base"]);
+    write("src/changed.ts", "export const v = 2;\n");
+    write("src/new.ts", "export const fresh = 1;\n");
+    write("src/odd name[1].ts", "export const odd = 2;\n");
+    std::fs::remove_file(r.join("src/gone.ts")).unwrap();
+    git(r, &["add", "-A"]);
+    git(r, &["commit", "-q", "-m", "head"]);
+
+    let read = |root: &Path, p: &str| std::fs::read_to_string(root.join(p)).ok();
+    for partial in [false, true] {
+        let pair = onus_cli::materialize_pair(r, "main~1", "main", partial).unwrap();
+        let (base, head) = (pair.base.dir.path(), pair.head.dir.path());
+        let changed: Vec<&str> = pair.changed.iter().map(String::as_str).collect();
+        assert_eq!(
+            changed,
+            [
+                "src/changed.ts",
+                "src/gone.ts",
+                "src/new.ts",
+                "src/odd name[1].ts"
+            ]
+        );
+        assert_eq!(
+            read(head, "src/changed.ts").as_deref(),
+            Some("export const v = 2;\n")
+        );
+        assert_eq!(read(head, "src/gone.ts"), None);
+        assert_eq!(
+            read(base, "src/changed.ts").as_deref(),
+            Some("export const v = 1;\n")
+        );
+        assert_eq!(
+            read(base, "src/odd name[1].ts").as_deref(),
+            Some("export const odd = 1;\n")
+        );
+        assert_eq!(
+            read(base, "src/gone.ts").as_deref(),
+            Some("export const gone = 1;\n")
+        );
+        assert_eq!(read(base, "src/new.ts"), None);
+        // What config loading and the walk read is always there.
+        assert!(read(base, "onus.yaml").is_some() && read(base, "src/.gitignore").is_some());
+        // Unchanged files only once the partial base is completed.
+        assert_eq!(read(base, "src/kept.ts").is_some(), !partial);
+        pair.complete_base().unwrap();
+        assert_eq!(
+            read(base, "src/kept.ts").as_deref(),
+            Some("export const kept = 1;\n")
+        );
+        assert_eq!(read(base, "src/new.ts"), None);
+    }
+}

@@ -1,6 +1,7 @@
 //! Ranking of semantic changes (PLAN.md section 5.3).
 //!
-//! Intent mismatches come first, then security-sensitive changes, breaking
+//! Intent mismatches come first, then rows that need a person, and within
+//! each of those groups: security-sensitive changes, breaking
 //! changes, dependency and novelty, rules of the game, config, additive
 //! contracts, new relationships, tests and finally internal changes. Ties
 //! break on low confidence (unknowns rank as higher risk), then sensitivity
@@ -49,6 +50,7 @@ pub fn tier(change: &SemanticChange) -> u8 {
 pub fn sort_key(change: &SemanticChange) -> impl Ord + '_ {
     (
         !change.hints.intent_mismatch,
+        !change.hints.needs_person,
         tier(change),
         change.hints.confidence != Confidence::Low,
         Reverse(change.hints.labels.len()),

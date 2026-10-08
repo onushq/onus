@@ -1,0 +1,35 @@
+The GraphQL schema gains a query that skips authentication and two
+mutations. New operations are public API whose access checks need a person.
+
+=== both package.json
+{ "name": "community", "private": true, "main": "src/index.ts" }
+=== both src/index.ts
+export const ok = true;
+=== base src/typedefs/insight.graphql
+type Post {
+  id: ID!
+  body: String!
+}
+
+extend type Query {
+  posts: [Post!]!
+}
+=== head src/typedefs/insight.graphql
+type Post {
+  id: ID!
+  body: String!
+  readingMinutes: Int!
+}
+
+extend type Query {
+  posts: [Post!]!
+  postImage(id: ID!): String @skipAuth
+}
+
+extend type Mutation {
+  uploadPostImage(data: String!): ID!
+  deletePost(id: ID!): Boolean!
+}
+=== expect
+row public-api-changed ● title~"`postImage`" why~"`@skipAuth`"
+row public-api-changed ● title~"`uploadPostImage`" title~"`deletePost`"

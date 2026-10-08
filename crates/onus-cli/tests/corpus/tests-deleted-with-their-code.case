@@ -1,0 +1,28 @@
+Dead code is deleted together with its tests. The tests covered nothing that
+still exists, so coverage is not weakened.
+
+=== both package.json
+{ "name": "front", "private": true, "main": "src/index.ts" }
+=== both src/index.ts
+export { formatName } from './format';
+=== both src/format.ts
+export function formatName(first: string, last: string): string {
+  return `${first} ${last}`;
+}
+=== base src/legacy.ts
+export function legacyFormat(name: string): string {
+  return name.toUpperCase();
+}
+=== base src/legacy.spec.ts
+import { legacyFormat } from './legacy';
+
+it('upper-cases', () => {
+  expect(legacyFormat('a')).toBe('A');
+});
+it('keeps empty names', () => {
+  expect(legacyFormat('')).toBe('');
+});
+=== expect
+no test-weakened
+row tests-removed-with-code ○ title~"removed with the code they tested"
+attention 0

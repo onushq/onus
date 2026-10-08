@@ -1,0 +1,32 @@
+New code uses a Node built-in and a type the repository already uses through
+a namespace (`WebSocket.RawData` before, `RawData` now). Neither is a first
+use of a third-party API.
+
+=== both package.json
+{ "name": "live", "private": true, "main": "src/index.ts", "dependencies": { "ws": "8.18.0" } }
+=== both src/socket.ts
+import { createServer } from 'node:http';
+import { existsSync } from 'fs';
+import WebSocket from 'ws';
+
+export const server = createServer();
+export const exists = existsSync('/tmp');
+
+export function size(data: WebSocket.RawData): number {
+  return Array.isArray(data) ? data.length : 1;
+}
+=== base src/index.ts
+export { size } from './socket';
+=== head src/index.ts
+import { STATUS_CODES } from 'node:http';
+import { readFileSync } from 'fs';
+import type { RawData } from 'ws';
+
+export { size } from './socket';
+export const notFound = STATUS_CODES[404];
+export const read = (p: string) => readFileSync(p, 'utf8');
+export function isText(data: RawData): boolean {
+  return typeof data === 'string';
+}
+=== expect
+no external-api-first-use
