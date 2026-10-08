@@ -4,6 +4,13 @@ All notable changes to Onus are recorded here. The format follows [Keep a Change
 
 ## Unreleased
 
+Phase 2 complete:
+
+- `onus_impact` (`onus query impact <target> --change remove|rename|change-signature|add-required-member|change-behavior`): before a change, the files that break or need a check, one site each (for a new required member only the implementations, found in the source text), and the tests that exercise the target.
+- `onus_invariants` (`onus query invariants [target]`): the invariants onus.yaml declares.
+- `onus mcp --http <addr>`: the MCP tools over streamable HTTP. Only loopback host names are answered unless `--allow-host` adds one; every tool answers the same over stdio and HTTP.
+- `scripts/benchmark-references.mjs`: compares the map's dependents with the TypeScript compiler's find-all-references. Recall is 1.000 on the fixture and 0.999 on Twenty ([benchmark](docs/evaluation/2026-10-08-references-benchmark.md)).
+
 ## [0.4.1] - 2026-10-08
 
 - From replaying every commit of three SvelteKit and TypeScript monorepos:

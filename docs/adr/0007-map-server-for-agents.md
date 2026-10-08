@@ -66,3 +66,9 @@ After `onus_check` was made precise, a second evaluation (3 runs per condition, 
 
 Onus does not compete with agents or their harnesses. Users bring any agent, and Onus assesses the risk of each change and asks agents for evidence. The MCP server is therefore an **evidence channel**: `onus_check` returns verified facts and a checklist to answer, and says what it does not verify, so a clean result is never read as approval. The navigation tools remain experimental.
 
+## Amendment (2026-10-08): Phase 2 completed
+
+- `impact(target, change)` and `invariants(target)` are typed queries like the others, served by `onus_impact` and `onus_invariants`. `impact` reads source text only for one question, which files implement a type, using the same detection as the diff (now in `onus-core`); the index is given the worktree root for it.
+- The MCP server also speaks streamable HTTP (`onus mcp --http`), with `rmcp`'s server behind a minimal `hyper` loop. It answers only requests naming a loopback host unless more are allowed, since the tools describe the code and have no authentication; Phase 3's tokens are the way to open it wider.
+- The gate is a references benchmark against the TypeScript language service rather than hand-written question and answer pairs: the compiler gives ground truth for every symbol, so the sample can be large and rerun on any repository.
+
