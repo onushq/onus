@@ -9,6 +9,7 @@ pub mod change;
 pub mod config;
 pub mod hash;
 pub mod ids;
+pub mod implementations;
 pub mod map;
 pub mod paths;
 pub mod plugins;

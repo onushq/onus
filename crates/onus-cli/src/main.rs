@@ -257,6 +257,13 @@ Examples:
         /// Build the map in this process instead of the shared map server.
         #[arg(long)]
         no_server: bool,
+        /// Serve streamable HTTP on this address (such as 127.0.0.1:8765) instead of stdio.
+        #[arg(long, value_name = "ADDR")]
+        http: Option<std::net::SocketAddr>,
+        /// A host name clients may use besides localhost (repeatable). The tools are read-only
+        /// but describe the code: only allow hosts on a network you trust.
+        #[arg(long, value_name = "HOST", requires = "http")]
+        allow_host: Vec<String>,
     },
     /// Ask the codebase map a question; the same answers as the MCP tools.
     #[command(after_long_help = "\
@@ -265,6 +272,7 @@ Examples:
   onus query find format phone
   onus query dependents UserPreferences --depth 2
   onus query tests-for services/billing/src/payments.ts
+  onus query impact UserPreferences --change add-required-member
   onus query check --base main")]
     Query {
         #[command(subcommand)]
@@ -339,6 +347,20 @@ enum QueryCmd {
     Component { id: String },
     /// A file: component, symbols, imports and importers.
     File { path: String },
+    /// What breaks if a symbol, file or component changes in a given way.
+    Impact {
+        target: String,
+        /// remove, rename, change-signature, add-required-member or change-behavior.
+        #[arg(long, value_enum)]
+        change: ChangeArg,
+        #[arg(long, default_value_t = 0)]
+        limit: usize,
+    },
+    /// Declared invariants of a symbol, file or component (all when no target is given).
+    Invariants {
+        #[arg(default_value = "")]
+        target: String,
+    },
     /// Changes in meaning between a commit and the worktree as it is now.
     Check {
         /// The commit to compare with.
@@ -347,6 +369,28 @@ enum QueryCmd {
     },
     /// The map server's worktrees and cache use.
     Stats,
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum ChangeArg {
+    Remove,
+    Rename,
+    ChangeSignature,
+    AddRequiredMember,
+    ChangeBehavior,
+}
+
+impl From<ChangeArg> for onus_index::Change {
+    fn from(c: ChangeArg) -> Self {
+        use onus_index::Change;
+        match c {
+            ChangeArg::Remove => Change::Remove,
+            ChangeArg::Rename => Change::Rename,
+            ChangeArg::ChangeSignature => Change::ChangeSignature,
+            ChangeArg::AddRequiredMember => Change::AddRequiredMember,
+            ChangeArg::ChangeBehavior => Change::ChangeBehavior,
+        }
+    }
 }
 
 impl QueryCmd {
@@ -383,6 +427,16 @@ impl QueryCmd {
             QueryCmd::Owners { target } => q(Query::Owners { target }),
             QueryCmd::Component { id } => q(Query::Component { id }),
             QueryCmd::File { path } => q(Query::File { path }),
+            QueryCmd::Impact {
+                target,
+                change,
+                limit,
+            } => q(Query::Impact {
+                target,
+                change: change.into(),
+                limit,
+            }),
+            QueryCmd::Invariants { target } => q(Query::Invariants { target }),
             QueryCmd::Check { base } => Op::Check { base: Some(base) },
             QueryCmd::Stats => Op::Stats,
         }
@@ -573,9 +627,23 @@ fn run(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Cmd::Help { topic } => help(topic.as_deref()),
-        Cmd::Mcp { repo, no_server } => {
+        Cmd::Mcp {
+            repo,
+            no_server,
+            http,
+            allow_host,
+        } => {
             let root = onus_cli::daemon::worktree_root(&repo);
-            onus_cli::mcp::serve_stdio(root.clone(), backend(&root, no_server))?;
+            match http {
+                Some(addr) => onus_cli::mcp::serve_http(
+                    root.clone(),
+                    backend(&root, no_server),
+                    addr,
+                    allow_host,
+                    |bound| eprintln!("onus: MCP over HTTP at http://{bound}/"),
+                )?,
+                None => onus_cli::mcp::serve_stdio(root.clone(), backend(&root, no_server))?,
+            }
             Ok(0)
         }
         Cmd::Query {

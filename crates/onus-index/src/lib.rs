@@ -49,6 +49,8 @@ pub struct MapIndex {
     file_symbols: HashMap<String, Vec<usize>>,
     /// Symbol or module id → tests that exercise it.
     tested_by: HashMap<String, Vec<usize>>,
+    /// The tree the map was built from, to read source text (`impact`).
+    root: Option<std::path::PathBuf>,
 }
 
 impl MapIndex {
@@ -164,6 +166,7 @@ impl MapIndex {
         }
 
         MapIndex {
+            root: None,
             map,
             node,
             names,
@@ -179,6 +182,231 @@ impl MapIndex {
             file_symbols,
             tested_by,
         }
+    }
+
+    /// The same index, able to read the tree it was built from: `impact`
+    /// then finds implementations by their source text.
+    pub fn with_root(mut self, root: impl Into<std::path::PathBuf>) -> MapIndex {
+        self.root = Some(root.into());
+        self
+    }
+
+    /// What breaks if `target` changes in the way `change` says: the sites
+    /// outside the target's own file that depend on it, and the tests that
+    /// exercise it.
+    pub fn impact(&self, target: &str, change: Change, limit: usize) -> Result<Impact, String> {
+        let limit = clamp(limit);
+        let starts = self.start_nodes(target)?;
+        let start_ids: Vec<String> = starts
+            .iter()
+            .map(|&n| self.names[n as usize].clone())
+            .collect();
+        // The files that define the targets do not break themselves.
+        let own_files: BTreeSet<&str> = start_ids
+            .iter()
+            .filter_map(|id| self.symbol.get(id.as_str()))
+            .filter_map(|&i| self.map.symbols[i].loc.as_ref().map(|l| l.file.as_str()))
+            .collect();
+        let kinds: &[EdgeKind] = match change {
+            Change::Remove | Change::Rename => {
+                &[EdgeKind::Imports, EdgeKind::Calls, EdgeKind::ReferencesType]
+            }
+            Change::ChangeSignature => &[EdgeKind::Calls, EdgeKind::ReferencesType],
+            Change::AddRequiredMember => &[EdgeKind::ReferencesType, EdgeKind::Calls],
+            Change::ChangeBehavior => &[EdgeKind::Calls, EdgeKind::ReferencesType],
+        };
+        // (file, line, kind, used id, depth) for every use.
+        let mut raw: Vec<(String, u32, EdgeKind, String, u32)> = Vec::new();
+        // Direct uses, through the target or any of its members.
+        let prefixes: Vec<String> = start_ids.iter().map(|id| format!("{id}.")).collect();
+        let mut callers: BTreeSet<String> = BTreeSet::new();
+        for e in &self.map.edges {
+            let hit = start_ids.iter().any(|id| &e.to == id)
+                || prefixes.iter().any(|p| e.to.starts_with(p.as_str()));
+            if !hit || !kinds.contains(&e.kind) {
+                continue;
+            }
+            for s in &e.sites {
+                if !own_files.contains(s.file.as_str()) {
+                    raw.push((s.file.clone(), s.line, e.kind, e.to.clone(), 1));
+                }
+            }
+            callers.insert(e.from.clone());
+        }
+        // A behavior change reaches the callers' callers too.
+        if change == Change::ChangeBehavior {
+            for e in &self.map.edges {
+                if callers.contains(&e.to) && e.kind == EdgeKind::Calls {
+                    for s in &e.sites {
+                        if !own_files.contains(s.file.as_str()) {
+                            raw.push((s.file.clone(), s.line, e.kind, e.to.clone(), 2));
+                        }
+                    }
+                }
+            }
+        }
+        // One site per file: the nearest, then the first line.
+        let mut first: BTreeMap<String, ImpactSite> = BTreeMap::new();
+        for (file, line, kind, via, depth) in raw {
+            let site = ImpactSite {
+                component: self
+                    .file
+                    .get(file.as_str())
+                    .and_then(|&i| self.map.files[i].component_id.clone()),
+                test: self
+                    .file
+                    .get(file.as_str())
+                    .is_some_and(|&i| self.map.files[i].is_test),
+                file: file.clone(),
+                line,
+                kind: kind.as_str().to_string(),
+                uses: via,
+                depth,
+            };
+            match first.get_mut(&file) {
+                Some(e) if (site.depth, site.line) < (e.depth, e.line) => *e = site,
+                Some(_) => {}
+                None => {
+                    first.insert(file, site);
+                }
+            }
+        }
+        // A new required member breaks only what implements the type.
+        let mut unverified = false;
+        if change == Change::AddRequiredMember {
+            let name = start_ids
+                .first()
+                .map(|id| {
+                    ids::display_name(id)
+                        .rsplit('.')
+                        .next()
+                        .unwrap_or("")
+                        .to_string()
+                })
+                .unwrap_or_default();
+            match &self.root {
+                Some(root) => {
+                    first.retain(|file, site| {
+                        let text = std::fs::read_to_string(onus_core::paths::native(root, file))
+                            .unwrap_or_default();
+                        match onus_core::implementations::implementation_line(&text, &name) {
+                            Some(line) => {
+                                site.line = line;
+                                site.kind = "implements".into();
+                                true
+                            }
+                            None => false,
+                        }
+                    });
+                }
+                None => unverified = true,
+            }
+        }
+        let mut sites: Vec<ImpactSite> = first.into_values().collect();
+        sites.sort_by(|a, b| {
+            (a.depth, !a.test, &a.file, a.line).cmp(&(b.depth, !b.test, &b.file, b.line))
+        });
+        let total = sites.len();
+        let mut components: BTreeMap<String, usize> = BTreeMap::new();
+        for s in &sites {
+            if let Some(c) = &s.component {
+                *components.entry(c.clone()).or_default() += 1;
+            }
+        }
+        sites.truncate(limit);
+        let tests = self
+            .tests_for(target, limit)
+            .map(|t| t.tests)
+            .unwrap_or_default();
+        let mut notes = vec![
+            "Static analysis: uses through dependency injection, reflection or string lookups \
+             are not seen"
+                .to_string(),
+        ];
+        notes.push(
+            match change {
+                Change::Remove => "every listed file imports, calls or names the target and stops compiling",
+                Change::Rename => "every listed file must use the new name",
+                Change::ChangeSignature => "every listed file calls the target or names its type; check each against the new signature",
+                Change::AddRequiredMember => "only implementations break; code that only reads the type is unaffected",
+                Change::ChangeBehavior => "nothing stops compiling; the listed callers (and their callers, depth 2) and the tests are what to re-check",
+            }
+            .to_string(),
+        );
+        if unverified {
+            notes.push(
+                "the source text is not available, so files that name the type are listed; \
+                 some may only read it"
+                    .into(),
+            );
+        }
+        Ok(Impact {
+            target: target.to_string(),
+            resolved: start_ids,
+            change,
+            total,
+            truncated: total > limit,
+            components,
+            sites,
+            tests,
+            notes,
+        })
+    }
+
+    /// The declared invariants of a symbol, or of every symbol in a
+    /// component or file (all of them when `target` is empty).
+    pub fn invariants(&self, target: &str) -> Result<Invariants, String> {
+        let wanted: Option<BTreeSet<String>> = if target.is_empty() {
+            None
+        } else {
+            let resolved = self.resolve(target);
+            if resolved.is_empty() {
+                return Err(no_match(target));
+            }
+            let mut ids = BTreeSet::new();
+            for t in &resolved {
+                match t {
+                    Target::Symbol(id) | Target::Node(id) => {
+                        ids.insert(id.clone());
+                    }
+                    Target::File(path) => {
+                        for &si in self.file_symbols.get(path).into_iter().flatten() {
+                            ids.insert(self.map.symbols[si].id.clone());
+                        }
+                    }
+                    Target::Module(m) => {
+                        if let Some(f) = self.module_file.get(m) {
+                            for &si in self.file_symbols.get(f).into_iter().flatten() {
+                                ids.insert(self.map.symbols[si].id.clone());
+                            }
+                        }
+                    }
+                    Target::Component(c) => {
+                        for s in &self.map.symbols {
+                            if s.component_id.as_deref() == Some(c) {
+                                ids.insert(s.id.clone());
+                            }
+                        }
+                    }
+                }
+            }
+            Some(ids)
+        };
+        let contracts: Vec<DeclaredInvariants> = self
+            .map
+            .symbols
+            .iter()
+            .filter(|s| !s.invariants.is_empty())
+            .filter(|s| wanted.as_ref().is_none_or(|w| w.contains(&s.id)))
+            .map(|s| DeclaredInvariants {
+                symbol: symbol_ref(s),
+                invariants: s.invariants.clone(),
+            })
+            .collect();
+        Ok(Invariants {
+            target: target.to_string(),
+            contracts,
+        })
     }
 
     pub fn map(&self) -> &CodebaseMap {
@@ -992,6 +1220,66 @@ pub struct FileInfo {
     pub diagnostics: Vec<String>,
 }
 
+/// A change `impact` reasons about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum Change {
+    /// The symbol is deleted or no longer exported.
+    Remove,
+    /// The symbol gets another name.
+    Rename,
+    /// Its parameters, return type or field types change.
+    ChangeSignature,
+    /// An interface or type gains a required member.
+    AddRequiredMember,
+    /// Only what it does changes; its signature stays.
+    ChangeBehavior,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ImpactSite {
+    pub file: String,
+    pub line: u32,
+    pub component: Option<String>,
+    /// `imports`, `calls`, `references-type` or `implements`.
+    pub kind: String,
+    /// The id it uses (the target or one of its members).
+    pub uses: String,
+    /// 1 for direct uses, 2 for callers of callers.
+    pub depth: u32,
+    pub test: bool,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Impact {
+    pub target: String,
+    pub resolved: Vec<String>,
+    pub change: Change,
+    /// Files that break or need a check, one site each.
+    pub total: usize,
+    pub truncated: bool,
+    pub components: BTreeMap<String, usize>,
+    pub sites: Vec<ImpactSite>,
+    pub tests: Vec<TestRef>,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DeclaredInvariants {
+    pub symbol: SymbolRef,
+    pub invariants: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Invariants {
+    pub target: String,
+    pub contracts: Vec<DeclaredInvariants>,
+}
+
 /// The questions the index answers, as one type for the CLI and MCP.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "query", rename_all = "kebab-case")]
@@ -1034,6 +1322,18 @@ pub enum Query {
     Component { id: String },
     /// A file: component, symbols, imports and importers.
     File { path: String },
+    /// What breaks if a symbol, file or component changes in a given way.
+    Impact {
+        target: String,
+        change: Change,
+        #[serde(default)]
+        limit: usize,
+    },
+    /// Declared invariants of a symbol, file or component (all when empty).
+    Invariants {
+        #[serde(default)]
+        target: String,
+    },
 }
 
 fn one() -> u32 {
@@ -1086,6 +1386,12 @@ impl MapIndex {
                 Some(f) => json(serde_json::to_value(f)),
                 None => Err(format!("no file `{path}` in the map")),
             },
+            Query::Impact {
+                target,
+                change,
+                limit,
+            } => json(serde_json::to_value(self.impact(target, *change, *limit)?)),
+            Query::Invariants { target } => json(serde_json::to_value(self.invariants(target)?)),
         }
     }
 }

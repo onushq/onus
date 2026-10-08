@@ -89,6 +89,26 @@ pub struct TargetParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ImpactParams {
+    /// A symbol id, a bare symbol name, a file path, a module id or a
+    /// component id.
+    pub target: String,
+    /// The change to reason about: `remove`, `rename`, `change-signature`,
+    /// `add-required-member` or `change-behavior`.
+    pub change: onus_index::Change,
+    /// At most this many sites (default 50).
+    #[serde(default)]
+    pub limit: usize,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct InvariantsParams {
+    /// A symbol, file or component; empty for every declared invariant.
+    #[serde(default)]
+    pub target: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ComponentParams {
     /// A component id, as listed by `onus_status` or returned by other tools.
     pub id: String,
@@ -247,6 +267,33 @@ impl OnusMcp {
     }
 
     #[tool(
+        name = "onus_impact",
+        description = "Before changing a symbol, file or component: what breaks if you remove it, rename it, change its signature, add a required member to it, or change only its behavior. Returns one site per file (file, line, how it is used), test files first among equals, and the tests that exercise it. Use the sites as the list of places to update and the tests as what to run."
+    )]
+    async fn impact(
+        &self,
+        Parameters(p): Parameters<ImpactParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.query(Query::Impact {
+            target: p.target,
+            change: p.change,
+            limit: p.limit,
+        })
+        .await
+    }
+
+    #[tool(
+        name = "onus_invariants",
+        description = "The invariants onus.yaml declares for a symbol, file or component (all of them when the target is empty): rules a change must keep, such as \"amounts are in cents\"."
+    )]
+    async fn invariants(
+        &self,
+        Parameters(p): Parameters<InvariantsParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.query(Query::Invariants { target: p.target }).await
+    }
+
+    #[tool(
         name = "onus_component",
         description = "A component: kind, owners, labels, public symbols, the components it uses and that use it, external services and events."
     )]
@@ -294,6 +341,52 @@ impl ServerHandler for OnusMcp {
                  summary as evidence; it reports facts, it does not approve the change.",
             )
     }
+}
+
+/// Serves MCP over streamable HTTP on `addr` until the process stops.
+/// Requests must name an allowed host (`Host` header): loopback names by
+/// default, which keeps other machines and DNS rebinding out. `ready` is
+/// called with the bound address (useful with port 0).
+pub fn serve_http(
+    root: PathBuf,
+    backend: Arc<dyn Backend>,
+    addr: std::net::SocketAddr,
+    allowed_hosts: Vec<String>,
+    ready: impl FnOnce(std::net::SocketAddr),
+) -> Result<()> {
+    use rmcp::transport::streamable_http_server::{
+        StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
+    };
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()?;
+    runtime.block_on(async move {
+        let mut config = StreamableHttpServerConfig::default();
+        if !allowed_hosts.is_empty() {
+            let mut hosts = config.allowed_hosts.clone();
+            hosts.extend(allowed_hosts);
+            config = config.with_allowed_hosts(hosts);
+        }
+        let service = StreamableHttpService::new(
+            move || Ok(OnusMcp::new(root.clone(), backend.clone())),
+            Arc::new(LocalSessionManager::default()),
+            config,
+        );
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        ready(listener.local_addr()?);
+        loop {
+            let (stream, _) = listener.accept().await?;
+            let service = hyper_util::service::TowerToHyperService::new(service.clone());
+            tokio::spawn(async move {
+                let io = hyper_util::rt::TokioIo::new(stream);
+                // A client that drops its connection ends only that connection.
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(io, service)
+                    .await;
+            });
+        }
+    })
 }
 
 /// Serves MCP on stdin and stdout until the client disconnects.
