@@ -10,6 +10,7 @@ pub mod init;
 pub mod merge;
 pub mod plugin;
 pub mod registry;
+pub mod traces;
 pub mod walk;
 
 pub use build::{BuildOptions, build_map};

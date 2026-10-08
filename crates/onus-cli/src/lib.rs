@@ -55,6 +55,9 @@ pub struct DiffOptions {
     /// Called before the base map is built, for a base tree written only
     /// partly (see [`materialize_pair`]).
     pub complete_base: Option<BaseCompleter>,
+    /// OpenTelemetry traces (OTLP JSON) whose calls are added to both maps
+    /// (ADR 0010), so a traced call is a fact of both trees, not a change.
+    pub traces: Vec<PathBuf>,
 }
 
 /// Plugins and trusted mode (ADR 0006), the same for every tree.
@@ -457,7 +460,7 @@ pub fn diff_dirs(base: &Path, head: &Path, opts: &DiffOptions) -> Result<Outcome
         },
         None => None,
     };
-    let base_map = match cached {
+    let mut base_map = match cached {
         Some(map) => map,
         None => {
             if let Some(complete) = &opts.complete_base {
@@ -481,13 +484,21 @@ pub fn diff_dirs(base: &Path, head: &Path, opts: &DiffOptions) -> Result<Outcome
             map
         }
     };
-    let head_map = build_with(
+    let mut head_map = build_with(
         head,
         config.clone(),
         opts.head_commit.clone(),
         providers,
         &opts.head_scip,
     )?;
+    if !opts.traces.is_empty() {
+        let b = add_traces(&mut base_map, &opts.traces)?;
+        let h = add_traces(&mut head_map, &opts.traces)?;
+        notes.push(format!(
+            "traces: {} spans; {} traced calls added to the base map, {} to the head map",
+            h.spans, b.edges_added, h.edges_added
+        ));
+    }
     let report = onus_diff::diff(&DiffInput {
         base_root: base,
         head_root: head,
@@ -505,6 +516,15 @@ pub fn diff_dirs(base: &Path, head: &Path, opts: &DiffOptions) -> Result<Outcome
         head_map,
         notes,
     })
+}
+
+/// Adds the calls of OpenTelemetry traces to a map (see
+/// [`onus_map::traces`]).
+pub fn add_traces(
+    map: &mut CodebaseMap,
+    traces: &[PathBuf],
+) -> Result<onus_map::traces::TraceStats> {
+    onus_map::traces::add_traced_edges(map, traces).map_err(|e| anyhow::anyhow!(e))
 }
 
 pub fn read_intent(path: &Path) -> Result<Option<Intent>> {
