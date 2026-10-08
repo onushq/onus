@@ -7,6 +7,13 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
+ignore = [
+  # proc-macro-error2 is unmaintained (not vulnerable). It reaches us only
+  # through biscuit-quote, biscuit-auth's compile-time Datalog macros, which
+  # cannot be turned off (biscuit-auth 6.0 does not build without them).
+  # Revisit when biscuit-auth drops it.
+  { id = "RUSTSEC-2026-0173", reason = "compile-time only, via biscuit-auth's required macros" },
+]
 
 [licenses]
 version = 2
