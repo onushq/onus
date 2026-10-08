@@ -4,6 +4,8 @@ All notable changes to Onus are recorded here. The format follows [Keep a Change
 
 ## Unreleased
 
+## [0.4.1] - 2026-10-08
+
 - From replaying every commit of three SvelteKit and TypeScript monorepos:
   - Private declarations that share a name or a small body in different files are no longer reported as renames or moves.
   - A type that only gains optional parameters or fields is a compatible change (`contract-type-widened`).
