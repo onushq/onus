@@ -200,3 +200,80 @@ fn changes_take_the_lane_their_rows_and_floors_decide() {
     let j: serde_json::Value = serde_json::from_str(&verdict).unwrap();
     assert_eq!(j["judgment"]["verdict"], "approve", "{j}");
 }
+
+#[test]
+fn reverts_and_incidents_flow_back_into_the_record() {
+    let dir = repo();
+    let r = dir.path();
+    change(
+        r,
+        "feature",
+        &[("services/orders/src/extra.ts", "export const EXTRA = 1;\n")],
+    );
+    git(r, &["checkout", "-q", "main"]);
+    git(r, &["merge", "-q", "--no-ff", "--no-edit", "feature"]);
+    let merged = String::from_utf8(
+        Command::new("git")
+            .arg("-C")
+            .arg(r)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_string();
+    let file = out(r, "outcomes.jsonl");
+    for (change, commit) in [("acme/shop#1", merged.as_str()), ("acme/shop#2", "0000000")] {
+        let (code, _, err) = onus(
+            r,
+            &[
+                "outcomes",
+                "record",
+                "--file",
+                &file,
+                "--change",
+                change,
+                "--agent",
+                "test/model/x",
+                "--lane",
+                "auto-merge",
+                "--result",
+                "merged",
+                "--commit",
+                commit,
+            ],
+        );
+        assert_eq!(code, 0, "{err}");
+    }
+    git(r, &["revert", "--no-edit", "-m", "1", "HEAD"]);
+    let (code, said, err) = onus(r, &["outcomes", "ingest-reverts", "--file", &file]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        said,
+        "1 reverts found, 1 recorded against changes on record"
+    );
+    let (code, _, err) = onus(
+        r,
+        &[
+            "outcomes",
+            "incident",
+            "--file",
+            &file,
+            "--change",
+            "acme/shop#2",
+            "--involved",
+            "billing",
+            "--note",
+            "double charge",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    let (_, summary, _) = onus(r, &["outcomes", "summary", "--file", &file]);
+    let s: serde_json::Value = serde_json::from_str(&summary).unwrap();
+    assert_eq!(s["total"]["reverted"], 1, "{s}");
+    assert_eq!(s["total"]["incidents"], 1, "{s}");
+    let (_, backlog, _) = onus(r, &["outcomes", "backlog", "--file", &file]);
+    assert_eq!(backlog, "1\tbilling");
+}

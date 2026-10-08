@@ -107,6 +107,38 @@ pub enum OutcomesCmd {
         /// The audit found a problem the automatic path missed.
         #[arg(long)]
         missed: bool,
+        /// The commit the change landed as (to match reverts against).
+        #[arg(long)]
+        commit: Option<String>,
+    },
+    /// Find reverts in git history and record them against the changes they revert.
+    IngestReverts {
+        #[arg(long, value_name = "FILE")]
+        file: PathBuf,
+        #[arg(long, default_value = ".", value_name = "DIR")]
+        repo: PathBuf,
+        /// Only reverts after this ref.
+        #[arg(long, value_name = "REF")]
+        since: Option<String>,
+    },
+    /// Record a production incident against the change that caused it.
+    Incident {
+        #[arg(long, value_name = "FILE")]
+        file: PathBuf,
+        /// The change, as recorded (owner/repo#123 or a commit).
+        #[arg(long)]
+        change: String,
+        /// Components and symbols the incident involved (repeatable).
+        #[arg(long = "involved", value_name = "ID")]
+        involved: Vec<String>,
+        /// What happened.
+        #[arg(long)]
+        note: String,
+    },
+    /// Where held-out tests should go next: what incidents involved, most often first.
+    Backlog {
+        #[arg(long, value_name = "FILE")]
+        file: PathBuf,
     },
     /// Totals per agent setup, judge configuration and lane, the human-lane
     /// share and the audit miss rate.
@@ -331,6 +363,7 @@ pub fn outcomes_cmd(cmd: OutcomesCmd) -> Result<i32> {
             judge,
             audited,
             missed,
+            commit,
         } => {
             if !matches!(
                 result.as_str(),
@@ -350,8 +383,57 @@ pub fn outcomes_cmd(cmd: OutcomesCmd) -> Result<i32> {
                     result,
                     audited,
                     missed,
+                    commit,
+                    involved: vec![],
+                    note: None,
                 },
             )?;
+            Ok(0)
+        }
+        OutcomesCmd::IngestReverts { file, repo, since } => {
+            let all = outcomes::load(&file)?;
+            let reverts = outcomes::find_reverts(&repo, since.as_deref())?;
+            let added = outcomes::ingest_reverts(&all, &reverts, onus_doors::gateway::now());
+            for o in &added {
+                outcomes::append(&file, o)?;
+            }
+            println!(
+                "{} reverts found, {} recorded against changes on record",
+                reverts.len(),
+                added.len()
+            );
+            Ok(0)
+        }
+        OutcomesCmd::Incident {
+            file,
+            change,
+            involved,
+            note,
+        } => {
+            let all = outcomes::load(&file)?;
+            let Some(last) = outcomes::latest(&all)
+                .into_iter()
+                .find(|o| o.change == change)
+                .cloned()
+            else {
+                bail!("`{change}` is not on record in {}", file.display());
+            };
+            outcomes::append(
+                &file,
+                &Outcome {
+                    at: onus_doors::gateway::now(),
+                    result: "incident".into(),
+                    involved,
+                    note: Some(note),
+                    ..last
+                },
+            )?;
+            Ok(0)
+        }
+        OutcomesCmd::Backlog { file } => {
+            for (what, n) in outcomes::backlog(&outcomes::load(&file)?) {
+                println!("{n}\t{what}");
+            }
             Ok(0)
         }
         OutcomesCmd::Summary { file } => {
