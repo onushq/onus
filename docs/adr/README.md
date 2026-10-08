@@ -11,3 +11,6 @@ Short records of decisions that are significant or hard to reverse. Propose a ne
 | [0005](0005-phase-1-diff-behavior.md) | Phase 1 semantic diff behavior | Proposed |
 | [0006](0006-pluggable-map-building.md) | Pluggable map building, language-author tooling and trusted mode | Proposed |
 | [0007](0007-map-server-for-agents.md) | An in-memory map server for agents, without a graph database | Proposed |
+| [0008](0008-scoped-tokens-and-doors.md) | Scoped tokens, enforcing doors and evidence-based escalation | Accepted |
+| [0009](0009-risk-lanes-and-the-judge.md) | Risk lanes and a verifying judge, rules first | Accepted |
+| [0010](0010-evidence-factory.md) | Environments, the evidence store, traces, the production loop and contract-level scopes | Accepted |

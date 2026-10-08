@@ -94,7 +94,7 @@ pub enum OutcomesCmd {
         agent: String,
         #[arg(long, value_enum)]
         lane: LaneArg,
-        /// merged, reverted, incident, closed or open.
+        /// merged, reverted, rolled-back (a flag or rollout), incident, closed or open.
         #[arg(long)]
         result: String,
         #[arg(long)]
@@ -369,9 +369,11 @@ pub fn outcomes_cmd(cmd: OutcomesCmd) -> Result<i32> {
         } => {
             if !matches!(
                 result.as_str(),
-                "merged" | "reverted" | "incident" | "closed" | "open"
+                "merged" | "reverted" | "rolled-back" | "incident" | "closed" | "open"
             ) {
-                bail!("--result is merged, reverted, incident, closed or open");
+                bail!(
+                    "--result is merged, reverted, rolled-back (a flag or rollout), incident, closed or open"
+                );
             }
             outcomes::append(
                 &file,

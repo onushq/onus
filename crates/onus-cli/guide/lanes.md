@@ -57,7 +57,7 @@ A rule matches a row by `kinds`, `subkinds`, `components` and `labels` (an empty
 
 It verifies first and judges taste last, and stops being lenient at the first failure:
 
-1. **Evidence:** each test run in the submission is run again at the head commit in a fresh container; a run that passed for the author must pass again.
+1. **Evidence:** each test run in the submission is run again at the head commit in a fresh container; a run that passed for the author must pass again. A run made in an environment (`onus env run`) names its manifest, and must match it: recorded at the head commit, with the same command and exit code (`onus help environments`).
 2. **Intent:** an intent must be stated, and no row may fall outside it.
 3. **Contracts:** no breaking contract changes and no boundary-rule violations.
 4. **Tests:** no weakened tests without a person's approval.
@@ -73,6 +73,17 @@ The verdict is `approve`, `reject` with reasons the agent can act on, or `escala
     onus outcomes summary --file outcomes.jsonl
 
 The summary gives each agent setup and judge configuration its record (merged, reverted, incidents, audited, missed), the share of changes in the human lane (the review budget), and the miss rate of human audits of automatic approvals, the number that says whether the automatic lanes can be trusted.
+
+## The production loop
+
+What happens after merging changes the record:
+
+    onus outcomes ingest-reverts --file outcomes.jsonl --since v1.4.0     # reverts in git history
+    onus outcomes incident --file outcomes.jsonl --change acme/shop#42 \
+      --involved notifications --involved "notifications:src/sms.ts#sendSms" --note "SMS sent twice"
+    onus outcomes backlog --file outcomes.jsonl
+
+Reverts are found from commit messages (`This reverts commit …`) and recorded against the change they undo; a reverted change no longer counts toward its agent setup's record. A change turned off by a feature flag or a rolled-back rollout is recorded with `onus outcomes record --result rolled-back` and counts the same way. An agent setup with an incident among its last 20 changes cannot auto-merge. `backlog` lists the components and symbols incidents involved, most often first: where the next held-out tests should go. Onus does not write tests.
 
 ## In CI
 

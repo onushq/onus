@@ -30,6 +30,19 @@ A token is a [Biscuit](https://www.biscuitsec.org/): signed rights (`write:path:
 
 Path globs use `*` (within a folder), `**` (any depth) and `?`, and are case-sensitive like git paths.
 
+### Components and contracts instead of paths
+
+A plan can name what the task may touch in the map's terms:
+
+    task: sms-alerts
+    writeComponents: [notifications.internal]   # its files that declare no public symbol
+    readContracts: [UserPreferences]            # the file that declares the contract
+    escalateBefore: ["contract:*"]              # contract files need a granted escalation to change
+
+    onus token mint --plan plan.yaml --key root.key --repo .
+
+Minting resolves them through the map into path rights (`writeComponents: [notifications]` means all of the component's files), so a token's paths do not drift while the task runs. `escalateBefore` adds `guard:path:` rights for the files that declare matching contracts (onus.yaml `contracts:`): the gateway refuses a push that touches one unless the token also holds `unlock:path:` for it, which only an escalation grant adds. The refusal says how to ask.
+
 ## The git gateway
 
 The gateway holds the real repository and its credentials; agents clone from it and push to it with their token as the password:
@@ -84,7 +97,7 @@ Then the command prints a new token: the original rights plus exactly what was a
 
 ### The test runner
 
-`onus run-test --repo . --reference HEAD --image node:22 -- npx vitest run path/to.test.ts` runs a command at a commit in a throwaway container: no network, no capabilities, 4 GB of memory, 2 CPUs. It is the only place Onus runs repository code, and only when asked. An optional `--setup` command (installing dependencies) runs first in its own container, with network. It needs Docker or Podman.
+`onus run-test --repo . --reference HEAD --image node:22 -- npx vitest run path/to.test.ts` runs a command at a commit in a throwaway container: no network, no capabilities, 4 GB of memory, 2 CPUs. The commit's files are copied in, never mounted, so engines that run in a VM (colima, podman machine) work too. Onus runs repository code only here and in environments (`onus help environments`), and only when asked. An optional `--setup` command (installing dependencies) runs first in its own container, with network. It needs Docker or Podman.
 
 ## The audit log
 

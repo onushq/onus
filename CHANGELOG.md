@@ -4,6 +4,20 @@ All notable changes to Onus are recorded here. The format follows [Keep a Change
 
 ## Unreleased
 
+## [0.8.0] - 2026-10-09
+
+Phase 5 complete: environments, the evidence store, traces, the production loop and contract-level scopes ([ADR 0010](docs/adr/0010-evidence-factory.md), `onus help environments`).
+
+- **Environments:** `onus env create|run|list|destroy` builds a container from a commit and `environment:` in onus.yaml (or the devcontainer). Setup runs once per lockfile and is kept as a warm image; a seed command loads synthetic data. There is no network unless the task's token names hosts, and then only through an egress proxy that allows exactly those hosts. Secrets the token names come from `ONUS_SECRET_<NAME>` and are redacted from everything stored.
+- **The evidence store:** each run leaves a manifest and its artifacts (the log, JUnit XML, OTLP traces) under their sha256 in the repository's git directory; `onus evidence list|show` reads it. `onus env run` prints a test run for `onus submit --evidence`, and the judge checks it against its manifest.
+- **Traces feed the map:** `--traces <otlp.json>` on `onus map`, `diff` and `report` adds `traced` call edges from OpenTelemetry spans, such as an event bus dispatching to a handler.
+- **The production loop:** `onus outcomes ingest-reverts` finds reverts in git history, `onus outcomes incident` records incidents, and `--result rolled-back` records flags turned off and rollbacks. Reverted changes leave an agent setup's record, a recent incident stops it from auto-merging, and `onus outcomes backlog` lists where held-out tests should go.
+- **Contract-level scopes:** plans can name `writeComponents` (`notifications.internal`), `readContracts` and `escalateBefore: ["contract:*"]`; `onus token mint --repo` resolves them through the map, and the gateway refuses changes to guarded contract files without a granted escalation.
+
+### Fixed
+
+- `onus run-test` and the judge's re-runs saw an empty tree with container engines that run in a VM (colima, podman machine), which do not share the host's temporary directories. The commit's files are now copied into the container instead of mounted.
+
 ## [0.7.0] - 2026-10-08
 
 Phase 4 complete: risk lanes and the verifying judge ([ADR 0009](docs/adr/0009-risk-lanes-and-the-judge.md), `onus help lanes`).

@@ -61,6 +61,11 @@ pub const TOPICS: &[Topic] = &[
         text: include_str!("../guide/lanes.md"),
     },
     Topic {
+        name: "environments",
+        summary: "Environments built from a commit, the evidence store, and traces into the map",
+        text: include_str!("../guide/environments.md"),
+    },
+    Topic {
         name: "plugins",
         summary: "New languages and frameworks, SCIP indexes, language servers, trusted mode",
         text: include_str!("../guide/plugins.md"),

@@ -231,7 +231,8 @@ impl Tally {
         self.changes += 1;
         match o.result.as_str() {
             "merged" => self.merged += 1,
-            "reverted" => self.reverted += 1,
+            // A flag turned off or a rollout rolled back undoes a change too.
+            "reverted" | "rolled-back" => self.reverted += 1,
             "incident" => self.incidents += 1,
             _ => {}
         }

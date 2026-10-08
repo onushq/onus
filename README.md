@@ -4,7 +4,7 @@
 
 The idea behind Onus in one sentence: changes should be understood as shifts in meaning, scored by risk, and approved by evidence rather than by someone reading lines.
 
-> **Status: pre-alpha.** The first version of Phase 1 works: `onus` maps a TypeScript or JavaScript monorepo and reports a change as a few changes in meaning. Release binaries and the GitHub Action come next. The design lives in [PLAN.md](PLAN.md). Watch the repository or join [Discussions](https://github.com/onushq/onus/discussions) to follow along.
+> **Status: alpha.** All five phases of [PLAN.md](PLAN.md) are built: semantic change reports from the CLI and the GitHub Action, the map for agents, scoped tokens with a git gateway, risk lanes with a verifying judge, and environments that record evidence. Field trials on real repositories are under way, so expect rough edges. Watch the repository or join [Discussions](https://github.com/onushq/onus/discussions) to follow along.
 
 ## What it does
 
@@ -19,7 +19,7 @@ Given a pull request, Onus describes it as a few changes in meaning instead of t
 > | ○ | `notifications` subscribes to the `OrderShipped` event | New event consumer | Additive; `orders` is unchanged |
 > | ○ | 1,402 lines of new code and tests inside `notifications` | Internal | Stays inside `notifications`, which `billing` depends on; adds 69 test cases; reads new config `ACME_SMS_API_KEY` and `ACME_SMS_SENDER_ID`; … |
 
-The first row is the one that deserves a person's attention, so it comes first. Every row is computed from the code by deterministic analysis and fixed templates, never generated, and each one links to the files and lines behind it. Onus only reads files: it never installs or runs the code it analyzes.
+The first row is the one that deserves a person's attention, so it comes first. Every row is computed from the code by deterministic analysis and fixed templates, never generated, and each one links to the files and lines behind it. Reports only read files: Onus runs a repository's code only when you ask it to, in a container (`onus run-test`, `onus env`).
 
 ## Install
 
@@ -42,7 +42,7 @@ steps:
   - uses: actions/checkout@v7
     with:
       fetch-depth: 0
-  - uses: onushq/onus/action@v0.7.0
+  - uses: onushq/onus/action@v0.8.0
     with:
       fail-on: secrets          # optional: rule-violation, secrets
 ```
@@ -74,9 +74,9 @@ Useful flags: `--format json` for the full machine-readable report, `--intent <f
 
 Other languages and frameworks plug in through plugins, SCIP indexes and language servers (`onus help plugins`). The [user guide](docs/guide.md) covers every command, how to read a report, every kind of change, the `onus.yaml` reference, the intent check and running Onus in CI. It also ships in the binary: run `onus help` for the list of topics and `onus help <topic>` to read one.
 
-## For coding agents (experimental)
+## For coding agents
 
-`onus mcp` gives coding agents `onus_check`, which reports the changes in meaning of the work in progress before it is committed, plus experimental tools to navigate the map. In [our evaluation](docs/evaluation/2026-10-07-map-for-agents.md) the navigation tools did not make agents faster or more correct; agents did use `onus_check`, which is where Phase 2 is heading.
+`onus mcp` gives coding agents `onus_check`, which reports the changes in meaning of the work in progress before it is committed, and `onus_impact`, which says what a change would break before it is made, plus tools to navigate the map. In [our evaluation](docs/evaluation/2026-10-07-map-for-agents.md) the navigation tools did not make agents faster or more correct; agents did use `onus_check`, so verification is where the map earns its place.
 
 ```sh
 claude mcp add onus -- onus mcp
@@ -85,21 +85,29 @@ onus query dependents UserPreferences --depth 2     # the same questions from a 
 
 All agents and worktrees of a repository share one map server that follows file changes and re-parses only what changed: warm answers take milliseconds, and a rebuild after an edit about 2 s on Twenty's 31,000-file monorepo. See [`onus help agents`](crates/onus-cli/guide/agents.md) and [ADR 0007](docs/adr/0007-map-server-for-agents.md).
 
+## Scopes, lanes and evidence
+
+Onus works with whichever agent you use, and none of this depends on one:
+
+- **Scoped tokens** give a task exactly the paths, hosts and secrets it needs. A git gateway enforces them, and agents ask for more with evidence (`onus help scopes`).
+- **Risk lanes** send each change to auto-merge, the judge, a person or nowhere, by rules you write and floors no rule can lower. The judge re-runs the evidence before it judges anything (`onus help lanes`).
+- **Environments** built from a commit run the tests and keep what they recorded in a content-addressed store, so approval rests on evidence an environment produced, not on an agent's claim (`onus help environments`).
+
 ## Roadmap
 
 Each phase is useful on its own and moves on only when a measurable gate is passed.
 
-1. **Semantic change reports** on today's pull requests, from a CLI and a GitHub Action. *(in progress: the CLI works; the Action is next)*
-2. **The map as a service**: agents and people query components, contracts, owners and tests over MCP and the CLI.
-3. **Scoped tokens and evidence-based escalation**, enforced at a git gateway and the MCP servers.
-4. **Risk lanes and a verifying judge** that re-runs the evidence instead of giving an opinion.
-5. **Evidence factory and production loop**: disposable environments, and outcomes that retrain the routing.
+1. **Semantic change reports** on today's pull requests, from a CLI and a GitHub Action. *(built; field trials in progress)*
+2. **The map as a service**: agents and people query components, contracts, owners, tests and impact over MCP and the CLI. *(built)*
+3. **Scoped tokens and evidence-based escalation**, enforced at a git gateway and the MCP servers. *(built)*
+4. **Risk lanes and a verifying judge** that re-runs the evidence instead of giving an opinion. *(built)*
+5. **Evidence factory and production loop**: disposable environments, and outcomes that feed back into the routing. *(built)*
 
 Details, decisions and acceptance criteria are in [PLAN.md](PLAN.md).
 
 ## Built with
 
-Rust (one static binary, `onus`), tree-sitter for parsing, and the official Rust MCP SDK later on. TypeScript and JavaScript are the first languages Onus analyzes. Onus works with any agent that can run a CLI or speak MCP: Codex, Claude Code, or one you built yourself.
+Rust (one static binary, `onus`), tree-sitter for parsing, the official Rust MCP SDK, and Biscuit for task tokens. TypeScript and JavaScript are the first languages Onus analyzes. Onus works with any agent that can run a CLI or speak MCP: Codex, Claude Code, or one you built yourself.
 
 ## Contributing
 
