@@ -1365,6 +1365,7 @@ dependencies = [
  "onus-diff",
  "onus-doors",
  "onus-index",
+ "onus-lanes",
  "onus-map",
  "onus-report",
  "protobuf",
@@ -1436,6 +1437,19 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "onus-lanes"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "onus-core",
+ "onus-doors",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
  "tempfile",
 ]
 

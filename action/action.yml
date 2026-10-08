@@ -49,6 +49,24 @@ inputs:
     description: Use this onus.yaml for both commits (default the base commit's).
     required: false
     default: ""
+  lanes:
+    description: >-
+      'true' to classify the change into a risk lane (auto-merge, judge, human, blocked) with the
+      policy in onus.yaml and the hard floors, and show the lane and why in the report.
+    required: false
+    default: 'false'
+  apply-lane:
+    description: >-
+      'true' (with lanes) to label the pull request onus/lane:<lane> and fail the job for the
+      blocked lane. Needs issues: write.
+    required: false
+    default: 'false'
+  auto-merge:
+    description: >-
+      'true' (with lanes) to enable GitHub's auto-merge (squash) when the lane is auto-merge.
+      Required checks still apply. Needs contents: write and pull-requests: write.
+    required: false
+    default: 'false'
   plugins:
     description: >-
       A plugins file's contents (YAML), for example the Svelte plugin that ships with Onus:
@@ -91,6 +109,9 @@ outputs:
   needs-attention:
     description: Number of changes that need a person to look.
     value: ${{ steps.report.outputs.needs-attention }}
+  lane:
+    description: The change's risk lane when lanes is 'true'.
+    value: ${{ steps.lane.outputs.lane }}
   metrics:
     description: >-
       One line of JSON about this report (sizes, counts, time taken), also
@@ -291,6 +312,66 @@ runs:
           echo "failed=$([ "$status" -eq 2 ] && echo true || echo false)"
         } >> "$GITHUB_OUTPUT"
 
+    - name: Lane
+      id: lane
+      if: github.event_name != 'issue_comment' && inputs.lanes == 'true'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        ONUS: ${{ steps.install.outputs.onus }}
+        REPORT: ${{ steps.report.outputs.report }}
+        MD: ${{ steps.report.outputs.markdown }}
+        CONFIG: ${{ inputs.config }}
+      run: |
+        set -euo pipefail
+        if ! "$ONUS" classify --help > /dev/null 2>&1; then
+          echo "::notice::This Onus version has no lanes (0.7 and later)."
+          exit 0
+        fi
+        args=(--report "$REPORT" --repo .)
+        [ -n "$CONFIG" ] && args+=(--config "$CONFIG")
+        "$ONUS" classify "${args[@]}" > "$RUNNER_TEMP/onus/onus-lane.json"
+        lane=$(jq -r .lane "$RUNNER_TEMP/onus/onus-lane.json")
+        why=$(jq -r --arg lane "$lane" '[.applied[] | select(.lane == $lane) | .reason] | join("; ")' "$RUNNER_TEMP/onus/onus-lane.json")
+        line=$'\n'"**Lane:** \`$lane\`: $why"
+        # Shown in the comment and in the job summary.
+        printf '%s\n' "$line" >> "$MD"
+        printf '%s\n' "$line" >> "$GITHUB_STEP_SUMMARY"
+        echo "lane=$lane" >> "$GITHUB_OUTPUT"
+
+    - name: Apply the lane
+      if: >-
+        github.event_name != 'issue_comment' && inputs.apply-lane == 'true' &&
+        steps.lane.outputs.lane != '' && github.event.pull_request.number &&
+        github.event.pull_request.head.repo.full_name == github.repository
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        LANE: ${{ steps.lane.outputs.lane }}
+        PR: ${{ github.event.pull_request.number }}
+        REPO: ${{ github.repository }}
+      run: |
+        set -euo pipefail
+        label="onus/lane:$LANE"
+        gh label create "$label" --repo "$REPO" --force --color 5319e7 \
+          --description "Onus risk lane" > /dev/null
+        for old in $(gh pr view "$PR" --repo "$REPO" --json labels \
+            --jq '.labels[].name | select(startswith("onus/lane:"))'); do
+          [ "$old" = "$label" ] || gh pr edit "$PR" --repo "$REPO" --remove-label "$old" > /dev/null
+        done
+        gh pr edit "$PR" --repo "$REPO" --add-label "$label" > /dev/null
+
+    - name: Auto-merge
+      if: >-
+        github.event_name != 'issue_comment' && inputs.auto-merge == 'true' &&
+        steps.lane.outputs.lane == 'auto-merge' && github.event.pull_request.number
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        PR: ${{ github.event.pull_request.number }}
+        REPO: ${{ github.repository }}
+      run: gh pr merge "$PR" --repo "$REPO" --auto --squash
+
     - name: Comment
       if: >-
         github.event_name != 'issue_comment' &&
@@ -332,4 +413,13 @@ runs:
         FAIL_ON: ${{ inputs.fail-on }}
       run: |
         echo "::error::Onus found: $FAIL_ON (see the report)"
+        exit 2
+
+    - name: Fail when blocked
+      if: >-
+        github.event_name != 'issue_comment' && inputs.apply-lane == 'true' &&
+        steps.lane.outputs.lane == 'blocked'
+      shell: bash
+      run: |
+        echo "::error::Onus put this change in the blocked lane (see the report)"
         exit 2

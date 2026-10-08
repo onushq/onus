@@ -17,6 +17,9 @@ use serde::{Deserialize, Serialize};
 pub struct TestRun {
     pub commit: String,
     pub image: String,
+    /// The setup command that ran first, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup: Option<String>,
     pub command: String,
     pub exit_code: i32,
     /// The last lines of the command's output.
@@ -124,6 +127,7 @@ pub fn run(
     Ok(TestRun {
         commit,
         image: image.to_string(),
+        setup: setup.map(str::to_string),
         command: command.to_string(),
         exit_code: out.status.code().unwrap_or(-1),
         output_tail: tail(&text, 40),

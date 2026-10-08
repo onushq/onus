@@ -165,3 +165,17 @@ Secret-shaped values added in test data are not counted as committed secrets: `f
 ## Files Onus never reads
 
 Folders named .git, node_modules, dist, build, out, .next, .turbo, .cache, coverage, target or vendor; anything ignored by a .gitignore inside the tree; files over 2 MB; and *.min.js files.
+
+## lanes
+
+What happens to a change after it is reported: the default lane, rules that set or raise it, the share of automatic merges audited by a person, the record an agent setup needs before it may auto-merge, held-out checks and an optional taste reviewer for the judge. See `onus help lanes`.
+
+    lanes:
+      default: judge          # auto-merge, judge, human or blocked
+      auditRate: 0.05
+      minRecord: 10
+      rules:
+        - { lane: auto-merge, match: every, kinds: [internal], components: [docs] }
+        - { lane: human, subkinds: [migration-changed] }
+      heldOut: { command: "npm run test:held-out", image: "node:22", setup: "npm ci" }
+

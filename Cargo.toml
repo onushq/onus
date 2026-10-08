@@ -21,6 +21,7 @@ onus-diff = { path = "crates/onus-diff", version = "0.6.0" }
 onus-report = { path = "crates/onus-report", version = "0.6.0" }
 onus-index = { path = "crates/onus-index", version = "0.6.0" }
 onus-doors = { path = "crates/onus-doors", version = "0.6.0" }
+onus-lanes = { path = "crates/onus-lanes", version = "0.6.0" }
 
 anyhow = "1.0.100"
 biscuit-auth = "6"

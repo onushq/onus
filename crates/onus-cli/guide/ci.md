@@ -36,6 +36,9 @@ Inputs, all optional:
 - `fail-on`: fail the job on `rule-violation`, `secrets` or both (comma separated). Default `none`.
 - `comment`: `false` to only write the job summary.
 - `config`: an onus.yaml to use for both commits.
+- `lanes`: `true` to classify the change into a risk lane with the policy in onus.yaml and the hard floors, and show it in the comment (`onus help lanes`). Output `lane`.
+- `apply-lane`: `true` (with `lanes`) to label the pull request `onus/lane:<lane>` and fail the job for the `blocked` lane. Needs `issues: write`.
+- `auto-merge`: `true` (with `lanes`) to enable GitHub's auto-merge (squash) for the `auto-merge` lane. Required checks still apply. Needs `contents: write`.
 - `plugins`: a plugins file's contents (YAML), written outside the repository and passed with `--plugins`. For Svelte components: `plugins: [{ name: svelte, kind: language, command: [onus-plugin-svelte], files: ["**/*.svelte"] }]` (the plugin ships in every release archive).
 - `working-directory`: the repository, if not the workspace root.
 - `cache`: `true` (the default) keeps the base commit's map in the Actions cache, so later pushes to the same pull request skip mapping the base again. `false` maps it every time.

@@ -4,6 +4,14 @@ All notable changes to Onus are recorded here. The format follows [Keep a Change
 
 ## Unreleased
 
+Phase 4 complete: risk lanes and the verifying judge ([ADR 0009](docs/adr/0009-risk-lanes-and-the-judge.md), `onus help lanes`).
+
+- `onus submit` bundles a change for review: the intent, Onus's report, changed paths, test runs to re-run, the token's scope, escalations, approvals and the agent setup, and nothing of the author's reasoning.
+- `onus classify` puts a change in a lane (`auto-merge`, `judge`, `human`, `blocked`). The lane comes from a policy in onus.yaml (`lanes:`) and hard floors no policy can lower: secrets, out-of-scope writes and unapproved weakened tests are blocked; sensitive code, rules of the game and intent mismatches go to a person. New agent setups cannot auto-merge, and a share of auto-merges is audited by a person.
+- `onus judge` verifies before it judges: it re-runs the evidence in containers, then checks intent, contracts and tests, then runs held-out checks. An optional taste reviewer can raise concerns but never approve. The verdict is approve, reject (with reasons the agent can act on) or escalate.
+- The action's `lanes`, `apply-lane` and `auto-merge` inputs show the lane, label the pull request, fail blocked changes and enable GitHub's auto-merge.
+- `onus outcomes record|summary` track outcomes per agent setup and judge configuration, including the audit miss rate and the human-lane share.
+
 ## [0.6.0] - 2026-10-08
 
 Phase 3 complete: scoped tokens, enforcing doors and evidence-based escalation ([ADR 0008](docs/adr/0008-scoped-tokens-and-doors.md), `onus help scopes`).

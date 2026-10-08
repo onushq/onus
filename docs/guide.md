@@ -13,6 +13,7 @@ The guide ships inside the `onus` binary: `onus help <topic>` prints any of thes
 | [ci](../crates/onus-cli/guide/ci.md) | Running Onus on every pull request |
 | [agents](../crates/onus-cli/guide/agents.md) | The map for coding agents: `onus mcp`, its tools, many agents and worktrees |
 | [scopes](../crates/onus-cli/guide/scopes.md) | Task tokens, the git gateway, escalation with evidence and the audit log |
+| [lanes](../crates/onus-cli/guide/lanes.md) | Risk lanes, change submissions, the verifying judge and outcome records |
 | [plugins](../crates/onus-cli/guide/plugins.md) | New languages and frameworks, SCIP indexes, language servers, trusted mode |
 | [how-it-works](../crates/onus-cli/guide/how-it-works.md) | How maps are built and compared |
 | [troubleshooting](../crates/onus-cli/guide/troubleshooting.md) | Map confidence notes, common questions and current limits |
