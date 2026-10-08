@@ -14,6 +14,8 @@ All notable changes to Onus are recorded here. The format follows [Keep a Change
   - Guards that moved with renamed variables are matched by their shape.
   - A new package added to several components is one row.
   - Route rows name their component, and first-use rows skip `$app` and `$env`.
+- `--markdown-out <file>` writes the Markdown report alongside the JSON, so the action runs each report once instead of twice.
+- The action's `plugins` input passes a plugins file (such as the Svelte plugin) without reading it from the analyzed repository.
 
 ## [0.4.0] - 2026-10-08
 

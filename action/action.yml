@@ -49,6 +49,14 @@ inputs:
     description: Use this onus.yaml for both commits (default the base commit's).
     required: false
     default: ""
+  plugins:
+    description: >-
+      A plugins file's contents (YAML), for example the Svelte plugin that ships with Onus:
+      "plugins: [{ name: svelte, kind: language, command: [onus-plugin-svelte], files: ['**/*.svelte'] }]".
+      It is written outside the repository and passed with --plugins; Onus never reads plugins from
+      the analyzed repository.
+    required: false
+    default: ''
   working-directory:
     description: The git repository to analyze.
     required: false
@@ -203,6 +211,7 @@ runs:
         INTENT: ${{ inputs.intent }}
         FAIL_ON: ${{ inputs.fail-on }}
         CONFIG: ${{ inputs.config }}
+        PLUGINS: ${{ inputs.plugins }}
         # Passed through the environment, never pasted into the script, so a
         # pull request body cannot inject commands.
         PR_BODY: ${{ github.event.pull_request.body }}
@@ -231,17 +240,28 @@ runs:
           *) args+=(--intent "$INTENT") ;;
         esac
         [ -n "$CONFIG" ] && args+=(--config "$CONFIG")
+        if [ -n "$PLUGINS" ]; then
+          printf '%s\n' "$PLUGINS" > "$out/plugins.yaml"
+          args+=(--plugins "$out/plugins.yaml")
+        fi
         # Releases before 0.2 have no map cache.
         if [ "$CACHE" = true ] && "$ONUS" report --help | grep -q -- --cache-dir; then
           args+=(--cache-dir "$CACHE_DIR")
         fi
         # Milliseconds; perl is on every GitHub runner, `date +%N` is not.
         ms() { perl -MTime::HiRes=time -e 'printf "%d\n", time * 1000'; }
-        started=$(ms)
-        "$ONUS" report "${args[@]}" --format md > "$out/onus-report.md"
-        finished=$(ms)
         status=0
-        "$ONUS" report "${args[@]}" --format json --fail-on "$FAIL_ON" > "$out/onus-report.json" || status=$?
+        started=$(ms)
+        if "$ONUS" report --help | grep -q -- --markdown-out; then
+          # One run for both formats (0.4.1 and later).
+          "$ONUS" report "${args[@]}" --format json --markdown-out "$out/onus-report.md" \
+            --fail-on "$FAIL_ON" > "$out/onus-report.json" || status=$?
+          finished=$(ms)
+        else
+          "$ONUS" report "${args[@]}" --format md > "$out/onus-report.md"
+          finished=$(ms)
+          "$ONUS" report "${args[@]}" --format json --fail-on "$FAIL_ON" > "$out/onus-report.json" || status=$?
+        fi
         if [ "$status" -ne 0 ] && [ "$status" -ne 2 ]; then
           exit "$status"
         fi

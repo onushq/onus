@@ -24,6 +24,7 @@ Reports the changes in meaning between two directories.
     onus diff old new --intent pr-body.md --fail-on rule-violation,secrets
 
 - `--format md|json`: Markdown (default) or the full JSON report (format: schemas/semantic-report.schema.json).
+- `--markdown-out <file>`: also write the Markdown report to a file, so one run gives both formats.
 - `--intent <file>`: check the change against a stated intent: a YAML file, or Markdown (such as a pull request body) containing an `onus-intent` block. See `onus help intent`.
 - `--config <file>`: the onus.yaml used for both trees. By default Onus uses the base tree's onus.yaml for both, so a change cannot relax the rules it is checked against.
 - `--fail-on <what>`: exit with code 2 when `rule-violation` (a new boundary-rule violation) or `secrets` (a committed secret) is found. Repeat the flag or separate values with commas. `none` never fails.
@@ -38,7 +39,7 @@ The same report for two git refs. Each ref is extracted with `git archive` into 
     onus report --repo ../shop --base origin/main --head feature/sms --format json
 
 - `--repo <dir>`: the repository (default: the current directory).
-- `--format`, `--intent`, `--config`, `--fail-on`, `--plugins`, `--trusted`, `--allow-unsandboxed`: as for `onus diff`. SCIP indexes for `report` come from `scip` plugins, which index each ref in trusted mode.
+- `--format`, `--markdown-out`, `--intent`, `--config`, `--fail-on`, `--plugins`, `--trusted`, `--allow-unsandboxed`: as for `onus diff`. SCIP indexes for `report` come from `scip` plugins, which index each ref in trusted mode.
 - `--cache-dir <dir>`: keep the base ref's map in this folder and reuse it on the next report against the same base commit. The report is the same either way; see `onus help ci`.
 
 Any ref git understands works: branches, tags, `HEAD~3`, commit hashes. In JSON, `base` and `head` read like `main (abc1234)`.

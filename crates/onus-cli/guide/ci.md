@@ -36,6 +36,7 @@ Inputs, all optional:
 - `fail-on`: fail the job on `rule-violation`, `secrets` or both (comma separated). Default `none`.
 - `comment`: `false` to only write the job summary.
 - `config`: an onus.yaml to use for both commits.
+- `plugins`: a plugins file's contents (YAML), written outside the repository and passed with `--plugins`. For Svelte components: `plugins: [{ name: svelte, kind: language, command: [onus-plugin-svelte], files: ["**/*.svelte"] }]` (the plugin ships in every release archive).
 - `working-directory`: the repository, if not the workspace root.
 - `cache`: `true` (the default) keeps the base commit's map in the Actions cache, so later pushes to the same pull request skip mapping the base again. `false` maps it every time.
 - `feedback`: `true` (the default) ends the comment with a line asking for a 👍 or 👎 reaction and for `/onus caught` replies (see below).

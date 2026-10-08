@@ -134,6 +134,9 @@ Examples:
         /// Markdown for people, or the full JSON report (schemas/semantic-report.schema.json).
         #[arg(long, value_enum, default_value = "md")]
         format: Format,
+        /// Also write the Markdown report to this file, so one run gives both formats.
+        #[arg(long, value_name = "FILE")]
+        markdown_out: Option<PathBuf>,
         /// A YAML intent file, or Markdown (such as a pull request body) containing an
         /// `onus-intent` block. Changes outside it are ranked first. See `onus help intent`.
         #[arg(long, value_name = "FILE")]
@@ -174,6 +177,9 @@ Examples:
         /// Markdown for people, or the full JSON report (schemas/semantic-report.schema.json).
         #[arg(long, value_enum, default_value = "md")]
         format: Format,
+        /// Also write the Markdown report to this file, so one run gives both formats.
+        #[arg(long, value_name = "FILE")]
+        markdown_out: Option<PathBuf>,
         /// A YAML intent file, or Markdown (such as a pull request body) containing an
         /// `onus-intent` block. Changes outside it are ranked first. See `onus help intent`.
         #[arg(long, value_name = "FILE")]
@@ -455,6 +461,7 @@ fn run(cli: Cli) -> Result<i32> {
             base,
             head,
             format,
+            markdown_out,
             intent: intent_path,
             config,
             fail_on,
@@ -480,6 +487,10 @@ fn run(cli: Cli) -> Result<i32> {
             for note in &outcome.notes {
                 eprintln!("onus: {note}");
             }
+            if let Some(path) = &markdown_out {
+                std::fs::write(path, outcome.render(Format::Md))
+                    .with_context(|| format!("cannot write {}", path.display()))?;
+            }
             print!("{}", outcome.render(format));
             Ok(if onus_cli::should_fail(&outcome.report, &fail_on) {
                 EXIT_FAIL_ON
@@ -492,6 +503,7 @@ fn run(cli: Cli) -> Result<i32> {
             head,
             repo,
             format,
+            markdown_out,
             intent: intent_path,
             config,
             fail_on,
@@ -530,6 +542,10 @@ fn run(cli: Cli) -> Result<i32> {
             let outcome = onus_cli::diff_dirs(b.dir.path(), h.dir.path(), &opts)?;
             for note in &outcome.notes {
                 eprintln!("onus: {note}");
+            }
+            if let Some(path) = &markdown_out {
+                std::fs::write(path, outcome.render(Format::Md))
+                    .with_context(|| format!("cannot write {}", path.display()))?;
             }
             print!("{}", outcome.render(format));
             Ok(if onus_cli::should_fail(&outcome.report, &fail_on) {
