@@ -170,3 +170,63 @@ fn a_facts_cache_gives_the_same_map() {
     assert_eq!(json(warm), expected);
     assert_eq!(json(from_disk), expected);
 }
+
+#[test]
+fn impact_lists_what_breaks_for_each_kind_of_change() {
+    use onus_index::Change;
+    let idx = index().with_root(shop());
+    // Removing a function breaks every file that imports or calls it,
+    // test files first.
+    let removed = idx.impact("applyDiscount", Change::Remove, 0).unwrap();
+    let files: Vec<&str> = removed.sites.iter().map(|s| s.file.as_str()).collect();
+    assert_eq!(
+        files,
+        [
+            "services/billing/src/discount.test.ts",
+            "services/billing/src/index.ts"
+        ]
+    );
+    assert_eq!(
+        removed.tests[0].file,
+        "services/billing/src/discount.test.ts"
+    );
+    // A new required member breaks only what builds the type.
+    let member = idx
+        .impact("UserPreferences", Change::AddRequiredMember, 0)
+        .unwrap();
+    let sites: Vec<(&str, u32, &str)> = member
+        .sites
+        .iter()
+        .map(|s| (s.file.as_str(), s.line, s.kind.as_str()))
+        .collect();
+    assert_eq!(
+        sites,
+        [(
+            "services/user-preferences/src/preferences.ts",
+            13,
+            "implements"
+        )]
+    );
+    // Without the source, files that name the type are listed, with a note.
+    let unrooted = index()
+        .impact("UserPreferences", Change::AddRequiredMember, 0)
+        .unwrap();
+    assert!(unrooted.notes.iter().any(|n| n.contains("source text")));
+    assert!(idx.impact("zebraQuantum", Change::Remove, 0).is_err());
+}
+
+#[test]
+fn invariants_come_from_declared_contracts() {
+    let idx = index();
+    let all = idx.invariants("").unwrap();
+    assert_eq!(all.contracts.len(), 1);
+    assert_eq!(
+        all.contracts[0].invariants,
+        ["phone numbers are stored in E.164"]
+    );
+    assert_eq!(
+        idx.invariants("user-preferences").unwrap().contracts.len(),
+        1
+    );
+    assert!(idx.invariants("billing").unwrap().contracts.is_empty());
+}

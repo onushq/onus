@@ -135,7 +135,7 @@ impl Session {
                 ..BuildOptions::default()
             },
         )?;
-        let index = Arc::new(MapIndex::new(map));
+        let index = Arc::new(MapIndex::new(map).with_root(&self.root));
         state.index = Some(index.clone());
         state.built_at_change = now;
         state.version += 1;

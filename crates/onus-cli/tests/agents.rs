@@ -170,6 +170,8 @@ fn mcp_serves_the_map_tools_over_stdio() {
             "onus_dependents",
             "onus_file",
             "onus_find",
+            "onus_impact",
+            "onus_invariants",
             "onus_owners",
             "onus_status",
             "onus_symbol",
@@ -254,4 +256,145 @@ fn agents_share_one_map_server_per_repository() {
     assert_eq!(worktrees.len(), 1);
     let pid = stats["result"]["pid"].as_u64().unwrap();
     assert_eq!(query(&["stats"])["result"]["pid"].as_u64().unwrap(), pid);
+}
+
+/// One HTTP/1.1 POST, read to the end: the status, the headers and the
+/// JSON-RPC messages of the body (plain JSON or `data:` lines of an event
+/// stream, possibly chunked).
+fn http_post(
+    addr: &str,
+    host: &str,
+    session: Option<&str>,
+    body: &serde_json::Value,
+) -> (u16, String, Vec<serde_json::Value>) {
+    use std::io::Read;
+    let mut stream = std::net::TcpStream::connect(addr).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .unwrap();
+    let body = body.to_string();
+    let mut req = format!(
+        "POST / HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nConnection: close\r\nContent-Length: {}\r\n",
+        body.len()
+    );
+    if let Some(s) = session {
+        req.push_str(&format!("Mcp-Session-Id: {s}\r\n"));
+    }
+    req.push_str("\r\n");
+    req.push_str(&body);
+    stream.write_all(req.as_bytes()).unwrap();
+    let mut raw = String::new();
+    let _ = stream.read_to_string(&mut raw);
+    let (head, rest) = raw.split_once("\r\n\r\n").unwrap_or((&raw, ""));
+    let status: u16 = head
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let messages = rest
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("data:"))
+        .chain(rest.lines().filter(|l| l.trim_start().starts_with('{')))
+        .filter_map(|d| serde_json::from_str(d.trim()).ok())
+        .collect();
+    (status, head.to_string(), messages)
+}
+
+#[test]
+fn mcp_serves_the_same_tools_over_http() {
+    let repo = shop_repo();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_onus"))
+        .args(["mcp", "--no-server", "--http", "127.0.0.1:0", "--repo"])
+        .arg(repo.path())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    BufReader::new(child.stderr.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    let addr = line
+        .trim()
+        .rsplit("http://")
+        .next()
+        .unwrap()
+        .trim_end_matches('/')
+        .to_string();
+
+    let (status, head, msgs) = http_post(
+        &addr,
+        "127.0.0.1",
+        None,
+        &serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2025-06-18", "capabilities": {},
+            "clientInfo": {"name": "onus-test", "version": "1"}}}),
+    );
+    assert_eq!(status, 200, "{head}");
+    assert_eq!(msgs[0]["result"]["serverInfo"]["name"], "onus");
+    let session = head
+        .lines()
+        .find_map(|l| {
+            let (k, v) = l.split_once(':')?;
+            k.eq_ignore_ascii_case("mcp-session-id")
+                .then(|| v.trim().to_string())
+        })
+        .unwrap();
+    http_post(
+        &addr,
+        "127.0.0.1",
+        Some(&session),
+        &serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+    );
+    let (_, _, msgs) = http_post(
+        &addr,
+        "127.0.0.1",
+        Some(&session),
+        &serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+            "name": "onus_impact", "arguments": {"target": "applyDiscount", "change": "remove"}}}),
+    );
+    let text = msgs[0]["result"]["content"][0]["text"].as_str().unwrap();
+    let answer: serde_json::Value = serde_json::from_str(text).unwrap();
+    assert_eq!(answer["result"]["total"], 2, "{answer}");
+
+    // Agent-agnostic: every client gets the same answers, whatever the
+    // transport. The same calls over stdio return the same results.
+    let mut stdio = Mcp::start(repo.path());
+    for (i, (tool, args)) in [
+        (
+            "onus_impact",
+            serde_json::json!({"target": "applyDiscount", "change": "remove"}),
+        ),
+        ("onus_find", serde_json::json!({"text": "apply discount"})),
+        (
+            "onus_dependents",
+            serde_json::json!({"target": "UserPreferences", "depth": 2}),
+        ),
+        ("onus_invariants", serde_json::json!({})),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (_, _, msgs) = http_post(
+            &addr,
+            "127.0.0.1",
+            Some(&session),
+            &serde_json::json!({"jsonrpc": "2.0", "id": 10 + i, "method": "tools/call",
+                "params": {"name": tool, "arguments": args}}),
+        );
+        let text = msgs[0]["result"]["content"][0]["text"].as_str().unwrap();
+        let over_http: serde_json::Value = serde_json::from_str(text).unwrap();
+        let (_, over_stdio) = stdio.tool(tool, args);
+        assert_eq!(over_http["result"], over_stdio["result"], "{tool}");
+    }
+
+    // Another host name (DNS rebinding) is refused.
+    let (status, _, _) = http_post(
+        &addr,
+        "evil.example",
+        None,
+        &serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
+    );
+    assert!(status >= 400, "{status}");
+    child.kill().unwrap();
+    let _ = child.wait();
 }

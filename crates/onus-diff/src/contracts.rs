@@ -957,71 +957,10 @@ impl Reach {
 }
 
 /// The line where `file` (in the head tree) implements or builds a value of
-/// `name`, if it does: `implements X`, `satisfies X`, `: X = {`, a function
-/// declared to return `X` that returns an object literal, Effect's
-/// `Layer.succeed(X, …)` and `X.of({…})`. A cast does not count: neither
-/// `as X` nor an object literal cast afterwards (`{ … } as never`) is
-/// checked against `X`, so they compile whatever members `X` gains.
+/// `name`, if it does; see [`onus_core::implementations`].
 fn implementation_line(ctx: &Ctx, file: &str, name: &str) -> Option<u32> {
     let text = std::fs::read_to_string(onus_core::paths::native(ctx.head_root, file)).ok()?;
-    let n = regex::escape(name);
-    let pattern = format!(
-        r"implements[^{{]*\b{n}\b|satisfies\s+{n}\b|:\s*{n}\s*(?:\[\]\s*)?=\s*[\{{\[]|\)\s*:\s*(?:Promise<\s*)?{n}\s*>?\s*(?:=>\s*\(\s*\{{|\{{\s*return\s*\{{)|Layer\.(?:succeed|effect|scoped|sync)\(\s*{n}\b(?:\s*,\s*\{{)?|\b{n}\.of\(\s*\{{"
-    );
-    let re = regex::Regex::new(&pattern).ok()?;
-    for m in re.find_iter(&text) {
-        if m.as_str().ends_with(['{', '[']) {
-            let open = m.end() - 1;
-            if let Some(close) = closing_bracket(&text, open)
-                && is_cast(&text[close + 1..])
-            {
-                continue;
-            }
-        }
-        return Some(text[..m.start()].matches('\n').count() as u32 + 1);
-    }
-    None
-}
-
-/// The byte index of the bracket closing the one at `open`, skipping
-/// strings.
-fn closing_bracket(text: &str, open: usize) -> Option<usize> {
-    let bytes = text.as_bytes();
-    let mut depth = 0i32;
-    let mut quote: Option<u8> = None;
-    let mut i = open;
-    while i < bytes.len() {
-        let c = bytes[i];
-        match quote {
-            Some(q) => {
-                if c == b'\\' {
-                    i += 1;
-                } else if c == q {
-                    quote = None;
-                }
-            }
-            None => match c {
-                b'\'' | b'"' | b'`' => quote = Some(c),
-                b'{' | b'[' | b'(' => depth += 1,
-                b'}' | b']' | b')' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return Some(i);
-                    }
-                }
-                _ => {}
-            },
-        }
-        i += 1;
-    }
-    None
-}
-
-/// Whether `rest` starts with a cast (`as never`, `as unknown as X`).
-fn is_cast(rest: &str) -> bool {
-    let rest = rest.trim_start();
-    rest.strip_prefix("as")
-        .is_some_and(|r| r.starts_with(char::is_whitespace))
+    onus_core::implementations::implementation_line(&text, name)
 }
 
 /// One row for public symbols whose bodies changed but whose types are

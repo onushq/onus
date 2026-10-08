@@ -2,7 +2,7 @@
 
 `onus mcp` gives a coding agent the codebase map as MCP tools: where things are, what depends on what, which tests cover what, who owns it, and what a change means before it is committed. Every answer is computed from the code, never generated, and carries the file and line it comes from.
 
-This is a preview of Phase 2. The tools are read-only.
+The tools are read-only.
 
 **What helps agents today is `onus_check`.** We tested whether the map makes coding agents faster or more correct when they implement a feature ([evaluation](https://github.com/onushq/onus/blob/main/docs/evaluation/2026-10-07-map-for-agents.md)). It did not, measurably: agents found code with text search just as well and rarely called the navigation tools. They did call `onus_check` before finishing, and Phase 2 now focuses on making it precise. The navigation tools below are experimental.
 
@@ -14,11 +14,15 @@ Claude Code:
 
 Any MCP client that starts servers over stdio: run `onus mcp` in the repository (or pass `--repo <worktree>`). The map is the map of the worktree the server is started in, as it is on disk now, saved but not committed changes included.
 
+Clients that connect over HTTP (streamable HTTP): run `onus mcp --http 127.0.0.1:8765` and point the client at `http://127.0.0.1:8765/`. Only requests naming a loopback host are answered, which keeps other machines and DNS rebinding out; `--allow-host <name>` adds a host for a network you trust. The tools are read-only but describe your code, and there is no authentication. Every tool answers the same over stdio and HTTP, and to every client.
+
 ## Tools
 
 The check:
 
 - `onus_check`: the changes in meaning between a commit (default `HEAD`) and the worktree now, as the same rows as a pull request report, preceded by a short checklist of what to verify before finishing: third-party APIs the repository has never used (with the pinned version), implementations and test doubles of a changed interface that were not updated, committed secrets and broken boundary rules. Run it before finishing a task.
+- `onus_impact`: before a change, what breaks if a symbol, file or component is removed, renamed, changes its signature, gains a required member, or only changes behavior. One site per file (file, line, how it is used; for a new required member only the implementations, found in the source text), the tests that exercise it, and what static analysis cannot see.
+- `onus_invariants`: the invariants onus.yaml declares for a symbol, file or component, or all of them: rules a change must keep.
 
 Navigation (experimental):
 
@@ -40,6 +44,8 @@ The same questions work from a shell, with the same answers:
     onus query find format phone
     onus query dependents UserPreferences --depth 2
     onus query tests-for services/billing/src/payments.ts
+    onus query impact UserPreferences --change add-required-member
+    onus query invariants
     onus query check --base main
 
 ## Many agents, many worktrees
