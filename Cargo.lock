@@ -1353,7 +1353,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "onus-cli"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1382,7 +1382,7 @@ dependencies = [
 
 [[package]]
 name = "onus-core"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "regex",
  "schemars",
@@ -1393,7 +1393,7 @@ dependencies = [
 
 [[package]]
 name = "onus-diff"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "globset",
  "onus-core",
@@ -1410,7 +1410,7 @@ dependencies = [
 
 [[package]]
 name = "onus-doors"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "biscuit-auth",
@@ -1430,7 +1430,7 @@ dependencies = [
 
 [[package]]
 name = "onus-index"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "onus-core",
  "onus-map",
@@ -1442,7 +1442,7 @@ dependencies = [
 
 [[package]]
 name = "onus-lanes"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "onus-core",
@@ -1455,7 +1455,7 @@ dependencies = [
 
 [[package]]
 name = "onus-lang-lsp"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "globset",
  "lsp-types",
@@ -1467,7 +1467,7 @@ dependencies = [
 
 [[package]]
 name = "onus-lang-scip"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "onus-core",
  "protobuf",
@@ -1477,7 +1477,7 @@ dependencies = [
 
 [[package]]
 name = "onus-lang-ts"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "onus-core",
  "rayon",
@@ -1491,7 +1491,7 @@ dependencies = [
 
 [[package]]
 name = "onus-map"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "globset",
  "ignore",
@@ -1509,7 +1509,7 @@ dependencies = [
 
 [[package]]
 name = "onus-plugin-example"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "onus-core",
  "onus-map",
@@ -1519,7 +1519,7 @@ dependencies = [
 
 [[package]]
 name = "onus-plugin-svelte"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "onus-core",
  "onus-lang-ts",
@@ -1530,7 +1530,7 @@ dependencies = [
 
 [[package]]
 name = "onus-report"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "onus-core",
  "serde_json",
@@ -1538,7 +1538,7 @@ dependencies = [
 
 [[package]]
 name = "onus-testkit"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "globset",
  "onus-core",

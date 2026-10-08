@@ -4,6 +4,8 @@ All notable changes to Onus are recorded here. The format follows [Keep a Change
 
 ## Unreleased
 
+## [0.7.0] - 2026-10-08
+
 Phase 4 complete: risk lanes and the verifying judge ([ADR 0009](docs/adr/0009-risk-lanes-and-the-judge.md), `onus help lanes`).
 
 - `onus submit` bundles a change for review: the intent, Onus's report, changed paths, test runs to re-run, the token's scope, escalations, approvals and the agent setup, and nothing of the author's reasoning.
