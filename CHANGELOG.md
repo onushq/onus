@@ -4,6 +4,16 @@ All notable changes to Onus are recorded here. The format follows [Keep a Change
 
 ## Unreleased
 
+## [0.6.0] - 2026-10-08
+
+Phase 3 complete: scoped tokens, enforcing doors and evidence-based escalation ([ADR 0008](docs/adr/0008-scoped-tokens-and-doors.md), `onus help scopes`).
+
+- **Task tokens:** `onus token keygen|mint|attenuate|inspect|check` mint Biscuit tokens from task plans (writes, reads, hosts, secrets, refs, ttl). Holders can narrow a token for a sub-agent but never widen it. `onus scope suggest` proposes reads from the map, leaving out sensitive components.
+- **The git gateway:** `onus gateway serve` gives each task a mirror holding only what it may read. It refuses pushes that change anything outside the write scope, with an error that says how to ask, and replays accepted commits onto the real repository with a credential the agent never holds. A red-team test suite is the gate: zero out-of-scope writes.
+- **Read scope for the map:** `onus mcp --token` answers only about files the task may read.
+- **Escalation:** `onus escalate` records a structured request with graded evidence, the blast radius and sensitive labels. `onus escalation decide` grants low-risk requests automatically when a failing test is reproduced by `onus run-test` (a container with no network); `grant` and `deny` are for people.
+- **Audit:** every decision is a hash-chained JSON line; `onus audit <log>` checks the chain.
+
 ## [0.5.0] - 2026-10-08
 
 Phase 2 complete:

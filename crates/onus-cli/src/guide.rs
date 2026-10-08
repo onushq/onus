@@ -51,6 +51,11 @@ pub const TOPICS: &[Topic] = &[
         text: include_str!("../guide/agents.md"),
     },
     Topic {
+        name: "scopes",
+        summary: "Task tokens, the git gateway, escalation with evidence and the audit log",
+        text: include_str!("../guide/scopes.md"),
+    },
+    Topic {
         name: "plugins",
         summary: "New languages and frameworks, SCIP indexes, language servers, trusted mode",
         text: include_str!("../guide/plugins.md"),

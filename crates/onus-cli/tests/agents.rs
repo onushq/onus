@@ -83,9 +83,14 @@ struct Mcp {
 
 impl Mcp {
     fn start(repo: &Path) -> Mcp {
+        Mcp::start_with(repo, &[])
+    }
+
+    fn start_with(repo: &Path, extra: &[&str]) -> Mcp {
         let mut child = Command::new(env!("CARGO_BIN_EXE_onus"))
             .args(["mcp", "--no-server", "--repo"])
             .arg(repo)
+            .args(extra)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -397,4 +402,60 @@ fn mcp_serves_the_same_tools_over_http() {
     assert!(status >= 400, "{status}");
     child.kill().unwrap();
     let _ = child.wait();
+}
+
+#[test]
+fn mcp_with_a_task_token_answers_only_within_its_read_scope() {
+    let repo = shop_repo();
+    let keys = tempfile::tempdir().unwrap();
+    let onus = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_onus"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    onus(&["token", "keygen", "--out", keys.path().to_str().unwrap()]);
+    let plan = keys.path().join("plan.yaml");
+    std::fs::write(
+        &plan,
+        "task: billing-fix\nwrites: [\"services/billing/**\"]\n",
+    )
+    .unwrap();
+    let token = onus(&[
+        "token",
+        "mint",
+        "--plan",
+        plan.to_str().unwrap(),
+        "--key",
+        keys.path().join("root.key").to_str().unwrap(),
+    ]);
+    let public = keys.path().join("root.pub");
+    let mut mcp = Mcp::start_with(
+        repo.path(),
+        &["--token", &token, "--key-public", public.to_str().unwrap()],
+    );
+    // A symbol in another component is not described at all.
+    let (failed, body) = mcp.tool(
+        "onus_symbol",
+        serde_json::json!({ "id": "user-preferences:src/types.ts#UserPreferences" }),
+    );
+    assert!(failed, "{body}");
+    assert!(body.as_str().unwrap().contains("outside the read scope"));
+    // Search answers keep only readable files.
+    let (failed, found) = mcp.tool("onus_find", serde_json::json!({ "text": "preferences" }));
+    assert!(!failed);
+    let text = found.to_string();
+    assert!(!text.contains("services/user-preferences/"), "{text}");
+    let (_, discount) = mcp.tool("onus_find", serde_json::json!({ "text": "apply discount" }));
+    assert!(
+        discount
+            .to_string()
+            .contains("services/billing/src/discount.ts")
+    );
 }

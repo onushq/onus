@@ -393,6 +393,8 @@ Runtime traces, running tests, LLM-written report rows, GitHub App hosting, lang
 
 ### Phase 3: Scoped tokens and evidence-based escalation
 
+**Status (2026-10-08): done** ([ADR 0008](docs/adr/0008-scoped-tokens-and-doors.md), `onus help scopes`). Biscuit task tokens minted from task plans (`onus token`, `onus scope suggest`), the git gateway (`onus gateway serve`) with read-limited mirrors, write-scope checks in its hooks and replay onto the real repository, MCP answers filtered by read scope (`onus mcp --token`), escalation with graded evidence and a container test runner (`onus escalate`, `onus escalation decide|grant|deny`, `onus run-test`), and a hash-chained audit log (`onus audit`). **Gate:** a red-team suite (`crates/onus-cli/tests/gateway.rs`) lands zero out-of-scope writes: out-of-scope paths (the prompt-injected case), refs, symbolic links, merges, an attenuated sub-agent token's wider write, and forged or foreign tokens are all refused with the real repository untouched. Escalation rate and time-to-grant are measured in the field once agents use the gateway.
+
 - **Token service:** mints Biscuit tokens from a task plan. The plan's scope suggestion comes from map queries: generous reads in low-sensitivity code, tight writes everywhere.
   - Path scopes first: `write:path:services/notifications/**`, `read:path:services/orders/events/**`
   - Network scopes: `net:host:sms.test.example`

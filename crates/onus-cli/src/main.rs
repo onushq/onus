@@ -264,6 +264,19 @@ Examples:
         /// but describe the code: only allow hosts on a network you trust.
         #[arg(long, value_name = "HOST", requires = "http")]
         allow_host: Vec<String>,
+        /// A task token (default: $ONUS_TOKEN): answers leave out everything the task may
+        /// not read. Needs --key-public.
+        #[arg(
+            long,
+            env = "ONUS_TOKEN",
+            value_name = "TOKEN",
+            hide_env_values = true,
+            requires = "key_public"
+        )]
+        token: Option<String>,
+        /// The root public key that verifies --token.
+        #[arg(long, value_name = "FILE")]
+        key_public: Option<PathBuf>,
     },
     /// Ask the codebase map a question; the same answers as the MCP tools.
     #[command(after_long_help = "\
@@ -293,6 +306,36 @@ Examples:
         /// Exit after this many seconds without requests.
         #[arg(long, default_value_t = 1800, value_name = "SECONDS")]
         idle: u64,
+    },
+    /// Task tokens: keys, minting from a task plan, attenuation, inspection.
+    Token {
+        #[command(subcommand)]
+        cmd: doors::TokenCmd,
+    },
+    /// Scopes for task plans.
+    Scope {
+        #[command(subcommand)]
+        cmd: doors::ScopeCmd,
+    },
+    /// The git gateway that enforces a task's write scope.
+    Gateway {
+        #[command(subcommand)]
+        cmd: doors::GatewayCmd,
+    },
+    /// Ask for more than a task's token allows, with graded evidence.
+    Escalate(doors::EscalateArgs),
+    /// Decide, grant or deny escalation requests.
+    Escalation {
+        #[command(subcommand)]
+        cmd: doors::EscalationCmd,
+    },
+    /// Run a test command at a commit in a throwaway container with no network
+    /// (the test runner escalations use to reproduce failing tests).
+    RunTest(doors::RunTestArgs),
+    /// Check an audit log's hash chain.
+    Audit {
+        /// The audit log (JSONL).
+        log: PathBuf,
     },
     /// Show help for a command, or a topic from the guide.
     #[command(after_long_help = "\
@@ -454,6 +497,8 @@ fn backend(root: &std::path::Path, no_server: bool) -> std::sync::Arc<dyn onus_c
     let _ = (root, no_server);
     std::sync::Arc::new(onus_cli::daemon::Server::new())
 }
+
+mod doors;
 
 fn main() -> ExitCode {
     let cli = match Cli::try_parse() {
@@ -626,23 +671,45 @@ fn run(cli: Cli) -> Result<i32> {
             eprintln!("onus: wrote {}", path.display());
             Ok(0)
         }
+        Cmd::Token { cmd } => doors::token(cmd),
+        Cmd::Scope { cmd } => doors::scope(cmd),
+        Cmd::Gateway { cmd } => doors::gateway(cmd),
+        Cmd::Audit { log } => doors::audit_verify(&log),
+        Cmd::Escalate(args) => doors::escalate(args),
+        Cmd::Escalation { cmd } => doors::escalation(cmd),
+        Cmd::RunTest(args) => doors::run_test(args),
         Cmd::Help { topic } => help(topic.as_deref()),
         Cmd::Mcp {
             repo,
             no_server,
             http,
             allow_host,
+            token,
+            key_public,
         } => {
             let root = onus_cli::daemon::worktree_root(&repo);
+            let read_scope = match (token, key_public) {
+                (Some(t), Some(k)) => {
+                    let key = std::fs::read_to_string(&k)
+                        .with_context(|| format!("cannot read {}", k.display()))?;
+                    let verified =
+                        onus_doors::token::verify(&t, &onus_doors::token::public_key(&key)?)?;
+                    Some(std::sync::Arc::new(onus_cli::mcp::ReadScope::new(verified)))
+                }
+                _ => None,
+            };
             match http {
                 Some(addr) => onus_cli::mcp::serve_http(
                     root.clone(),
                     backend(&root, no_server),
+                    read_scope,
                     addr,
                     allow_host,
                     |bound| eprintln!("onus: MCP over HTTP at http://{bound}/"),
                 )?,
-                None => onus_cli::mcp::serve_stdio(root.clone(), backend(&root, no_server))?,
+                None => {
+                    onus_cli::mcp::serve_stdio(root.clone(), backend(&root, no_server), read_scope)?
+                }
             }
             Ok(0)
         }

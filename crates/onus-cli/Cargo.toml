@@ -19,6 +19,7 @@ clap.workspace = true
 notify.workspace = true
 onus-core.workspace = true
 onus-diff.workspace = true
+onus-doors.workspace = true
 onus-index.workspace = true
 onus-map.workspace = true
 onus-report.workspace = true
