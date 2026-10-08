@@ -4,6 +4,8 @@ All notable changes to Onus are recorded here. The format follows [Keep a Change
 
 ## Unreleased
 
+## [0.6.0] - 2026-10-08
+
 Phase 3 complete: scoped tokens, enforcing doors and evidence-based escalation ([ADR 0008](docs/adr/0008-scoped-tokens-and-doors.md), `onus help scopes`).
 
 - **Task tokens:** `onus token keygen|mint|attenuate|inspect|check` mint Biscuit tokens from task plans (writes, reads, hosts, secrets, refs, ttl). Holders can narrow a token for a sub-agent but never widen it. `onus scope suggest` proposes reads from the map, leaving out sensitive components.
