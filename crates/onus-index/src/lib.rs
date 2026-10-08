@@ -423,6 +423,19 @@ impl MapIndex {
             edges: self.map.edges.len(),
             tests: self.map.tests.len(),
             diagnostics: self.map.diagnostics.len(),
+            component_dirs: self
+                .map
+                .components
+                .iter()
+                .map(|c| {
+                    let dir = c
+                        .roots
+                        .first()
+                        .map(|r| r.trim_end_matches("**").trim_end_matches('/').to_string())
+                        .unwrap_or_default();
+                    (c.id.clone(), dir)
+                })
+                .collect(),
         }
     }
 
@@ -1069,6 +1082,8 @@ pub struct Status {
     pub edges: usize,
     pub tests: usize,
     pub diagnostics: usize,
+    /// Each component's folder, which its symbol ids' paths are relative to.
+    pub component_dirs: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]

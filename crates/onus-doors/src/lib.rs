@@ -2,7 +2,10 @@
 //! enforce them, evidence-based escalation and the audit log.
 
 pub mod audit;
+pub mod escalation;
+pub mod filter;
 pub mod gateway;
 pub mod plan;
+pub mod runner;
 pub mod scope;
 pub mod token;

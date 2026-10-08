@@ -306,3 +306,317 @@ pub fn audit_verify(log: &Path) -> Result<i32> {
     println!("{}: {} entries, chain intact", log.display(), entries.len());
     Ok(0)
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum KindArg {
+    Permission,
+    BrokenTest,
+    ContradictorySpec,
+    ImpossibleTask,
+}
+
+impl From<KindArg> for onus_doors::escalation::EscalationKind {
+    fn from(k: KindArg) -> Self {
+        use onus_doors::escalation::EscalationKind as K;
+        match k {
+            KindArg::Permission => K::Permission,
+            KindArg::BrokenTest => K::BrokenTest,
+            KindArg::ContradictorySpec => K::ContradictorySpec,
+            KindArg::ImpossibleTask => K::ImpossibleTask,
+        }
+    }
+}
+
+#[derive(Debug, Args)]
+pub struct EscalateArgs {
+    /// The task asking.
+    #[arg(long)]
+    task: String,
+    #[arg(long, value_enum, default_value = "permission")]
+    kind: KindArg,
+    /// A right asked for, such as write:path:services/billing/src/** (repeatable).
+    #[arg(long = "scope", value_name = "RIGHT")]
+    scopes: Vec<String>,
+    /// Evidence, strongest first: failing-test:<file>, trace:<file>, map-path:<path>,
+    /// draft-diff:<file>, rationale:<text> (repeatable).
+    #[arg(long = "evidence", value_name = "KIND:REF")]
+    evidence: Vec<String>,
+    /// Why the task needs it.
+    #[arg(long)]
+    reason: String,
+    /// The repository whose map gives the blast radius and labels.
+    #[arg(long, default_value = ".", value_name = "DIR")]
+    repo: PathBuf,
+    /// Write the request here instead of printing it.
+    #[arg(long, value_name = "FILE")]
+    out: Option<PathBuf>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum EscalationCmd {
+    /// Decide a request by policy: grant it (printing the new token) when it is
+    /// low risk with a reproduced failing test, else say why a person must decide
+    /// (exit code 3).
+    Decide {
+        /// The request (JSON from `onus escalate`).
+        request: PathBuf,
+        #[command(flatten)]
+        token: TokenArgs,
+        /// The root private key that mints the grant.
+        #[arg(long, value_name = "FILE")]
+        key: PathBuf,
+        /// Reproduce failing-test evidence at this ref of --repo.
+        #[arg(long, value_name = "REF")]
+        reproduce_at: Option<String>,
+        /// The repository to reproduce in.
+        #[arg(long, default_value = ".", value_name = "DIR")]
+        repo: PathBuf,
+        /// The container image for the test runner.
+        #[arg(long, default_value = "node:22")]
+        image: String,
+        /// A setup command run first, with network (such as `npm ci`).
+        #[arg(long)]
+        setup: Option<String>,
+        /// The test command; `{test}` becomes the failing test's file.
+        #[arg(long, default_value = "npx vitest run {test}")]
+        test_command: String,
+        /// The most dependent files an automatic grant may reach.
+        #[arg(long, default_value_t = 20)]
+        max_blast_radius: u32,
+        #[arg(long, value_name = "FILE")]
+        audit: Option<PathBuf>,
+    },
+    /// Grant a request as a person: prints the new token.
+    Grant {
+        request: PathBuf,
+        #[command(flatten)]
+        token: TokenArgs,
+        #[arg(long, value_name = "FILE")]
+        key: PathBuf,
+        /// Who decided.
+        #[arg(long)]
+        by: String,
+        #[arg(long, value_name = "FILE")]
+        audit: Option<PathBuf>,
+    },
+    /// Deny a request as a person.
+    Deny {
+        request: PathBuf,
+        #[arg(long)]
+        by: String,
+        #[arg(long)]
+        reason: String,
+        #[arg(long, value_name = "FILE")]
+        audit: Option<PathBuf>,
+    },
+}
+
+fn sensitive_labels(repo: &Path) -> Result<(Option<onus_map::LoadedConfig>, Vec<String>)> {
+    let config = onus_map::config::load_from_tree(repo)?;
+    let labels = match &config {
+        Some(c) => c
+            .config
+            .labels
+            .iter()
+            .filter(|(_, l)| l.sensitivity >= onus_core::Sensitivity::Medium)
+            .map(|(name, _)| name.clone())
+            .collect(),
+        None => vec!["auth".into(), "payments".into(), "pii".into()],
+    };
+    Ok((config, labels))
+}
+
+pub fn escalate(args: EscalateArgs) -> Result<i32> {
+    let scopes = rights(&args.scopes)?;
+    if scopes.is_empty() && args.kind == KindArg::Permission {
+        bail!("a permission request names the rights it asks for (--scope)");
+    }
+    let evidence = args
+        .evidence
+        .iter()
+        .map(|e| onus_doors::escalation::Evidence::parse(e))
+        .collect::<Result<Vec<_>>>()?;
+    let (config, labels) = sensitive_labels(&args.repo)?;
+    let map = onus_cli::build(&args.repo, config, None)?;
+    let req = onus_doors::escalation::Request::new(
+        &args.task,
+        args.kind.into(),
+        scopes,
+        evidence,
+        &args.reason,
+        Some(&map),
+        &labels,
+        now(),
+    );
+    let json = serde_json::to_string_pretty(&req)?;
+    match args.out {
+        Some(path) => {
+            std::fs::write(&path, format!("{json}\n"))?;
+            eprintln!(
+                "onus: escalation {} written to {} (blast radius {}, evidence grade {})",
+                req.id,
+                path.display(),
+                req.blast_radius,
+                req.best_grade().map_or("none".into(), |g| g.to_string())
+            );
+        }
+        None => println!("{json}"),
+    }
+    Ok(0)
+}
+
+fn load_request(path: &Path) -> Result<onus_doors::escalation::Request> {
+    serde_json::from_str(
+        &std::fs::read_to_string(path)
+            .with_context(|| format!("cannot read {}", path.display()))?,
+    )
+    .with_context(|| format!("{} is not an escalation request", path.display()))
+}
+
+fn record(audit: &Option<PathBuf>, r: Record) -> Result<()> {
+    if let Some(log) = audit {
+        AuditLog::new(log).append(r, now())?;
+    }
+    Ok(())
+}
+
+pub fn escalation(cmd: EscalationCmd) -> Result<i32> {
+    use onus_doors::escalation::{Decision, Policy, decide, grant};
+    match cmd {
+        EscalationCmd::Decide {
+            request,
+            token,
+            key,
+            reproduce_at,
+            repo,
+            image,
+            setup,
+            test_command,
+            max_blast_radius,
+            audit,
+        } => {
+            let mut req = load_request(&request)?;
+            let original = token.verify()?;
+            if let Some(at) = &reproduce_at {
+                for e in req.evidence.iter_mut().filter(|e| e.grade == 1) {
+                    let command = test_command.replace("{test}", &e.reference);
+                    let run =
+                        onus_doors::runner::run(&repo, at, &image, setup.as_deref(), &command)?;
+                    e.reproduced = Some(run.failed());
+                    e.run = Some(run);
+                }
+            }
+            let decision = decide(&req, &Policy { max_blast_radius });
+            let (label, reasons, minted) = match &decision {
+                Decision::Granted { reasons } => {
+                    let root = RootKey::from_hex(&read_key(&key)?)?;
+                    (
+                        "granted",
+                        reasons.clone(),
+                        Some(grant(&req, &original, &root)?),
+                    )
+                }
+                Decision::NeedsPerson { reasons } => ("needs-person", reasons.clone(), None),
+            };
+            record(
+                &audit,
+                Record {
+                    actor: req.task.clone(),
+                    action: "escalate".into(),
+                    subject: req.id.clone(),
+                    decision: label.into(),
+                    reason: reasons.join("; "),
+                    details: serde_json::to_value(&req)?,
+                },
+            )?;
+            let mut out = serde_json::json!({
+                "request": req.id,
+                "decision": label,
+                "reasons": reasons,
+                "evidence": req.evidence,
+            });
+            if let Some(t) = minted {
+                out["token"] = serde_json::json!(t);
+            }
+            println!("{}", serde_json::to_string_pretty(&out)?);
+            Ok(if label == "granted" { 0 } else { 3 })
+        }
+        EscalationCmd::Grant {
+            request,
+            token,
+            key,
+            by,
+            audit,
+        } => {
+            let req = load_request(&request)?;
+            let original = token.verify()?;
+            let root = RootKey::from_hex(&read_key(&key)?)?;
+            let minted = grant(&req, &original, &root)?;
+            record(
+                &audit,
+                Record {
+                    actor: by.clone(),
+                    action: "grant".into(),
+                    subject: req.id.clone(),
+                    decision: "granted".into(),
+                    reason: format!("granted by {by}"),
+                    details: serde_json::to_value(&req)?,
+                },
+            )?;
+            println!("{minted}");
+            Ok(0)
+        }
+        EscalationCmd::Deny {
+            request,
+            by,
+            reason,
+            audit,
+        } => {
+            let req = load_request(&request)?;
+            record(
+                &audit,
+                Record {
+                    actor: by.clone(),
+                    action: "deny".into(),
+                    subject: req.id.clone(),
+                    decision: "denied".into(),
+                    reason: reason.clone(),
+                    details: serde_json::to_value(&req)?,
+                },
+            )?;
+            println!("denied {} by {by}: {reason}", req.id);
+            Ok(0)
+        }
+    }
+}
+
+#[derive(Debug, Args)]
+pub struct RunTestArgs {
+    /// The repository.
+    #[arg(long, default_value = ".", value_name = "DIR")]
+    repo: PathBuf,
+    /// The commit to run at.
+    #[arg(long, default_value = "HEAD", value_name = "REF")]
+    reference: String,
+    /// The container image.
+    #[arg(long, default_value = "node:22")]
+    image: String,
+    /// A setup command run first, with network (such as `npm ci`).
+    #[arg(long)]
+    setup: Option<String>,
+    /// The test command (run with `sh -c`, without network).
+    #[arg(required = true, trailing_var_arg = true)]
+    command: Vec<String>,
+}
+
+pub fn run_test(args: RunTestArgs) -> Result<i32> {
+    let run = onus_doors::runner::run(
+        &args.repo,
+        &args.reference,
+        &args.image,
+        args.setup.as_deref(),
+        &args.command.join(" "),
+    )?;
+    println!("{}", serde_json::to_string_pretty(&run)?);
+    Ok(if run.failed() { 1 } else { 0 })
+}

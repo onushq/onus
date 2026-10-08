@@ -44,6 +44,39 @@ pub struct OnusMcp {
     root: PathBuf,
     backend: Arc<dyn Backend>,
     tool_router: ToolRouter<Self>,
+    /// With a task token: answers leave out what the task may not read.
+    read_scope: Option<Arc<ReadScope>>,
+}
+
+/// A task token's read scope and the component folders that turn map ids
+/// into repository paths.
+pub struct ReadScope {
+    pub token: onus_doors::token::Verified,
+    dirs: std::sync::Mutex<Option<std::collections::BTreeMap<String, String>>>,
+}
+
+impl ReadScope {
+    pub fn new(token: onus_doors::token::Verified) -> ReadScope {
+        ReadScope {
+            token,
+            dirs: std::sync::Mutex::new(None),
+        }
+    }
+
+    fn readable(&self, path: &str) -> bool {
+        let now = onus_doors::gateway::now();
+        self.token
+            .authorize(onus_doors::scope::Kind::Read, path, now)
+            .is_ok()
+    }
+}
+
+impl std::fmt::Debug for ReadScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReadScope")
+            .field("task", &self.token.task)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -142,7 +175,73 @@ impl OnusMcp {
             root,
             backend,
             tool_router: Self::tool_router(),
+            read_scope: None,
         }
+    }
+
+    /// Limits every answer to what `scope`'s token may read.
+    pub fn with_read_scope(mut self, scope: Option<Arc<ReadScope>>) -> OnusMcp {
+        self.read_scope = scope;
+        self
+    }
+
+    /// Component folders, asked once from the map.
+    async fn component_dirs(
+        &self,
+        scope: &ReadScope,
+    ) -> std::collections::BTreeMap<String, String> {
+        if let Ok(guard) = scope.dirs.lock()
+            && let Some(d) = guard.as_ref()
+        {
+            return d.clone();
+        }
+        let req = Request {
+            root: self.root.clone(),
+            op: Op::Query {
+                query: Query::Status,
+            },
+        };
+        let backend = self.backend.clone();
+        let dirs: std::collections::BTreeMap<String, String> =
+            tokio::task::spawn_blocking(move || backend.call(&req))
+                .await
+                .ok()
+                .and_then(|r| r.ok())
+                .and_then(|r| r.ok)
+                .and_then(|v| serde_json::from_value(v["componentDirs"].clone()).ok())
+                .unwrap_or_default();
+        if let Ok(mut guard) = scope.dirs.lock() {
+            *guard = Some(dirs.clone());
+        }
+        dirs
+    }
+
+    /// Removes what the token may not read; `Err` when the whole answer is
+    /// about an unreadable file.
+    async fn limit(&self, mut ok: serde_json::Value) -> Result<(serde_json::Value, usize), String> {
+        let Some(scope) = self.read_scope.clone() else {
+            return Ok((ok, 0));
+        };
+        let dirs = self.component_dirs(&scope).await;
+        let readable = |p: &str| scope.readable(p);
+        if onus_doors::filter::about_unreadable(&ok, &readable) {
+            return Err(format!(
+                "outside the read scope of task `{}`",
+                scope.token.task
+            ));
+        }
+        let id_path = |s: &str| -> Option<String> {
+            let (comp, rest) = s.split_once(':')?;
+            let path = rest.split('#').next()?;
+            let dir = dirs.get(comp)?;
+            Some(if dir.is_empty() {
+                path.to_string()
+            } else {
+                format!("{dir}/{path}")
+            })
+        };
+        let removed = onus_doors::filter::filter_by_read(&mut ok, &readable, &id_path);
+        Ok((ok, removed))
     }
 
     async fn run(&self, op: Op) -> Result<CallToolResult, ErrorData> {
@@ -157,12 +256,20 @@ impl OnusMcp {
         Ok(match response {
             Ok(Response {
                 ok: Some(ok), map, ..
-            }) => {
-                let body = serde_json::json!({ "result": ok, "map": map });
-                CallToolResult::success(vec![ContentBlock::text(
-                    serde_json::to_string_pretty(&body).unwrap_or_default(),
-                )])
-            }
+            }) => match self.limit(ok).await {
+                Ok((ok, hidden)) => {
+                    let mut body = serde_json::json!({ "result": ok, "map": map });
+                    if hidden > 0 {
+                        body["hidden"] = serde_json::json!(format!(
+                            "{hidden} items outside your read scope were left out"
+                        ));
+                    }
+                    CallToolResult::success(vec![ContentBlock::text(
+                        serde_json::to_string_pretty(&body).unwrap_or_default(),
+                    )])
+                }
+                Err(why) => CallToolResult::error(vec![ContentBlock::text(why)]),
+            },
             Ok(Response { error, .. }) => CallToolResult::error(vec![ContentBlock::text(
                 error.unwrap_or_else(|| "no answer".into()),
             )]),
@@ -350,6 +457,7 @@ impl ServerHandler for OnusMcp {
 pub fn serve_http(
     root: PathBuf,
     backend: Arc<dyn Backend>,
+    read_scope: Option<Arc<ReadScope>>,
     addr: std::net::SocketAddr,
     allowed_hosts: Vec<String>,
     ready: impl FnOnce(std::net::SocketAddr),
@@ -369,7 +477,9 @@ pub fn serve_http(
             config = config.with_allowed_hosts(hosts);
         }
         let service = StreamableHttpService::new(
-            move || Ok(OnusMcp::new(root.clone(), backend.clone())),
+            move || {
+                Ok(OnusMcp::new(root.clone(), backend.clone()).with_read_scope(read_scope.clone()))
+            },
             Arc::new(LocalSessionManager::default()),
             config,
         );
@@ -390,13 +500,18 @@ pub fn serve_http(
 }
 
 /// Serves MCP on stdin and stdout until the client disconnects.
-pub fn serve_stdio(root: PathBuf, backend: Arc<dyn Backend>) -> Result<()> {
+pub fn serve_stdio(
+    root: PathBuf,
+    backend: Arc<dyn Backend>,
+    read_scope: Option<Arc<ReadScope>>,
+) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
         .build()?;
     runtime.block_on(async move {
         let service = OnusMcp::new(root, backend)
+            .with_read_scope(read_scope)
             .serve(rmcp::transport::stdio())
             .await?;
         service.waiting().await?;
