@@ -30,6 +30,10 @@ pub enum TokenCmd {
         /// Record the mint in this audit log.
         #[arg(long, value_name = "FILE")]
         audit: Option<PathBuf>,
+        /// The repository whose map resolves `writeComponents`, `readContracts` and
+        /// `escalateBefore`.
+        #[arg(long, default_value = ".", value_name = "DIR")]
+        repo: PathBuf,
     },
     /// Narrow a token, for a sub-agent: every kind of right named here allows
     /// only what is named. It can never widen the token.
@@ -157,13 +161,34 @@ pub fn token(cmd: TokenCmd) -> Result<i32> {
             println!("{}", out.join("root.pub").display());
             Ok(0)
         }
-        TokenCmd::Mint { plan, key, audit } => {
+        TokenCmd::Mint {
+            plan,
+            key,
+            audit,
+            repo,
+        } => {
             let plan = Plan::parse(
                 &std::fs::read_to_string(&plan)
                     .with_context(|| format!("cannot read {}", plan.display()))?,
             )?;
             let root = RootKey::from_hex(&read_key(&key)?)?;
-            let grant = plan.grant(now())?;
+            let grant = if plan.needs_map() {
+                let config = onus_map::config::load_from_tree(&repo)?;
+                let contracts = config
+                    .as_ref()
+                    .map(|c| {
+                        c.config
+                            .contracts
+                            .iter()
+                            .map(|(name, contract)| (name.clone(), contract.symbol.clone()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let map = onus_cli::build(&repo, config, None)?;
+                plan.grant_with_map(now(), &map, &contracts)?
+            } else {
+                plan.grant(now())?
+            };
             let minted = token::mint(&root, &grant)?;
             if let Some(log) = audit {
                 AuditLog::new(log).append(

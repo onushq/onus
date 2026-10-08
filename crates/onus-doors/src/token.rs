@@ -249,6 +249,11 @@ impl Verified {
     /// only values it allows stay allowed. Kinds it does not name keep what
     /// the token allowed.
     pub fn attenuate(&self, narrower: &[Right]) -> Result<String> {
+        // Narrowing guards would unprotect paths; guards only come from the
+        // root key.
+        if let Some(r) = narrower.iter().find(|r| r.kind == Kind::Guard) {
+            bail!("`{r}`: guards cannot be attenuated; they only come with the token");
+        }
         let mut block = BlockBuilder::new();
         let mut kinds: Vec<Kind> = narrower.iter().map(|r| r.kind).collect();
         kinds.sort();

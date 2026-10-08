@@ -5,7 +5,10 @@
 //! - `read:path:<glob>` and `write:path:<glob>`: repository paths;
 //! - `push:ref:<glob>`: git refs the gateway accepts (`refs/heads/onus/task-1/*`);
 //! - `net:host:<host>`: a network host the task's environment may reach;
-//! - `secret:<NAME>`: a secret the task's environment receives.
+//! - `secret:<NAME>`: a secret the task's environment receives;
+//! - `guard:path:<glob>`: paths that need a granted escalation before they
+//!   change, even when they are writable (a declared contract's file);
+//! - `unlock:path:<glob>`: guarded paths an escalation unlocked.
 //!
 //! Path globs use `*` (within one folder), `**` (any depth) and `?`. The
 //! same glob always means the same set, whether Onus checks it in Rust or a
@@ -25,6 +28,8 @@ pub enum Kind {
     Push,
     Net,
     Secret,
+    Guard,
+    Unlock,
 }
 
 impl Kind {
@@ -35,6 +40,8 @@ impl Kind {
             Kind::Push => "push",
             Kind::Net => "net",
             Kind::Secret => "secret",
+            Kind::Guard => "guard",
+            Kind::Unlock => "unlock",
         }
     }
 
@@ -45,6 +52,8 @@ impl Kind {
             "push" => Kind::Push,
             "net" => Kind::Net,
             "secret" => Kind::Secret,
+            "guard" => Kind::Guard,
+            "unlock" => Kind::Unlock,
             _ => return None,
         })
     }
@@ -52,7 +61,7 @@ impl Kind {
     /// The word between the kind and the pattern in the written form.
     fn target(self) -> Option<&'static str> {
         match self {
-            Kind::Read | Kind::Write => Some("path"),
+            Kind::Read | Kind::Write | Kind::Guard | Kind::Unlock => Some("path"),
             Kind::Push => Some("ref"),
             Kind::Net => Some("host"),
             Kind::Secret => None,
@@ -79,7 +88,9 @@ impl Right {
     /// The anchored regex this right's pattern matches with.
     pub fn regex(&self) -> String {
         match self.kind {
-            Kind::Read | Kind::Write | Kind::Push => glob_regex(&self.pattern),
+            Kind::Read | Kind::Write | Kind::Push | Kind::Guard | Kind::Unlock => {
+                glob_regex(&self.pattern)
+            }
             Kind::Net | Kind::Secret => format!("^{}$", regex::escape(&self.pattern)),
         }
     }
@@ -108,7 +119,8 @@ impl FromStr for Right {
         let bad = || {
             format!(
                 "`{s}` is not a right; write `read:path:<glob>`, `write:path:<glob>`, \
-                 `push:ref:<glob>`, `net:host:<host>` or `secret:<NAME>`"
+                 `push:ref:<glob>`, `net:host:<host>`, `secret:<NAME>`, `guard:path:<glob>` \
+                 or `unlock:path:<glob>`"
             )
         };
         let (kind, rest) = s.split_once(':').ok_or_else(bad)?;
@@ -123,7 +135,7 @@ impl FromStr for Right {
         if pattern.is_empty() {
             return Err(bad());
         }
-        if matches!(kind, Kind::Read | Kind::Write) {
+        if matches!(kind, Kind::Read | Kind::Write | Kind::Guard | Kind::Unlock) {
             check_path_glob(pattern)?;
         }
         Ok(Right::new(kind, pattern))
@@ -206,6 +218,12 @@ impl Scope {
 
     pub fn can_write(&self, path: &str) -> bool {
         self.allows(Kind::Write, path)
+    }
+
+    /// Whether changing `path` waits for a granted escalation: it is guarded
+    /// and not unlocked.
+    pub fn guarded(&self, path: &str) -> bool {
+        self.allows(Kind::Guard, path) && !self.allows(Kind::Unlock, path)
     }
 
     pub fn of(&self, kind: Kind) -> impl Iterator<Item = &Right> {

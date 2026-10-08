@@ -18,7 +18,7 @@ The Onus action downloads the release binary for the runner, checks its SHA-256,
           - uses: actions/checkout@v7
             with:
               fetch-depth: 0
-          - uses: onushq/onus/action@v0.7.0
+          - uses: onushq/onus/action@v0.8.0
             id: onus
             with:
               fail-on: rule-violation,secrets
@@ -88,7 +88,7 @@ To acknowledge those replies with a 🚀, add a second workflow; the same action
         if: github.event.issue.pull_request && startsWith(github.event.comment.body, '/onus caught')
         runs-on: ubuntu-latest
         steps:
-          - uses: onushq/onus/action@v0.7.0
+          - uses: onushq/onus/action@v0.8.0
 
 The comment also carries the report's metrics line in a hidden HTML comment. `scripts/onus-metrics.sh` in the Onus repository reads all of it back with the GitHub CLI, one JSON line per pull request, or one line of totals with `--summary` (reports, large reports, the share of 👍 on large pull requests, the catch rate, changed lines per row, time to first review):
 

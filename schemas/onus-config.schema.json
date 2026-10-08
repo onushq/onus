@@ -15,6 +15,17 @@
         "$ref": "#/$defs/ContractConfig"
       }
     },
+    "environment": {
+      "description": "Environments that run the change and record evidence\n(`onus help environments`).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/EnvironmentConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "extractors": {
       "$ref": "#/$defs/ExtractorsConfig",
       "default": {}
@@ -161,6 +172,62 @@
       "required": [
         "symbol"
       ]
+    },
+    "EnvironmentConfig": {
+      "description": "A disposable environment: a container built from the repository at a\ncommit. Read from the operator's working tree, never from the commit\nunder test, so a change cannot alter its own environment.",
+      "type": "object",
+      "properties": {
+        "egressImage": {
+          "description": "The egress proxy image, started when a task's token names hosts.\nDefault `ubuntu/squid`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "evidence": {
+          "description": "Globs of test result files (JUnit XML) a run writes, kept as evidence.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "image": {
+          "description": "The container image. Default: the devcontainer's image.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lockfiles": {
+          "description": "Files whose contents decide when the warm image is rebuilt. Default:\nthe usual lockfiles.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "seed": {
+          "description": "Loads synthetic data into a new environment, after setup.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "setup": {
+          "description": "Installs dependencies, with network, once per image, setup command\nand lockfile contents; the result is kept as a warm image.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "traces": {
+          "description": "Globs of OpenTelemetry trace files (OTLP JSON) a run writes, kept as\nevidence.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
     },
     "EventPatterns": {
       "type": "object",

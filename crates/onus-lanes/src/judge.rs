@@ -19,6 +19,7 @@ use std::process::{Command, Stdio};
 use anyhow::Result;
 use onus_core::{ChangeKind, Lane, LanesConfig};
 use onus_doors::runner::TestRun;
+use onus_env::store::Store;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -93,6 +94,50 @@ pub fn judge(
     repo: &Path,
     run: Runner,
 ) -> Judgment {
+    judge_with(sub, classification, config, repo, run, None)
+}
+
+/// A claimed run checked against its manifest in the evidence store: it
+/// must have run at the head commit, and say what the manifest recorded.
+fn manifest_problem(e: &TestRun, head: &str, store: Option<&Store>) -> Option<String> {
+    let id = e.manifest.as_deref()?;
+    let Some(store) = store else {
+        return Some(format!(
+            "`{}` names evidence manifest {id}, but there is no evidence store",
+            e.command
+        ));
+    };
+    let (full, m) = match store.manifest(id) {
+        Ok(found) => found,
+        Err(err) => return Some(format!("`{}`: {err:#}", e.command)),
+    };
+    let short = &full[..12];
+    if m.commit != head {
+        Some(format!(
+            "`{}`: manifest {short} ran at {}, not at the head commit",
+            e.command,
+            &m.commit[..m.commit.len().min(12)]
+        ))
+    } else if m.command != e.command || m.exit_code != e.exit_code || m.commit != e.commit {
+        Some(format!(
+            "`{}`: the run does not match manifest {short} (it recorded `{}`, exit {})",
+            e.command, m.command, m.exit_code
+        ))
+    } else {
+        None
+    }
+}
+
+/// [`judge`], also checking test runs that name a manifest against the
+/// evidence store.
+pub fn judge_with(
+    sub: &Submission,
+    classification: &Classification,
+    config: &LanesConfig,
+    repo: &Path,
+    run: Runner,
+    store: Option<&Store>,
+) -> Judgment {
     let mut steps = Vec::new();
     let report = &sub.report;
 
@@ -105,10 +150,18 @@ pub fn judge(
         ));
     } else {
         let mut failed = Vec::new();
+        let mut recorded = 0;
         for e in &sub.evidence {
             if e.failed() {
                 failed.push(format!("`{}` failed when the author ran it", e.command));
                 continue;
+            }
+            if let Some(problem) = manifest_problem(e, &sub.head, store) {
+                failed.push(problem);
+                continue;
+            }
+            if e.manifest.is_some() {
+                recorded += 1;
             }
             match run(repo, &sub.head, &e.image, e.setup.as_deref(), &e.command) {
                 Ok(again) if !again.failed() => {}
@@ -125,7 +178,11 @@ pub fn judge(
             step(
                 "evidence",
                 StepStatus::Passed,
-                vec![format!("{} test runs passed again", sub.evidence.len())],
+                std::iter::once(format!("{} test runs passed again", sub.evidence.len()))
+                    .chain((recorded > 0).then(|| {
+                        format!("{recorded} matched their manifests in the evidence store")
+                    }))
+                    .collect(),
             )
         } else {
             step("evidence", StepStatus::Failed, failed)
@@ -327,6 +384,7 @@ mod tests {
             command: "npm test".into(),
             exit_code: if passes { 0 } else { 1 },
             output_tail: String::new(),
+            manifest: None,
         }
     }
 
@@ -450,5 +508,99 @@ mod tests {
         let r = judge(&submission(), &lane(Lane::Judge), &taste, repo, &passing);
         assert_eq!(r.verdict, Verdict::Escalate);
         assert_eq!(r.reasons, ["taste: naming"]);
+    }
+
+    #[test]
+    fn runs_that_name_a_manifest_must_match_it() {
+        use onus_env::store::{EnvironmentInfo, Manifest};
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path());
+        let head = submission().head;
+        let manifest = |commit: &str, exit_code: i32| Manifest {
+            schema: 1,
+            commit: commit.into(),
+            command: "npm test".into(),
+            exit_code,
+            started_at: 1,
+            finished_at: 2,
+            environment: EnvironmentInfo {
+                name: "t".into(),
+                image: "node:22".into(),
+                warm_image: None,
+                setup: None,
+                seed: None,
+                hosts: vec![],
+                secrets: vec![],
+            },
+            artifacts: vec![],
+            tests: None,
+        };
+        let passing = |_: &Path, _: &str, _: &str, _: Option<&str>, _: &str| Ok(run_ok(true));
+        let with = |id: String| {
+            let mut sub = submission();
+            sub.evidence[0].commit = head.clone();
+            sub.evidence[0].manifest = Some(id);
+            sub
+        };
+        let config = LanesConfig::default();
+        let repo = Path::new(".");
+
+        let good = store.record(&manifest(&head, 0)).unwrap();
+        let j = judge_with(
+            &with(good.clone()),
+            &lane(Lane::Judge),
+            &config,
+            repo,
+            &passing,
+            Some(&store),
+        );
+        assert_eq!(j.verdict, Verdict::Approve, "{j:?}");
+        assert!(
+            j.steps[0].details[1].contains("matched their manifests"),
+            "{j:?}"
+        );
+
+        // The run failed in the environment, but the claim says it passed.
+        let failed = store.record(&manifest(&head, 1)).unwrap();
+        let j = judge_with(
+            &with(failed),
+            &lane(Lane::Judge),
+            &config,
+            repo,
+            &passing,
+            Some(&store),
+        );
+        assert_eq!(j.verdict, Verdict::Reject);
+        assert!(j.reasons[0].contains("does not match manifest"), "{j:?}");
+
+        // A manifest of another commit, or none at all.
+        let other = store.record(&manifest("feedface", 0)).unwrap();
+        let j = judge_with(
+            &with(other),
+            &lane(Lane::Judge),
+            &config,
+            repo,
+            &passing,
+            Some(&store),
+        );
+        assert!(j.reasons[0].contains("not at the head commit"), "{j:?}");
+        let j = judge_with(
+            &with("0".repeat(64)),
+            &lane(Lane::Judge),
+            &config,
+            repo,
+            &passing,
+            Some(&store),
+        );
+        assert!(j.reasons[0].contains("not in the evidence store"), "{j:?}");
+        let j = judge_with(
+            &with(good),
+            &lane(Lane::Judge),
+            &config,
+            repo,
+            &passing,
+            None,
+        );
+        assert!(j.reasons[0].contains("no evidence store"), "{j:?}");
     }
 }

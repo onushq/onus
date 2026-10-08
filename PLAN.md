@@ -441,6 +441,8 @@ Runtime traces, running tests, LLM-written report rows, GitHub App hosting, lang
 
 ### Phase 5: Evidence factory, production loop, contract-level scopes
 
+**Status (2026-10-09): done** ([ADR 0010](docs/adr/0010-evidence-factory.md), `onus help environments`). Environments built from a commit (`onus env create|run|list|destroy`) from onus.yaml's `environment:` or the devcontainer, with warm images per lockfile, seed data, no network unless the token names hosts (then only through an egress proxy that allows exactly those), and secrets from the token, redacted from evidence. Runs leave manifests, logs, JUnit results and OTLP traces in a content-addressed store (`onus evidence`), and the judge checks claimed runs against their manifests. Traces add `traced` edges to the map (`--traces`). The production loop records reverts from git history, rollbacks and incidents (`onus outcomes ingest-reverts|incident|backlog`): reverted changes leave an agent setup's record, recent incidents stop auto-merge, and incidents list where held-out tests should go. Plans name components and contracts (`writeComponents`, `readContracts`, `escalateBefore`), resolved through the map when the token is minted and enforced by the gateway. Containers are the isolation boundary; microVMs are left for where isolation demands them.
+
 - **Disposable environments** (`env.create/run/destroy`):
   - Containers first, microVMs (Firecracker) where isolation demands it.
   - Declared dependencies (devcontainer/Nix), synthetic seed data, warm pools and snapshots.
@@ -473,8 +475,10 @@ onus/
     onus-diff/       # semantic diff, classification, rules, intent check
     onus-report/     # markdown and JSON renderers
     onus-cli/        # the `onus` binary (map | report | init | ...)
-    # Phase 2+: onus-mcp/  onus-store/   Phase 3+: onus-tokens/ onus-gateway/
-    # Phase 4+: onus-classifier/ onus-judge/   Phase 5+: onus-env/ onus-outcomes/
+    onus-index/      # the in-memory map server and its queries (Phase 2)
+    onus-doors/      # task tokens, the git gateway, escalation, the test runner, audit (Phase 3)
+    onus-lanes/      # submissions, the classifier, the judge, outcome records (Phase 4)
+    onus-env/        # environments and the evidence store (Phase 5)
   action/            # composite GitHub Action (action.yml)
   schemas/           # generated JSON Schemas, committed so other tools can use them
   fixtures/

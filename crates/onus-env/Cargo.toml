@@ -1,6 +1,6 @@
 [package]
-name = "onus-lanes"
-description = "Onus risk lanes: change submissions, the rules-first classifier, the verifying judge and outcome records"
+name = "onus-env"
+description = "Onus environments: disposable containers that run a change, and the evidence store"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,13 +13,11 @@ authors.workspace = true
 anyhow.workspace = true
 onus-core.workspace = true
 onus-doors.workspace = true
-onus-env.workspace = true
+regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true
-
-[dev-dependencies]
-tempfile.workspace = true

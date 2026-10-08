@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
 use onus_core::{Lane, LanesConfig, SemanticReport};
 use onus_lanes::classify::{Classification, classify};
-use onus_lanes::judge::{Verdict, judge};
+use onus_lanes::judge::{Verdict, judge_with};
 use onus_lanes::outcomes::{self, Outcome};
 use onus_lanes::submission::{AgentSetup, Approval, ScopeUsed, Submission};
 
@@ -94,7 +94,7 @@ pub enum OutcomesCmd {
         agent: String,
         #[arg(long, value_enum)]
         lane: LaneArg,
-        /// merged, reverted, incident, closed or open.
+        /// merged, reverted, rolled-back (a flag or rollout), incident, closed or open.
         #[arg(long)]
         result: String,
         #[arg(long)]
@@ -107,6 +107,38 @@ pub enum OutcomesCmd {
         /// The audit found a problem the automatic path missed.
         #[arg(long)]
         missed: bool,
+        /// The commit the change landed as (to match reverts against).
+        #[arg(long)]
+        commit: Option<String>,
+    },
+    /// Find reverts in git history and record them against the changes they revert.
+    IngestReverts {
+        #[arg(long, value_name = "FILE")]
+        file: PathBuf,
+        #[arg(long, default_value = ".", value_name = "DIR")]
+        repo: PathBuf,
+        /// Only reverts after this ref.
+        #[arg(long, value_name = "REF")]
+        since: Option<String>,
+    },
+    /// Record a production incident against the change that caused it.
+    Incident {
+        #[arg(long, value_name = "FILE")]
+        file: PathBuf,
+        /// The change, as recorded (owner/repo#123 or a commit).
+        #[arg(long)]
+        change: String,
+        /// Components and symbols the incident involved (repeatable).
+        #[arg(long = "involved", value_name = "ID")]
+        involved: Vec<String>,
+        /// What happened.
+        #[arg(long)]
+        note: String,
+    },
+    /// Where held-out tests should go next: what incidents involved, most often first.
+    Backlog {
+        #[arg(long, value_name = "FILE")]
+        file: PathBuf,
     },
     /// Totals per agent setup, judge configuration and lane, the human-lane
     /// share and the audit miss rate.
@@ -309,7 +341,9 @@ pub fn judge_cmd(args: LaneArgs) -> Result<i32> {
     let run = |repo: &Path, commit: &str, image: &str, setup: Option<&str>, command: &str| {
         onus_doors::runner::run(repo, commit, image, setup, command)
     };
-    let j = judge(&sub, &c, &config, &args.repo, &run);
+    // Runs recorded in an environment are checked against their manifests.
+    let store = onus_env::store::Store::for_repo(&args.repo).ok();
+    let j = judge_with(&sub, &c, &config, &args.repo, &run, store.as_ref());
     let out = serde_json::json!({ "classification": c, "judgment": j });
     println!("{}", serde_json::to_string_pretty(&out)?);
     Ok(match j.verdict {
@@ -331,12 +365,15 @@ pub fn outcomes_cmd(cmd: OutcomesCmd) -> Result<i32> {
             judge,
             audited,
             missed,
+            commit,
         } => {
             if !matches!(
                 result.as_str(),
-                "merged" | "reverted" | "incident" | "closed" | "open"
+                "merged" | "reverted" | "rolled-back" | "incident" | "closed" | "open"
             ) {
-                bail!("--result is merged, reverted, incident, closed or open");
+                bail!(
+                    "--result is merged, reverted, rolled-back (a flag or rollout), incident, closed or open"
+                );
             }
             outcomes::append(
                 &file,
@@ -350,8 +387,57 @@ pub fn outcomes_cmd(cmd: OutcomesCmd) -> Result<i32> {
                     result,
                     audited,
                     missed,
+                    commit,
+                    involved: vec![],
+                    note: None,
                 },
             )?;
+            Ok(0)
+        }
+        OutcomesCmd::IngestReverts { file, repo, since } => {
+            let all = outcomes::load(&file)?;
+            let reverts = outcomes::find_reverts(&repo, since.as_deref())?;
+            let added = outcomes::ingest_reverts(&all, &reverts, onus_doors::gateway::now());
+            for o in &added {
+                outcomes::append(&file, o)?;
+            }
+            println!(
+                "{} reverts found, {} recorded against changes on record",
+                reverts.len(),
+                added.len()
+            );
+            Ok(0)
+        }
+        OutcomesCmd::Incident {
+            file,
+            change,
+            involved,
+            note,
+        } => {
+            let all = outcomes::load(&file)?;
+            let Some(last) = outcomes::latest(&all)
+                .into_iter()
+                .find(|o| o.change == change)
+                .cloned()
+            else {
+                bail!("`{change}` is not on record in {}", file.display());
+            };
+            outcomes::append(
+                &file,
+                &Outcome {
+                    at: onus_doors::gateway::now(),
+                    result: "incident".into(),
+                    involved,
+                    note: Some(note),
+                    ..last
+                },
+            )?;
+            Ok(0)
+        }
+        OutcomesCmd::Backlog { file } => {
+            for (what, n) in outcomes::backlog(&outcomes::load(&file)?) {
+                println!("{n}\t{what}");
+            }
             Ok(0)
         }
         OutcomesCmd::Summary { file } => {

@@ -71,6 +71,8 @@ fn mint(root: &Path, plan: &str) -> String {
         .arg(root.join("keys/root.key"))
         .arg("--audit")
         .arg(root.join("state/audit.jsonl"))
+        .arg("--repo")
+        .arg(root.join("seed"))
         .output()
         .unwrap();
     assert!(
@@ -359,4 +361,101 @@ fn the_gateway_enforces_read_and_write_scopes() {
     let text = std::fs::read_to_string(&log).unwrap();
     assert!(text.contains("\"decision\":\"refused\""));
     assert!(text.contains("\"action\":\"replay\""));
+}
+
+#[test]
+fn declared_contracts_need_a_granted_escalation_before_they_change() {
+    let s = setup();
+    let token = mint(
+        &s.root,
+        "task: prefs\nwriteComponents: [user-preferences]\nescalateBefore: [\"contract:*\"]\n",
+    );
+    let (work, out) = clone(&s, "prefs", &token, "prefs-work");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let before = upstream_refs(&s);
+
+    // The contract's file is writable but guarded.
+    let types = work.join("services/user-preferences/src/types.ts");
+    let mut text = std::fs::read_to_string(&types).unwrap();
+    text.push_str("export type Locale = string;\n");
+    std::fs::write(&types, text).unwrap();
+    ok(&work, &["add", "-A"]);
+    ok(&work, &["commit", "-q", "-m", "Widen the contract"]);
+    let out = git(&work, &["push", "origin", "HEAD:refs/heads/onus/prefs/x"]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("declares a contract"), "{err}");
+    assert!(
+        err.contains("--scope unlock:path:services/user-preferences/src/types.ts"),
+        "{err}"
+    );
+    assert_eq!(upstream_refs(&s), before);
+    ok(&work, &["reset", "-q", "--hard", "HEAD~1"]);
+
+    // Other files of the component land.
+    let prefs = work.join("services/user-preferences/src/preferences.ts");
+    let mut text = std::fs::read_to_string(&prefs).unwrap();
+    text.push_str("// cached per request\n");
+    text.push_str("export const CACHE_SECONDS = 30;\n");
+    std::fs::write(&prefs, text).unwrap();
+    ok(&work, &["add", "-A"]);
+    ok(&work, &["commit", "-q", "-m", "Cache preferences"]);
+    let out = git(
+        &work,
+        &["push", "origin", "HEAD:refs/heads/onus/prefs/cache"],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // A person grants the unlock; the same change then lands.
+    let request = s.root.join("unlock.json");
+    std::fs::write(
+        &request,
+        serde_json::json!({
+            "id": "r1", "task": "prefs", "kind": "permission",
+            "scopes": ["unlock:path:services/user-preferences/src/types.ts"],
+            "evidence": [], "reason": "add a locale", "blastRadius": 0, "sensitive": [], "at": 0
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let out = onus()
+        .args(["escalation", "grant"])
+        .arg(&request)
+        .args(["--token", &token, "--key-public"])
+        .arg(s.root.join("keys/root.pub"))
+        .arg("--key")
+        .arg(s.root.join("keys/root.key"))
+        .args(["--by", "@team-growth"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let granted = String::from_utf8(out.stdout).unwrap().trim().to_string();
+    let types = work.join("services/user-preferences/src/types.ts");
+    let mut text = std::fs::read_to_string(&types).unwrap();
+    text.push_str("export type Locale = string;\n");
+    std::fs::write(&types, text).unwrap();
+    ok(&work, &["add", "-A"]);
+    ok(&work, &["commit", "-q", "-m", "Widen the contract"]);
+    let url = format!("http://agent:{granted}@{}/prefs.git", s.addr);
+    let out = git(
+        &work,
+        &["push", &url, "HEAD:refs/heads/onus/prefs/contract"],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }

@@ -1,0 +1,22 @@
+{"resourceSpans": [
+  {"resource": {"attributes": [{"key": "service.name", "value": {"stringValue": "orders"}}]},
+   "scopeSpans": [{"spans": [
+     {"traceId": "t1", "spanId": "a1", "parentSpanId": "", "name": "placeOrder", "attributes": [
+       {"key": "code.filepath", "value": {"stringValue": "/srv/app/services/orders/src/orders.ts"}},
+       {"key": "code.function", "value": {"stringValue": "placeOrder"}},
+       {"key": "code.lineno", "value": {"intValue": "14"}}]}
+   ]}]},
+  {"resource": {"attributes": [{"key": "service.name", "value": {"stringValue": "billing"}}]},
+   "scopeSpans": [{"spans": [
+     {"traceId": "t1", "spanId": "b1", "parentSpanId": "a1", "name": "invoiceOrder", "attributes": [
+       {"key": "code.filepath", "value": {"stringValue": "/srv/app/services/billing/src/subscriptions.ts"}},
+       {"key": "code.function", "value": {"stringValue": "invoiceOrder"}}]},
+     {"traceId": "t1", "spanId": "b2", "parentSpanId": "b1", "name": "createInvoice", "attributes": [
+       {"key": "code.filepath", "value": {"stringValue": "/srv/app/services/billing/src/payments.ts"}},
+       {"key": "code.function", "value": {"stringValue": "createInvoice"}}]}
+   ]}]},
+  {"resource": {"attributes": [{"key": "service.name", "value": {"stringValue": "notifications"}}]},
+   "scopeSpans": [{"spans": [
+     {"traceId": "t1", "spanId": "c1", "parentSpanId": "a1", "name": "POST /notify", "attributes": []}
+   ]}]}
+]}

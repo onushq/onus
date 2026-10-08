@@ -116,6 +116,9 @@ Examples:
         /// Import a SCIP index of this directory (repeatable). Runs nothing.
         #[arg(long, value_name = "FILE")]
         scip: Vec<PathBuf>,
+        /// Add the calls in these OpenTelemetry traces (OTLP JSON) to the map (repeatable).
+        #[arg(long, value_name = "FILE")]
+        traces: Vec<PathBuf>,
         #[command(flatten)]
         providers: ProviderArgs,
     },
@@ -153,6 +156,9 @@ Examples:
         /// Import a SCIP index of the head directory (repeatable).
         #[arg(long, value_name = "FILE")]
         head_scip: Vec<PathBuf>,
+        /// Add the calls in these OpenTelemetry traces (OTLP JSON) to both maps (repeatable).
+        #[arg(long, value_name = "FILE")]
+        traces: Vec<PathBuf>,
         #[command(flatten)]
         providers: ProviderArgs,
     },
@@ -196,6 +202,9 @@ Examples:
         /// Import a SCIP index of the head ref (repeatable). Runs nothing.
         #[arg(long, value_name = "FILE")]
         head_scip: Vec<PathBuf>,
+        /// Add the calls in these OpenTelemetry traces (OTLP JSON) to both maps (repeatable).
+        #[arg(long, value_name = "FILE")]
+        traces: Vec<PathBuf>,
         /// Keep the base ref's map in this folder and reuse it on the next run against the
         /// same base commit. Safe to share between runs: the file name covers everything that
         /// shapes the map.
@@ -332,6 +341,17 @@ Examples:
     /// Run a test command at a commit in a throwaway container with no network
     /// (the test runner escalations use to reproduce failing tests).
     RunTest(doors::RunTestArgs),
+    /// Environments: containers built from a commit that run commands and
+    /// record evidence (create, run, list, destroy).
+    Env {
+        #[command(subcommand)]
+        cmd: envs::EnvCmd,
+    },
+    /// The evidence store: manifests and artifacts of runs in environments.
+    Evidence {
+        #[command(subcommand)]
+        cmd: envs::EvidenceCmd,
+    },
     /// Bundle a change for review: report, changed files, evidence, scope and agent setup.
     Submit(lanes::SubmitArgs),
     /// Which lane a change takes (auto-merge, judge, human, blocked), and why.
@@ -511,6 +531,7 @@ fn backend(root: &std::path::Path, no_server: bool) -> std::sync::Arc<dyn onus_c
 }
 
 mod doors;
+mod envs;
 mod lanes;
 
 fn main() -> ExitCode {
@@ -552,6 +573,7 @@ fn run(cli: Cli) -> Result<i32> {
             json,
             config,
             scip,
+            traces,
             providers,
         } => {
             if !dir.is_dir() {
@@ -561,7 +583,14 @@ fn run(cli: Cli) -> Result<i32> {
                 Some(p) => Some(onus_map::config::load(&p)?),
                 None => onus_map::config::load_from_tree(&dir)?,
             };
-            let map = onus_cli::build_with(&dir, cfg, None, &providers.load()?, &scip)?;
+            let mut map = onus_cli::build_with(&dir, cfg, None, &providers.load()?, &scip)?;
+            if !traces.is_empty() {
+                let stats = onus_cli::add_traces(&mut map, &traces)?;
+                eprintln!(
+                    "onus: traces: {} spans, {} resolved, {} traced calls added, {} confirmed",
+                    stats.spans, stats.resolved, stats.edges_added, stats.edges_confirmed
+                );
+            }
             if json {
                 println!("{}", serde_json::to_string_pretty(&map)?);
             } else {
@@ -579,6 +608,7 @@ fn run(cli: Cli) -> Result<i32> {
             fail_on,
             base_scip,
             head_scip,
+            traces,
             providers,
         } => {
             let opts = DiffOptions {
@@ -594,6 +624,7 @@ fn run(cli: Cli) -> Result<i32> {
                 cache_dir: None,
                 changed_paths: None,
                 complete_base: None,
+                traces,
             };
             let outcome = onus_cli::diff_dirs(&base, &head, &opts)?;
             for note in &outcome.notes {
@@ -621,6 +652,7 @@ fn run(cli: Cli) -> Result<i32> {
             fail_on,
             base_scip,
             head_scip,
+            traces,
             cache_dir,
             providers,
         } => {
@@ -650,6 +682,7 @@ fn run(cli: Cli) -> Result<i32> {
                 cache_dir,
                 changed_paths: Some(pair.changed.clone()),
                 complete_base: Some(completer),
+                traces,
             };
             let outcome = onus_cli::diff_dirs(b.dir.path(), h.dir.path(), &opts)?;
             for note in &outcome.notes {
@@ -695,6 +728,8 @@ fn run(cli: Cli) -> Result<i32> {
         Cmd::Outcomes { cmd } => lanes::outcomes_cmd(cmd),
         Cmd::Escalation { cmd } => doors::escalation(cmd),
         Cmd::RunTest(args) => doors::run_test(args),
+        Cmd::Env { cmd } => envs::env_cmd(cmd),
+        Cmd::Evidence { cmd } => envs::evidence_cmd(cmd),
         Cmd::Help { topic } => help(topic.as_deref()),
         Cmd::Mcp {
             repo,

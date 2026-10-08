@@ -34,6 +34,43 @@ pub struct OnusConfig {
     /// (`onus help lanes`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lanes: Option<LanesConfig>,
+    /// Environments that run the change and record evidence
+    /// (`onus help environments`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<EnvironmentConfig>,
+}
+
+/// A disposable environment: a container built from the repository at a
+/// commit. Read from the operator's working tree, never from the commit
+/// under test, so a change cannot alter its own environment.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct EnvironmentConfig {
+    /// The container image. Default: the devcontainer's image.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    /// Installs dependencies, with network, once per image, setup command
+    /// and lockfile contents; the result is kept as a warm image.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup: Option<String>,
+    /// Loads synthetic data into a new environment, after setup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<String>,
+    /// Globs of test result files (JUnit XML) a run writes, kept as evidence.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<String>,
+    /// Globs of OpenTelemetry trace files (OTLP JSON) a run writes, kept as
+    /// evidence.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub traces: Vec<String>,
+    /// Files whose contents decide when the warm image is rebuilt. Default:
+    /// the usual lockfiles.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lockfiles: Vec<String>,
+    /// The egress proxy image, started when a task's token names hosts.
+    /// Default `ubuntu/squid`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub egress_image: Option<String>,
 }
 
 /// What happens to a change, from least to most scrutiny.

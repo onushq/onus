@@ -70,8 +70,10 @@ fn describe(rule: &LaneRule) -> String {
 /// What the classifier needs to know about the agent setup's record.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Record {
-    /// Changes on record for this setup.
+    /// Changes on record for this setup (merged, not reverted).
     pub changes: u32,
+    /// Incidents among its recent changes.
+    pub recent_incidents: u32,
 }
 
 /// Classifies a change. `writable` says whether the submission's token
@@ -212,6 +214,18 @@ pub fn classify(
         );
     }
     // 4. Track record and random audits.
+    if lane == Lane::AutoMerge && record.is_some_and(|r| r.recent_incidents > 0) {
+        raise(
+            Lane::Judge,
+            "record",
+            format!(
+                "the agent setup caused {} incidents among its recent changes",
+                record.map_or(0, |r| r.recent_incidents)
+            ),
+            &mut applied,
+            &mut lane,
+        );
+    }
     if lane == Lane::AutoMerge {
         let changes = record.map_or(0, |r| r.changes);
         if changes < config.min_record {
@@ -336,7 +350,10 @@ mod tests {
     fn rules_lower_only_for_whole_changes_and_floors_always_raise() {
         let p = policy();
         let docs = report(vec![row(ChangeKind::Internal, "internal-changes", &[])]);
-        let veteran = Some(Record { changes: 50 });
+        let veteran = Some(Record {
+            changes: 50,
+            recent_incidents: 0,
+        });
         assert_eq!(
             classify(&docs, None, &p, veteran, None).lane,
             Lane::AutoMerge
