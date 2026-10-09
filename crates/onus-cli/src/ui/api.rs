@@ -18,6 +18,8 @@ use crate::{doors, envs, lanes};
 #[derive(Debug)]
 pub enum Error {
     NotFound(String),
+    /// The request was made against a state that has since changed.
+    Conflict(String),
     Failed(anyhow::Error),
 }
 
@@ -51,6 +53,9 @@ pub fn call(state: &State, name: &str, body: Value) -> Answer {
         "report" => report(state, body),
         "config" => config(state),
         "config.init" => Ok(json!({ "text": onus_map::init::init_config(&state.root) })),
+        "config.schema" => config_schema(state),
+        "config.validate" => config_validate(state, body),
+        "config.save" => config_save(state, body),
         "guide" => guide(body),
         "lanes.policy" => lanes_policy(state),
         "lanes.submit" => lanes_submit(state, body),
@@ -489,10 +494,132 @@ fn config(state: &State) -> Answer {
     Ok(json!({
         "path": path,
         "exists": text.is_some(),
+        "hash": text.as_deref().map(|t| onus_core::hash::sha256_hex(t.as_bytes())),
         "text": text,
         "parsed": parsed,
         "error": error,
     }))
+}
+
+/// What the editor offers to choose from: the kinds and subkinds of rows
+/// (from the guide's own tables), lanes, sensitivities, and the components
+/// the map found.
+fn config_schema(state: &State) -> Answer {
+    let changes = onus_cli::guide::find("changes").map_or("", |t| t.text);
+    let mut kinds = Vec::new();
+    let mut subkinds = Vec::new();
+    let mut table = "";
+    for line in changes.lines() {
+        let cells: Vec<&str> = line
+            .trim()
+            .trim_matches('|')
+            .split('|')
+            .map(str::trim)
+            .collect();
+        if !line.trim_start().starts_with('|') {
+            table = "";
+            continue;
+        }
+        match cells.first().copied() {
+            Some("Kind") => table = "kinds",
+            Some("Subkind") => table = "subkinds",
+            Some(c) if c.starts_with("---") => {}
+            Some(name) if table == "kinds" && cells.len() >= 2 => {
+                kinds.push(json!({ "name": name, "meaning": cells[1] }));
+            }
+            Some(name) if table == "subkinds" && cells.len() >= 3 => {
+                subkinds.push(
+                    json!({ "name": name.trim_matches('`'), "kind": cells[1], "when": cells[2] }),
+                );
+            }
+            _ => {}
+        }
+    }
+    let components: Vec<Value> = match state.server.session(&state.root).and_then(|s| s.index()) {
+        Ok((index, _)) => index
+            .map()
+            .components
+            .iter()
+            .map(|c| json!({ "id": c.id, "kind": c.kind, "roots": c.roots, "owners": c.owners, "labels": c.labels }))
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    Ok(json!({
+        "kinds": kinds,
+        "subkinds": subkinds,
+        "lanes": [Lane::AutoMerge, Lane::Judge, Lane::Human, Lane::Blocked],
+        "sensitivities": ["low", "medium", "high"],
+        "componentKinds": ["service", "package", "module"],
+        "components": components,
+    }))
+}
+
+/// Checks a config without writing it: the same loading the map does,
+/// packs included.
+fn config_validate(state: &State, body: Value) -> Answer {
+    #[derive(Deserialize)]
+    struct In {
+        text: String,
+    }
+    let a: In = input(body)?;
+    let path = state.root.join(onus_map::config::CONFIG_FILE);
+    Ok(match onus_map::config::load_text(&a.text, &path) {
+        Ok(c) => json!({ "ok": true, "parsed": c.config }),
+        Err(e) => json!({ "ok": false, "error": format!("{e:#}") }),
+    })
+}
+
+/// Writes onus.yaml, then rebuilds the map so every page (and every agent
+/// asking the map server) sees the new config. Refuses a config that does
+/// not load, and refuses to overwrite edits made on disk since the editor
+/// read the file (`baseHash`, `null` when there was no file).
+fn config_save(state: &State, body: Value) -> Answer {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct In {
+        text: String,
+        base_hash: Option<String>,
+    }
+    let a: In = input(body)?;
+    let path = state.root.join(onus_map::config::CONFIG_FILE);
+    let current = std::fs::read_to_string(&path)
+        .ok()
+        .map(|t| onus_core::hash::sha256_hex(t.as_bytes()));
+    if current != a.base_hash {
+        return Err(Error::Conflict(
+            "onus.yaml changed on disk since you opened it; reload it and apply your edits again"
+                .into(),
+        ));
+    }
+    if let Err(e) = onus_map::config::load_text(&a.text, &path) {
+        return Err(Error::Failed(anyhow!("not saved: {e:#}")));
+    }
+    let mut text = a.text;
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    // Written beside it and renamed over it, so readers never see half a file.
+    let tmp = path.with_file_name(format!(".{}.onus-tmp", onus_map::config::CONFIG_FILE));
+    std::fs::write(&tmp, &text).with_context(|| format!("cannot write {}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).with_context(|| format!("cannot write {}", path.display()))?;
+    // Rebuild now rather than on the next question, and say how it went.
+    let session = state.server.session(&state.root)?;
+    session.invalidate();
+    let rebuilt = match session.index() {
+        Ok((index, meta)) => {
+            let map = index.map();
+            json!({
+                "ok": true,
+                "components": map.components.len(),
+                "files": map.files.len(),
+                "symbols": map.symbols.len(),
+                "buildMs": meta.build_ms,
+                "version": meta.version,
+            })
+        }
+        Err(e) => json!({ "ok": false, "error": format!("{e:#}") }),
+    };
+    Ok(json!({ "config": config(state)?, "map": rebuilt }))
 }
 
 fn guide(body: Value) -> Answer {

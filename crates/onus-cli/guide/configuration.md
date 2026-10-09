@@ -1,6 +1,6 @@
 # Configuration: onus.yaml
 
-Onus works without configuration. An `onus.yaml` at the repository root adds what Onus cannot infer: which components are sensitive, which boundaries must hold, how your events are published, and SDKs it does not know. `onus init` writes a starter file; the format is in schemas/onus-config.schema.json.
+Onus works without configuration. An `onus.yaml` at the repository root adds what Onus cannot infer: which components are sensitive, which boundaries must hold, how your events are published, and SDKs it does not know. `onus init` writes a starter file; the format is in schemas/onus-config.schema.json. `onus ui` edits it with a form: every edit is checked before it is saved, a save never overwrites a change made to the file meanwhile, and the map is rebuilt with the new config at once (as it is for any edit to the file: the map server follows onus.yaml like any other file).
 
 ## A complete example
 

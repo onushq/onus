@@ -292,3 +292,109 @@ fn the_interface_serves_the_repository_to_its_session_only() {
     let topic = api(&server, "guide", serde_json::json!({ "name": "lanes" }));
     assert!(topic["text"].as_str().unwrap().starts_with("# Risk lanes"));
 }
+
+/// A request that may fail: the status and the JSON body.
+fn api_status(server: &Server, name: &str, body: serde_json::Value) -> (u16, serde_json::Value) {
+    let host = format!("127.0.0.1:{}", server.port);
+    let (status, text) = http(
+        server.port,
+        "POST",
+        &format!("/api/{name}"),
+        &host,
+        Some("test-token"),
+        &body.to_string(),
+    );
+    (
+        status,
+        serde_json::from_str(&text).unwrap_or_else(|e| panic!("{e}: {text}")),
+    )
+}
+
+#[test]
+fn onus_yaml_is_edited_checked_saved_and_the_map_follows() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("shop");
+    copy_dir(&fixture().join("base"), &repo);
+    let path = repo.join("onus.yaml");
+    let original = std::fs::read_to_string(&path).unwrap();
+    let server = start(&repo, &dir.path().join("keys"));
+
+    let owners = |server: &Server| -> serde_json::Value {
+        let schema = api(server, "config.schema", serde_json::json!({}));
+        schema["components"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == "logger")
+            .unwrap()["owners"]
+            .clone()
+    };
+    assert_eq!(owners(&server), serde_json::json!(["@team-platform"]));
+    let config = api(&server, "config", serde_json::json!({}));
+    let hash = config["hash"].as_str().unwrap().to_string();
+    let schema = api(&server, "config.schema", serde_json::json!({}));
+    assert!(
+        schema["subkinds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["name"] == "new-external-service" && s["kind"] == "security-sensitive"),
+        "{schema}"
+    );
+
+    // Checked without writing anything.
+    let bad = original.replace("version: 1", "version: 1\nlanez: {}");
+    let v = api(
+        &server,
+        "config.validate",
+        serde_json::json!({ "text": bad }),
+    );
+    assert_eq!(v["ok"], false);
+    assert!(v["error"].as_str().unwrap().contains("lanez"), "{v}");
+
+    // A config that does not load is never written.
+    let (status, body) = api_status(
+        &server,
+        "config.save",
+        serde_json::json!({ "text": bad, "baseHash": hash }),
+    );
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+
+    // Saved, comments kept as written, and the map rebuilt with it.
+    let edited = original.replace(
+        r#"logger:           { path: "packages/logger/**",           owners: ["@team-platform"] }"#,
+        r#"logger:           { path: "packages/logger/**",           owners: ["@team-observability"] }"#,
+    );
+    assert_ne!(edited, original);
+    let saved = api(
+        &server,
+        "config.save",
+        serde_json::json!({ "text": edited, "baseHash": hash }),
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), edited);
+    assert_eq!(saved["map"]["ok"], true, "{saved}");
+    assert_eq!(saved["map"]["components"], 7);
+    assert_eq!(owners(&server), serde_json::json!(["@team-observability"]));
+
+    // Saving again from the old copy would overwrite that edit: refused.
+    let (status, body) = api_status(
+        &server,
+        "config.save",
+        serde_json::json!({ "text": original, "baseHash": hash }),
+    );
+    assert_eq!(status, 409, "{body}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), edited);
+
+    // A repository without onus.yaml gets its first one.
+    std::fs::remove_file(&path).unwrap();
+    let config = api(&server, "config", serde_json::json!({}));
+    assert_eq!(config["exists"], false);
+    assert!(config["hash"].is_null());
+    api(
+        &server,
+        "config.save",
+        serde_json::json!({ "text": "version: 1", "baseHash": null }),
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "version: 1\n");
+}

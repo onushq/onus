@@ -93,6 +93,18 @@ impl Session {
         &self.root
     }
 
+    /// Marks the map stale, so the next question rebuilds it even if the
+    /// watcher has not reported the change yet.
+    pub fn invalidate(&self) {
+        if let Ok(mut t) = self.last_change.lock() {
+            *t = Instant::now();
+        }
+        self.changes.fetch_add(1, Ordering::SeqCst);
+        if let Ok(mut state) = self.state.lock() {
+            state.fingerprint = None;
+        }
+    }
+
     /// The current index, rebuilt first if a file changed since it was
     /// built. Concurrent callers wait for one rebuild and share it.
     pub fn index(&self) -> Result<(Arc<MapIndex>, MapMeta)> {
