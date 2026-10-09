@@ -5,18 +5,21 @@
 	import Card from '#lib/components/Card.svelte';
 	import Empty from '#lib/components/Empty.svelte';
 	import ErrorBox from '#lib/components/ErrorBox.svelte';
+	import Graph from '#lib/components/Graph.svelte';
 	import Loading from '#lib/components/Loading.svelte';
 	import PageHead from '#lib/components/PageHead.svelte';
 	import Stat from '#lib/components/Stat.svelte';
 	import { componentHref, fileHref, symbolHref } from '#lib/format.ts';
 	import { Task } from '#lib/task.svelte.ts';
-	import type { ComponentInfo, FileRow, Invariants, Tests } from '#lib/types.ts';
+	import type { ComponentInfo, FileRow, Graph as G, Invariants, Tests } from '#lib/types.ts';
 
 	const id = $derived(page.params.id ?? '');
 	const info = new Task<ComponentInfo>();
 	const files = new Task<{ files: FileRow[] }>();
 	const tests = new Task<Tests>();
 	const invariants = new Task<Invariants>();
+	const graph = new Task<G>();
+	graph.run(() => api<G>('map.graph'));
 
 	$effect(() => {
 		const c = id;
@@ -86,6 +89,12 @@
 				</div>
 			</Card>
 		</div>
+
+		{#if graph.value && (Object.keys(c.uses).length || Object.keys(c.usedBy).length)}
+			<Card title="Neighbourhood" subtitle="The components it uses and that use it.">
+				<Graph graph={graph.value} focus={id} limit={30} />
+			</Card>
+		{/if}
 
 		{#if invariants.value?.contracts.length}
 			<Card title="Declared invariants" subtitle="Rules onus.yaml says a change must keep." tone="signal">

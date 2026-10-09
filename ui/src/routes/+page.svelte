@@ -62,7 +62,7 @@
 				{#snippet actions()}<a class="button small" href="/map">Open the map</a>{/snippet}
 				{#if graph.value}
 					{#if graph.value.components.length}
-						<Graph graph={graph.value} />
+						<Graph graph={graph.value} limit={18} />
 					{:else}
 						<p class="muted">The map has no components yet. Onus reads TypeScript and JavaScript; other languages come in through plugins (see the guide).</p>
 					{/if}

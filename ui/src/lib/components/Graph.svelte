@@ -6,7 +6,12 @@
 	// Components in layers: what nothing else in the map depends on at the
 	// top, foundations at the bottom. The layout is computed, not simulated,
 	// so the same map always draws the same picture.
-	let { graph, sensitive = [] }: { graph: Graph; sensitive?: string[] } = $props();
+	let {
+		graph,
+		sensitive = [],
+		limit = 40,
+		focus = ''
+	}: { graph: Graph; sensitive?: string[]; limit?: number; focus?: string } = $props();
 
 	const W = 168;
 	const H = 52;
@@ -15,12 +20,42 @@
 	const PAD = 24;
 
 	let hover = $state<string | null>(null);
+	/** The most components a row holds before it wraps. */
+	const ROW = 7;
+
+	// What is drawn: a component and its neighbours when focused, else the
+	// most connected components up to the limit. Large maps stay readable.
+	const shown = $derived.by(() => {
+		const degree = new Map<string, number>();
+		for (const e of graph.edges) {
+			degree.set(e.from, (degree.get(e.from) ?? 0) + e.count);
+			degree.set(e.to, (degree.get(e.to) ?? 0) + e.count);
+		}
+		const byDegree = (a: string, b: string) => (degree.get(b) ?? 0) - (degree.get(a) ?? 0) || a.localeCompare(b);
+		let ids: string[];
+		if (focus && graph.components.some((c) => c.id === focus)) {
+			const near = new Set<string>();
+			for (const e of graph.edges) {
+				if (e.from === focus) near.add(e.to);
+				if (e.to === focus) near.add(e.from);
+			}
+			ids = [focus, ...[...near].sort(byDegree).slice(0, Math.max(0, limit - 1))];
+		} else {
+			ids = graph.components.map((c) => c.id).sort(byDegree).slice(0, limit);
+		}
+		const keep = new Set(ids);
+		return {
+			components: graph.components.filter((c) => keep.has(c.id)),
+			edges: graph.edges.filter((e) => keep.has(e.from) && keep.has(e.to)),
+			hidden: focus ? 0 : graph.components.length - keep.size
+		};
+	});
 
 	const layout = $derived.by(() => {
-		const ids = graph.components.map((c) => c.id).sort();
+		const ids = shown.components.map((c) => c.id).sort();
 		const out = new Map<string, string[]>();
 		for (const id of ids) out.set(id, []);
-		for (const e of graph.edges) {
+		for (const e of shown.edges) {
 			if (out.has(e.from) && out.has(e.to)) out.get(e.from)!.push(e.to);
 		}
 		// Layer = longest path to a component with no dependencies; edges
@@ -48,7 +83,7 @@
 		rows.forEach((r) => r.forEach((id, i) => pos.set(id, i)));
 		const neighbours = new Map<string, string[]>();
 		for (const id of ids) neighbours.set(id, []);
-		for (const e of graph.edges) {
+		for (const e of shown.edges) {
 			neighbours.get(e.from)?.push(e.to);
 			neighbours.get(e.to)?.push(e.from);
 		}
@@ -66,6 +101,14 @@
 				});
 			}
 		}
+		// Long layers wrap into several rows.
+		const wrapped = rows.flatMap((r) => {
+			const out: string[][] = [];
+			for (let i = 0; i < r.length; i += ROW) out.push(r.slice(i, i + ROW));
+			return out.length ? out : [r];
+		});
+		rows.length = 0;
+		rows.push(...wrapped);
 		const widest = Math.max(1, ...rows.map((r) => r.length));
 		const width = PAD * 2 + widest * W + (widest - 1) * GAP_X;
 		const height = PAD * 2 + rows.length * H + (rows.length - 1) * GAP_Y;
@@ -78,8 +121,8 @@
 		return { xy, width, height };
 	});
 
-	const byId = $derived(new Map(graph.components.map((c) => [c.id, c])));
-	const maxCount = $derived(Math.max(1, ...graph.edges.map((e) => e.count)));
+	const byId = $derived(new Map(shown.components.map((c) => [c.id, c])));
+	const maxCount = $derived(Math.max(1, ...shown.edges.map((e) => e.count)));
 
 	// Where each edge leaves and enters a node: spread along the node's
 	// bottom and top, ordered by where the other end sits, so arrows do not
@@ -89,7 +132,7 @@
 		const into = new Map<string, number>();
 		const spread = (key: (e: { from: string; to: string }) => string, other: (e: { from: string; to: string }) => string, target: Map<string, number>) => {
 			const groups = new Map<string, { from: string; to: string }[]>();
-			for (const e of graph.edges) {
+			for (const e of shown.edges) {
 				if (!layout.xy.has(e.from) || !layout.xy.has(e.to)) continue;
 				const k = key(e);
 				if (!groups.has(k)) groups.set(k, []);
@@ -127,6 +170,11 @@
 	const touches = (e: { from: string; to: string }) => hover === e.from || hover === e.to;
 </script>
 
+{#if shown.hidden > 0 || focus}
+	<p class="note">
+		{#if focus}{focus} and the {shown.components.length - 1} components it is directly connected to{:else}The {shown.components.length} most connected of {graph.components.length} components{/if}
+	</p>
+{/if}
 <div class="wrap">
 	<svg
 		style="width: 100%; max-width: {layout.width}px; height: auto"
@@ -142,7 +190,7 @@
 				<path d="M0,0 L10,5 L0,10 z" fill="var(--ink)" />
 			</marker>
 		</defs>
-		{#each graph.edges as e (e.from + '>' + e.to)}
+		{#each shown.edges as e (e.from + '>' + e.to)}
 			{#if layout.xy.has(e.from) && layout.xy.has(e.to)}
 				<path
 					d={path(e.from, e.to)}
@@ -156,12 +204,12 @@
 				</path>
 			{/if}
 		{/each}
-		{#each graph.components as c (c.id)}
+		{#each shown.components as c (c.id)}
 			{@const p = layout.xy.get(c.id)!}
 			{@const hot = c.labels.some((l) => sensitive.includes(l))}
 			<g
 				class="node"
-				class:dim={hover && hover !== c.id && !graph.edges.some((e) => (e.from === hover && e.to === c.id) || (e.to === hover && e.from === c.id))}
+				class:dim={hover && hover !== c.id && !shown.edges.some((e) => (e.from === hover && e.to === c.id) || (e.to === hover && e.from === c.id))}
 				transform="translate({p.x},{p.y})"
 				role="link"
 				tabindex="0"
@@ -182,6 +230,11 @@
 </div>
 
 <style>
+	.note {
+		font-size: 12px;
+		color: var(--ink-muted);
+		margin: 0 0 var(--space-2);
+	}
 	.wrap {
 		overflow: auto;
 		max-height: 70vh;

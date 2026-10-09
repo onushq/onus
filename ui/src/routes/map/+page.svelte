@@ -24,6 +24,8 @@
 	let fileFilter = $state('');
 	let componentFilter = $state('');
 	let tests = $state<'all' | 'code' | 'tests'>('all');
+	let focus = $state(page.url.searchParams.get('focus') ?? '');
+	let limit = $state(40);
 
 	onMount(() => {
 		graph.run(() => api<G>('map.graph'));
@@ -81,8 +83,18 @@
 	{#if tab === 'graph'}
 		{#if graph.value}
 			{#if graph.value.components.length}
+				<div class="row">
+					<label class="row small muted">Focus on
+						<input list="graph-components" bind:value={focus} placeholder="a component" />
+						<datalist id="graph-components">{#each graph.value.components as c (c.id)}<option value={c.id}></option>{/each}</datalist>
+					</label>
+					{#if focus}<button class="small ghost" onclick={() => (focus = '')}>Clear</button>{/if}
+					<label class="row small muted">Show at most
+						<select bind:value={limit}>{#each [20, 40, 80, 160, 1000] as n (n)}<option value={n}>{n === 1000 ? 'all' : n}</option>{/each}</select>
+					</label>
+				</div>
 				<Card pad={false}>
-					<div style="padding: 12px"><Graph graph={graph.value} {sensitive} /></div>
+					<div style="padding: 12px"><Graph graph={graph.value} {sensitive} {limit} focus={focus.trim()} /></div>
 				</Card>
 				<p class="muted small">An arrow points from a component to one it uses. Thicker arrows carry more imports, calls and type references; amber outlines mark sensitive labels.</p>
 			{:else}
