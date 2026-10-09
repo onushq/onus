@@ -125,7 +125,7 @@ pub enum GatewayCmd {
     },
 }
 
-fn read_key(path: &Path) -> Result<String> {
+pub fn read_key(path: &Path) -> Result<String> {
     Ok(std::fs::read_to_string(path)
         .with_context(|| format!("cannot read the key {}", path.display()))?
         .trim()
@@ -138,7 +138,7 @@ fn rights(list: &[String]) -> Result<Vec<Right>> {
         .collect()
 }
 
-fn token_json(v: &token::Verified) -> serde_json::Value {
+pub fn token_json(v: &token::Verified) -> serde_json::Value {
     serde_json::json!({
         "task": v.task,
         "expires": v.expires,
@@ -150,15 +150,7 @@ fn token_json(v: &token::Verified) -> serde_json::Value {
 pub fn token(cmd: TokenCmd) -> Result<i32> {
     match cmd {
         TokenCmd::Keygen { out } => {
-            std::fs::create_dir_all(&out)?;
-            let key = RootKey::generate();
-            let private = out.join("root.key");
-            if private.exists() {
-                bail!("{} exists; move it away first", private.display());
-            }
-            write_private(&private, &key.private_hex())?;
-            std::fs::write(out.join("root.pub"), format!("{}\n", key.public_hex()))?;
-            println!("{}", out.join("root.pub").display());
+            println!("{}", keygen(&out)?.display());
             Ok(0)
         }
         TokenCmd::Mint {
@@ -171,42 +163,7 @@ pub fn token(cmd: TokenCmd) -> Result<i32> {
                 &std::fs::read_to_string(&plan)
                     .with_context(|| format!("cannot read {}", plan.display()))?,
             )?;
-            let root = RootKey::from_hex(&read_key(&key)?)?;
-            let grant = if plan.needs_map() {
-                let config = onus_map::config::load_from_tree(&repo)?;
-                let contracts = config
-                    .as_ref()
-                    .map(|c| {
-                        c.config
-                            .contracts
-                            .iter()
-                            .map(|(name, contract)| (name.clone(), contract.symbol.clone()))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let map = onus_cli::build(&repo, config, None)?;
-                plan.grant_with_map(now(), &map, &contracts)?
-            } else {
-                plan.grant(now())?
-            };
-            let minted = token::mint(&root, &grant)?;
-            if let Some(log) = audit {
-                AuditLog::new(log).append(
-                    Record {
-                        actor: "operator".into(),
-                        action: "mint".into(),
-                        subject: grant.task.clone(),
-                        decision: "granted".into(),
-                        reason: "task plan".into(),
-                        details: serde_json::json!({
-                            "rights": grant.rights.iter().map(|r| r.to_string()).collect::<Vec<_>>(),
-                            "expires": grant.expires,
-                        }),
-                    },
-                    now(),
-                )?;
-            }
-            println!("{minted}");
+            println!("{}", mint_plan(&repo, &plan, &key, audit.as_deref())?);
             Ok(0)
         }
         TokenCmd::Attenuate { token, only } => {
@@ -236,6 +193,61 @@ pub fn token(cmd: TokenCmd) -> Result<i32> {
     }
 }
 
+/// Makes a root key pair in `out`: `root.key` (private) and `root.pub`.
+/// Returns the public key's path.
+pub fn keygen(out: &Path) -> Result<PathBuf> {
+    std::fs::create_dir_all(out)?;
+    let key = RootKey::generate();
+    let private = out.join("root.key");
+    if private.exists() {
+        bail!("{} exists; move it away first", private.display());
+    }
+    write_private(&private, &key.private_hex())?;
+    std::fs::write(out.join("root.pub"), format!("{}\n", key.public_hex()))?;
+    Ok(out.join("root.pub"))
+}
+
+/// Mints a task token from a plan, resolving components and contracts
+/// through the map of `repo` when the plan names them.
+pub fn mint_plan(repo: &Path, plan: &Plan, key: &Path, audit: Option<&Path>) -> Result<String> {
+    let root = RootKey::from_hex(&read_key(key)?)?;
+    let grant = if plan.needs_map() {
+        let config = onus_map::config::load_from_tree(repo)?;
+        let contracts = config
+            .as_ref()
+            .map(|c| {
+                c.config
+                    .contracts
+                    .iter()
+                    .map(|(name, contract)| (name.clone(), contract.symbol.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let map = onus_cli::build(repo, config, None)?;
+        plan.grant_with_map(now(), &map, &contracts)?
+    } else {
+        plan.grant(now())?
+    };
+    let minted = token::mint(&root, &grant)?;
+    if let Some(log) = audit {
+        AuditLog::new(log).append(
+            Record {
+                actor: "operator".into(),
+                action: "mint".into(),
+                subject: grant.task.clone(),
+                decision: "granted".into(),
+                reason: "task plan".into(),
+                details: serde_json::json!({
+                    "rights": grant.rights.iter().map(|r| r.to_string()).collect::<Vec<_>>(),
+                    "expires": grant.expires,
+                }),
+            },
+            now(),
+        )?;
+    }
+    Ok(minted)
+}
+
 /// Writes a private key readable only by its owner.
 fn write_private(path: &Path, text: &str) -> Result<()> {
     use std::io::Write;
@@ -255,23 +267,23 @@ pub fn scope(cmd: ScopeCmd) -> Result<i32> {
     match cmd {
         ScopeCmd::Suggest { plan, repo } => {
             let plan = Plan::parse(&std::fs::read_to_string(&plan)?)?;
-            let config = onus_map::config::load_from_tree(&repo)?;
-            let sensitive: Vec<String> = match &config {
-                Some(c) => c
-                    .config
-                    .labels
-                    .iter()
-                    .filter(|(_, l)| l.sensitivity >= onus_core::Sensitivity::Medium)
-                    .map(|(name, _)| name.clone())
-                    .collect(),
-                None => vec!["auth".into(), "payments".into(), "pii".into()],
-            };
-            let map = onus_cli::build(&repo, config, None)?;
-            let s = onus_doors::plan::suggest_reads(&map, &plan.writes, &sensitive);
+            let s = suggest(&repo, &plan)?;
             println!("{}", serde_json::to_string_pretty(&s)?);
             Ok(0)
         }
     }
+}
+
+/// Reads the map suggests for a plan's writes, leaving out sensitive
+/// components.
+pub fn suggest(repo: &Path, plan: &Plan) -> Result<onus_doors::plan::Suggestion> {
+    let (config, sensitive) = sensitive_labels(repo)?;
+    let map = onus_cli::build(repo, config, None)?;
+    Ok(onus_doors::plan::suggest_reads(
+        &map,
+        &plan.writes,
+        &sensitive,
+    ))
 }
 
 pub fn gateway(cmd: GatewayCmd) -> Result<i32> {
@@ -436,7 +448,7 @@ pub enum EscalationCmd {
     },
 }
 
-fn sensitive_labels(repo: &Path) -> Result<(Option<onus_map::LoadedConfig>, Vec<String>)> {
+pub fn sensitive_labels(repo: &Path) -> Result<(Option<onus_map::LoadedConfig>, Vec<String>)> {
     let config = onus_map::config::load_from_tree(repo)?;
     let labels = match &config {
         Some(c) => c
@@ -451,28 +463,47 @@ fn sensitive_labels(repo: &Path) -> Result<(Option<onus_map::LoadedConfig>, Vec<
     Ok((config, labels))
 }
 
-pub fn escalate(args: EscalateArgs) -> Result<i32> {
-    let scopes = rights(&args.scopes)?;
-    if scopes.is_empty() && args.kind == KindArg::Permission {
+/// A new escalation request, with its blast radius and sensitive labels
+/// from the map of `repo`.
+pub fn new_request(
+    repo: &Path,
+    task: &str,
+    kind: onus_doors::escalation::EscalationKind,
+    scopes: &[String],
+    evidence: &[String],
+    reason: &str,
+) -> Result<onus_doors::escalation::Request> {
+    let scopes = rights(scopes)?;
+    if scopes.is_empty() && kind == onus_doors::escalation::EscalationKind::Permission {
         bail!("a permission request names the rights it asks for (--scope)");
     }
-    let evidence = args
-        .evidence
+    let evidence = evidence
         .iter()
         .map(|e| onus_doors::escalation::Evidence::parse(e))
         .collect::<Result<Vec<_>>>()?;
-    let (config, labels) = sensitive_labels(&args.repo)?;
-    let map = onus_cli::build(&args.repo, config, None)?;
-    let req = onus_doors::escalation::Request::new(
-        &args.task,
-        args.kind.into(),
+    let (config, labels) = sensitive_labels(repo)?;
+    let map = onus_cli::build(repo, config, None)?;
+    Ok(onus_doors::escalation::Request::new(
+        task,
+        kind,
         scopes,
         evidence,
-        &args.reason,
+        reason,
         Some(&map),
         &labels,
         now(),
-    );
+    ))
+}
+
+pub fn escalate(args: EscalateArgs) -> Result<i32> {
+    let req = new_request(
+        &args.repo,
+        &args.task,
+        args.kind.into(),
+        &args.scopes,
+        &args.evidence,
+        &args.reason,
+    )?;
     let json = serde_json::to_string_pretty(&req)?;
     match args.out {
         Some(path) => {
@@ -490,7 +521,7 @@ pub fn escalate(args: EscalateArgs) -> Result<i32> {
     Ok(0)
 }
 
-fn load_request(path: &Path) -> Result<onus_doors::escalation::Request> {
+pub fn load_request(path: &Path) -> Result<onus_doors::escalation::Request> {
     serde_json::from_str(
         &std::fs::read_to_string(path)
             .with_context(|| format!("cannot read {}", path.display()))?,
@@ -498,15 +529,124 @@ fn load_request(path: &Path) -> Result<onus_doors::escalation::Request> {
     .with_context(|| format!("{} is not an escalation request", path.display()))
 }
 
-fn record(audit: &Option<PathBuf>, r: Record) -> Result<()> {
+fn record(audit: Option<&Path>, r: Record) -> Result<()> {
     if let Some(log) = audit {
         AuditLog::new(log).append(r, now())?;
     }
     Ok(())
 }
 
-pub fn escalation(cmd: EscalationCmd) -> Result<i32> {
+/// How `decide` reproduces failing-test evidence.
+#[derive(Debug, Clone)]
+pub struct Reproduce {
+    pub repo: PathBuf,
+    pub at: String,
+    pub image: String,
+    pub setup: Option<String>,
+    /// `{test}` becomes the failing test's file.
+    pub test_command: String,
+}
+
+/// Decides a request by policy, reproducing failing tests first; a grant
+/// carries the new token.
+pub fn decide_request(
+    mut req: onus_doors::escalation::Request,
+    original: &token::Verified,
+    key: &Path,
+    reproduce: Option<&Reproduce>,
+    max_blast_radius: u32,
+    audit: Option<&Path>,
+) -> Result<serde_json::Value> {
     use onus_doors::escalation::{Decision, Policy, decide, grant};
+    if let Some(r) = reproduce {
+        for e in req.evidence.iter_mut().filter(|e| e.grade == 1) {
+            let command = r.test_command.replace("{test}", &e.reference);
+            let run =
+                onus_doors::runner::run(&r.repo, &r.at, &r.image, r.setup.as_deref(), &command)?;
+            e.reproduced = Some(run.failed());
+            e.run = Some(run);
+        }
+    }
+    let decision = decide(&req, &Policy { max_blast_radius });
+    let (label, reasons, minted) = match &decision {
+        Decision::Granted { reasons } => {
+            let root = RootKey::from_hex(&read_key(key)?)?;
+            (
+                "granted",
+                reasons.clone(),
+                Some(grant(&req, original, &root)?),
+            )
+        }
+        Decision::NeedsPerson { reasons } => ("needs-person", reasons.clone(), None),
+    };
+    record(
+        audit,
+        Record {
+            actor: req.task.clone(),
+            action: "escalate".into(),
+            subject: req.id.clone(),
+            decision: label.into(),
+            reason: reasons.join("; "),
+            details: serde_json::to_value(&req)?,
+        },
+    )?;
+    let mut out = serde_json::json!({
+        "request": req.id,
+        "decision": label,
+        "reasons": reasons,
+        "evidence": req.evidence,
+    });
+    if let Some(t) = minted {
+        out["token"] = serde_json::json!(t);
+    }
+    Ok(out)
+}
+
+/// Grants a request as a person: the new token.
+pub fn grant_request(
+    req: &onus_doors::escalation::Request,
+    original: &token::Verified,
+    key: &Path,
+    by: &str,
+    audit: Option<&Path>,
+) -> Result<String> {
+    let root = RootKey::from_hex(&read_key(key)?)?;
+    let minted = onus_doors::escalation::grant(req, original, &root)?;
+    record(
+        audit,
+        Record {
+            actor: by.to_string(),
+            action: "grant".into(),
+            subject: req.id.clone(),
+            decision: "granted".into(),
+            reason: format!("granted by {by}"),
+            details: serde_json::to_value(req)?,
+        },
+    )?;
+    Ok(minted)
+}
+
+/// Denies a request as a person.
+pub fn deny_request(
+    req: &onus_doors::escalation::Request,
+    by: &str,
+    reason: &str,
+    audit: Option<&Path>,
+) -> Result<()> {
+    record(
+        audit,
+        Record {
+            actor: by.to_string(),
+            action: "deny".into(),
+            subject: req.id.clone(),
+            decision: "denied".into(),
+            reason: reason.to_string(),
+            details: serde_json::to_value(req)?,
+        },
+    )
+}
+
+pub fn escalation(cmd: EscalationCmd) -> Result<i32> {
     match cmd {
         EscalationCmd::Decide {
             request,
@@ -520,51 +660,25 @@ pub fn escalation(cmd: EscalationCmd) -> Result<i32> {
             max_blast_radius,
             audit,
         } => {
-            let mut req = load_request(&request)?;
+            let req = load_request(&request)?;
             let original = token.verify()?;
-            if let Some(at) = &reproduce_at {
-                for e in req.evidence.iter_mut().filter(|e| e.grade == 1) {
-                    let command = test_command.replace("{test}", &e.reference);
-                    let run =
-                        onus_doors::runner::run(&repo, at, &image, setup.as_deref(), &command)?;
-                    e.reproduced = Some(run.failed());
-                    e.run = Some(run);
-                }
-            }
-            let decision = decide(&req, &Policy { max_blast_radius });
-            let (label, reasons, minted) = match &decision {
-                Decision::Granted { reasons } => {
-                    let root = RootKey::from_hex(&read_key(&key)?)?;
-                    (
-                        "granted",
-                        reasons.clone(),
-                        Some(grant(&req, &original, &root)?),
-                    )
-                }
-                Decision::NeedsPerson { reasons } => ("needs-person", reasons.clone(), None),
-            };
-            record(
-                &audit,
-                Record {
-                    actor: req.task.clone(),
-                    action: "escalate".into(),
-                    subject: req.id.clone(),
-                    decision: label.into(),
-                    reason: reasons.join("; "),
-                    details: serde_json::to_value(&req)?,
-                },
-            )?;
-            let mut out = serde_json::json!({
-                "request": req.id,
-                "decision": label,
-                "reasons": reasons,
-                "evidence": req.evidence,
+            let reproduce = reproduce_at.map(|at| Reproduce {
+                repo,
+                at,
+                image,
+                setup,
+                test_command,
             });
-            if let Some(t) = minted {
-                out["token"] = serde_json::json!(t);
-            }
+            let out = decide_request(
+                req,
+                &original,
+                &key,
+                reproduce.as_ref(),
+                max_blast_radius,
+                audit.as_deref(),
+            )?;
             println!("{}", serde_json::to_string_pretty(&out)?);
-            Ok(if label == "granted" { 0 } else { 3 })
+            Ok(if out["decision"] == "granted" { 0 } else { 3 })
         }
         EscalationCmd::Grant {
             request,
@@ -575,20 +689,10 @@ pub fn escalation(cmd: EscalationCmd) -> Result<i32> {
         } => {
             let req = load_request(&request)?;
             let original = token.verify()?;
-            let root = RootKey::from_hex(&read_key(&key)?)?;
-            let minted = grant(&req, &original, &root)?;
-            record(
-                &audit,
-                Record {
-                    actor: by.clone(),
-                    action: "grant".into(),
-                    subject: req.id.clone(),
-                    decision: "granted".into(),
-                    reason: format!("granted by {by}"),
-                    details: serde_json::to_value(&req)?,
-                },
-            )?;
-            println!("{minted}");
+            println!(
+                "{}",
+                grant_request(&req, &original, &key, &by, audit.as_deref())?
+            );
             Ok(0)
         }
         EscalationCmd::Deny {
@@ -598,17 +702,7 @@ pub fn escalation(cmd: EscalationCmd) -> Result<i32> {
             audit,
         } => {
             let req = load_request(&request)?;
-            record(
-                &audit,
-                Record {
-                    actor: by.clone(),
-                    action: "deny".into(),
-                    subject: req.id.clone(),
-                    decision: "denied".into(),
-                    reason: reason.clone(),
-                    details: serde_json::to_value(&req)?,
-                },
-            )?;
+            deny_request(&req, &by, &reason, audit.as_deref())?;
             println!("denied {} by {by}: {reason}", req.id);
             Ok(0)
         }

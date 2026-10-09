@@ -201,6 +201,27 @@ pub fn check_worktree(
     facts: std::sync::Arc<onus_map::FactsCache>,
     bases: &BaseTrees,
 ) -> Result<serde_json::Value> {
+    let report = worktree_report(root, base, head_map, facts, bases)?;
+    Ok(serde_json::json!({
+        "base": report.base,
+        "summary": report.summary,
+        "checklist": checklist(&report),
+        // A clean check is evidence for a reviewer, not an approval.
+        "notVerified": "Onus reports what the change means and what it touches. It does not check \
+            logic, edge cases, or whether the code compiles or its tests pass: an empty checklist \
+            means only that none of the checked facts needs a follow-up.",
+        "markdown": onus_report::to_markdown(&report, !head_map.rules.is_empty()),
+    }))
+}
+
+/// The full report of the worktree as it is now against `base`.
+pub fn worktree_report(
+    root: &Path,
+    base: &str,
+    head_map: &CodebaseMap,
+    facts: std::sync::Arc<onus_map::FactsCache>,
+    bases: &BaseTrees,
+) -> Result<SemanticReport> {
     let sha = resolve_commit(root, base)?;
     let b = bases.get(root, &sha)?;
     let config = diff_config(b.dir.path(), None)?;
@@ -254,16 +275,7 @@ pub fn check_worktree(
         head_label: "worktree",
         changed_paths: None,
     });
-    Ok(serde_json::json!({
-        "base": report.base,
-        "summary": report.summary,
-        "checklist": checklist(&report),
-        // A clean check is evidence for a reviewer, not an approval.
-        "notVerified": "Onus reports what the change means and what it touches. It does not check \
-            logic, edge cases, or whether the code compiles or its tests pass: an empty checklist \
-            means only that none of the checked facts needs a follow-up.",
-        "markdown": onus_report::to_markdown(&report, !head_map.rules.is_empty()),
-    }))
+    Ok(report)
 }
 
 /// What an agent should verify before it is done, from the rows of a

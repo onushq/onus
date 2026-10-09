@@ -1,0 +1,13 @@
+{
+	"extends": "$app/tsconfig",
+	"include": ["src", "*"],
+	"compilerOptions": {
+		"strict": true,
+		"skipLibCheck": true,
+		"sourceMap": true,
+		"paths": {
+			"$lib": ["./src/lib"],
+			"$lib/*": ["./src/lib/*"]
+		}
+	}
+}

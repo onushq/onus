@@ -61,6 +61,11 @@ pub const TOPICS: &[Topic] = &[
         text: include_str!("../guide/lanes.md"),
     },
     Topic {
+        name: "web-interface",
+        summary: "The web interface: onus ui opens all of it in your browser",
+        text: include_str!("../guide/web-interface.md"),
+    },
+    Topic {
         name: "environments",
         summary: "Environments built from a commit, the evidence store, and traces into the map",
         text: include_str!("../guide/environments.md"),

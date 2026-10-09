@@ -123,7 +123,7 @@ pub fn classify(
             raise(
                 rule.lane,
                 "policy",
-                format!("`{}` matches the rule for {}", row.title, describe(rule)),
+                format!("“{}” matches the rule for {}", row.title, describe(rule)),
                 &mut applied,
                 &mut lane,
             );
@@ -164,7 +164,7 @@ pub fn classify(
             raise(
                 Lane::Blocked,
                 "floor",
-                format!("`{}` without a person's approval", row.title),
+                format!("“{}” without a person's approval", row.title),
                 &mut applied,
                 &mut lane,
             );
@@ -175,7 +175,7 @@ pub fn classify(
             Lane::Human,
             "floor",
             format!(
-                "`{}` is in sensitive code ({})",
+                "“{}” is in sensitive code ({})",
                 row.title,
                 row.hints.labels.join(", ")
             ),
@@ -190,7 +190,7 @@ pub fn classify(
         raise(
             Lane::Human,
             "floor",
-            format!("`{}` is security-sensitive", row.title),
+            format!("“{}” is security-sensitive", row.title),
             &mut applied,
             &mut lane,
         );
@@ -199,7 +199,7 @@ pub fn classify(
         raise(
             Lane::Human,
             "floor",
-            format!("`{}` changes the rules of the game", row.title),
+            format!("“{}” changes the rules of the game", row.title),
             &mut applied,
             &mut lane,
         );
@@ -208,7 +208,7 @@ pub fn classify(
         raise(
             Lane::Human,
             "floor",
-            format!("`{}` is outside the stated intent", row.title),
+            format!("“{}” is outside the stated intent", row.title),
             &mut applied,
             &mut lane,
         );

@@ -123,7 +123,21 @@ impl Server {
         }
     }
 
-    fn session(&self, root: &Path) -> Result<Arc<Session>> {
+    /// The full report of the worktree `root` against `base`.
+    pub fn worktree_report(&self, root: &Path, base: &str) -> Result<onus_core::SemanticReport> {
+        let session = self.session(root)?;
+        let (index, _) = session.index()?;
+        crate::worktree_report(
+            session.root(),
+            base,
+            index.map(),
+            self.cache_for(root)?,
+            &self.bases,
+        )
+    }
+
+    /// The session of the worktree `root`, made on first use.
+    pub fn session(&self, root: &Path) -> Result<Arc<Session>> {
         let root = canonical(root).with_context(|| format!("cannot open {}", root.display()))?;
         if let Some(s) = self
             .sessions

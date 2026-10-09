@@ -204,7 +204,7 @@ pub fn judge_with(
             .changes
             .iter()
             .filter(|r| r.hints.intent_mismatch)
-            .map(|r| format!("`{}` is outside the stated intent", r.title))
+            .map(|r| format!("“{}” is outside the stated intent", r.title))
             .collect();
         steps.push(if outside.is_empty() {
             step("intent", StepStatus::Passed, vec![])

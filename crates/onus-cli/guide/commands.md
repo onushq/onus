@@ -88,6 +88,16 @@ The same questions as the MCP tools, from a shell, printed as JSON: `status`, `f
 - `--repo <dir>` and `--no-server`: as for `onus mcp`.
 - `--depth <n>` (1 to 8) and `--limit <n>` (default 50, at most 500) where they apply.
 
+## onus ui
+
+Opens the web interface for the repository: everything below and above, in a browser, served on 127.0.0.1. See `onus help web-interface`.
+
+    onus ui
+    onus ui --repo ../shop --port 0 --no-open
+
+- `--repo <dir>`, `--port <n>` (default 4387; 0 picks one), `--no-open`.
+- `--outcomes <file>`, `--audit <file>`, `--escalations <dir>`, `--keys <dir>`: where outcome records, the audit log, escalation requests and the root key pair are kept.
+
 ## Scopes, lanes and environments
 
 - `onus token`, `onus scope`, `onus gateway`, `onus escalate`, `onus escalation`, `onus audit`, `onus run-test`: task tokens, the git gateway, escalation and the audit log. See `onus help scopes`.

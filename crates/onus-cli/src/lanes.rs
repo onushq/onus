@@ -187,24 +187,50 @@ fn git_lines(repo: &Path, args: &[&str]) -> Result<Vec<String>> {
         .collect())
 }
 
-pub fn submit(args: SubmitArgs) -> Result<i32> {
-    let intent_text = match &args.intent {
-        Some(p) => Some(std::fs::read_to_string(p)?),
+/// What a submission is made of, besides the change itself.
+#[derive(Debug, Default)]
+pub struct SubmissionParts {
+    /// The intent's text: YAML, or Markdown with an `onus-intent` block.
+    pub intent: Option<String>,
+    /// Whether `intent` is Markdown.
+    pub intent_markdown: bool,
+    pub evidence: Vec<onus_doors::runner::TestRun>,
+    pub scope: Option<ScopeUsed>,
+    pub escalations: Vec<String>,
+    pub approvals: Vec<Approval>,
+    pub agent: AgentSetup,
+}
+
+/// The scope a verified token grants, as a submission records it.
+pub fn scope_used(token: &str, key_public: &Path) -> Result<ScopeUsed> {
+    let v = onus_doors::token::verify(
+        token,
+        &onus_doors::token::public_key(&std::fs::read_to_string(key_public)?)?,
+    )?;
+    Ok(ScopeUsed {
+        task: v.task.clone(),
+        rights: v.rights.iter().map(|r| r.to_string()).collect(),
+        attenuations: v.attenuations.clone(),
+    })
+}
+
+/// Bundles the change from `base` to `head` of `repo` for review.
+pub fn make_submission(
+    repo: &Path,
+    base: &str,
+    head: &str,
+    parts: SubmissionParts,
+) -> Result<Submission> {
+    let intent = match &parts.intent {
+        Some(text) if parts.intent_markdown => onus_diff::intent::parse_markdown(text)?,
+        Some(text) => onus_diff::intent::parse(text)?,
         None => None,
     };
-    let intent = args
-        .intent
-        .as_ref()
-        .map(|p| onus_cli::read_intent(p))
-        .transpose()?
-        .flatten();
-    let pair = std::sync::Arc::new(onus_cli::materialize_pair(
-        &args.repo, &args.base, &args.head, false,
-    )?);
+    let pair = std::sync::Arc::new(onus_cli::materialize_pair(repo, base, head, false)?);
     let opts = onus_cli::DiffOptions {
         intent,
-        base_label: onus_cli::ref_label(&args.base, &pair.base.sha),
-        head_label: onus_cli::ref_label(&args.head, &pair.head.sha),
+        base_label: onus_cli::ref_label(base, &pair.base.sha),
+        head_label: onus_cli::ref_label(head, &pair.head.sha),
         base_commit: Some(pair.base.sha.clone()),
         head_commit: Some(pair.head.sha.clone()),
         changed_paths: Some(pair.changed.clone()),
@@ -212,7 +238,7 @@ pub fn submit(args: SubmitArgs) -> Result<i32> {
     };
     let outcome = onus_cli::diff_dirs(pair.base.dir.path(), pair.head.dir.path(), &opts)?;
     let changed_files = git_lines(
-        &args.repo,
+        repo,
         &[
             "diff",
             "--name-only",
@@ -221,6 +247,42 @@ pub fn submit(args: SubmitArgs) -> Result<i32> {
             &pair.head.sha,
         ],
     )?;
+    Ok(Submission {
+        schema: onus_lanes::submission::SCHEMA,
+        base: pair.base.sha.clone(),
+        head: pair.head.sha.clone(),
+        intent: parts.intent,
+        report: outcome.report,
+        changed_files,
+        evidence: parts.evidence,
+        scope: parts.scope,
+        escalations: parts.escalations,
+        approvals: parts.approvals,
+        agent: parts.agent,
+    })
+}
+
+/// `<row id>=<who>` as an approval.
+pub fn parse_approval(a: &str) -> Result<Approval> {
+    let (row, by) = a
+        .split_once('=')
+        .with_context(|| format!("`{a}`: write approvals as <row id>=<who>"))?;
+    Ok(Approval {
+        row: row.to_string(),
+        by: by.to_string(),
+    })
+}
+
+pub fn submit(args: SubmitArgs) -> Result<i32> {
+    let intent = match &args.intent {
+        Some(p) => Some(std::fs::read_to_string(p)?),
+        None => None,
+    };
+    let intent_markdown = args.intent.as_ref().is_some_and(|p| {
+        p.extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "md" | "markdown" | "txt"))
+    });
     let evidence = args
         .evidence
         .iter()
@@ -230,50 +292,33 @@ pub fn submit(args: SubmitArgs) -> Result<i32> {
         })
         .collect::<Result<Vec<_>>>()?;
     let scope = match (&args.token, &args.key_public) {
-        (Some(t), Some(k)) => {
-            let v = onus_doors::token::verify(
-                t,
-                &onus_doors::token::public_key(&std::fs::read_to_string(k)?)?,
-            )?;
-            Some(ScopeUsed {
-                task: v.task.clone(),
-                rights: v.rights.iter().map(|r| r.to_string()).collect(),
-                attenuations: v.attenuations.clone(),
-            })
-        }
+        (Some(t), Some(k)) => Some(scope_used(t, k)?),
         _ => None,
     };
     let approvals = args
         .approvals
         .iter()
-        .map(|a| {
-            let (row, by) = a
-                .split_once('=')
-                .with_context(|| format!("`{a}`: write approvals as <row id>=<who>"))?;
-            Ok(Approval {
-                row: row.to_string(),
-                by: by.to_string(),
-            })
-        })
+        .map(|a| parse_approval(a))
         .collect::<Result<Vec<_>>>()?;
-    let sub = Submission {
-        schema: onus_lanes::submission::SCHEMA,
-        base: pair.base.sha.clone(),
-        head: pair.head.sha.clone(),
-        intent: intent_text,
-        report: outcome.report,
-        changed_files,
-        evidence,
-        scope,
-        escalations: args.escalations,
-        approvals,
-        agent: AgentSetup {
-            tool: args.agent.agent_tool,
-            model: args.agent.agent_model,
-            config: args.agent.agent_config,
-            team: args.agent.agent_team,
+    let sub = make_submission(
+        &args.repo,
+        &args.base,
+        &args.head,
+        SubmissionParts {
+            intent,
+            intent_markdown,
+            evidence,
+            scope,
+            escalations: args.escalations,
+            approvals,
+            agent: AgentSetup {
+                tool: args.agent.agent_tool,
+                model: args.agent.agent_model,
+                config: args.agent.agent_config,
+                team: args.agent.agent_team,
+            },
         },
-    };
+    )?;
     let json = serde_json::to_string_pretty(&sub)?;
     match args.out {
         Some(p) => std::fs::write(p, format!("{json}\n"))?,
@@ -282,7 +327,7 @@ pub fn submit(args: SubmitArgs) -> Result<i32> {
     Ok(0)
 }
 
-fn lanes_config(repo: &Path, explicit: Option<&Path>) -> Result<LanesConfig> {
+pub fn lanes_config(repo: &Path, explicit: Option<&Path>) -> Result<LanesConfig> {
     let loaded = match explicit {
         Some(p) => Some(onus_map::config::load(p)?),
         None => onus_map::config::load_from_tree(repo)?,
@@ -308,23 +353,59 @@ fn classify_args(args: &LaneArgs) -> Result<(Option<Submission>, LanesConfig, Cl
             ),
             (None, None) => bail!("give --submission or --report"),
         };
-    let record = match (&args.outcomes, &submission) {
-        (Some(f), Some(s)) => Some(outcomes::record_for(&outcomes::load(f)?, &s.agent.key())),
+    let c = classify_with(
+        &report,
+        submission.as_ref(),
+        &config,
+        args.outcomes.as_deref(),
+    )?;
+    Ok((submission, config, c))
+}
+
+/// The lane of a change: its report, its submission if any, the policy and
+/// the agent setup's record in `outcomes`.
+pub fn classify_with(
+    report: &SemanticReport,
+    submission: Option<&Submission>,
+    config: &LanesConfig,
+    outcomes_file: Option<&Path>,
+) -> Result<Classification> {
+    // A file not written yet is an empty record.
+    let record = match (outcomes_file, submission) {
+        (Some(f), Some(s)) => {
+            let all = if f.exists() {
+                outcomes::load(f)?
+            } else {
+                Vec::new()
+            };
+            Some(outcomes::record_for(&all, &s.agent.key()))
+        }
         _ => None,
     };
     // The scope the change was made under (verified when the submission was
     // made), checked against every path the change writes.
-    let scope = submission
-        .as_ref()
-        .and_then(|s| s.scope.as_ref())
-        .map(|sc| {
-            onus_doors::scope::Scope::new(sc.rights.iter().filter_map(|r| r.parse().ok()).collect())
-        });
+    let scope = submission.and_then(|s| s.scope.as_ref()).map(|sc| {
+        onus_doors::scope::Scope::new(sc.rights.iter().filter_map(|r| r.parse().ok()).collect())
+    });
     let writable = |p: &str| scope.as_ref().is_some_and(|s| s.can_write(p));
     let writable_ref: Option<&dyn Fn(&str) -> bool> =
         scope.as_ref().map(|_| &writable as &dyn Fn(&str) -> bool);
-    let c = classify(&report, submission.as_ref(), &config, record, writable_ref);
-    Ok((submission, config, c))
+    Ok(classify(report, submission, config, record, writable_ref))
+}
+
+/// The judge's verdict on a submission, with evidence re-run in containers
+/// and checked against the repository's evidence store.
+pub fn judge_submission(
+    repo: &Path,
+    sub: &Submission,
+    classification: &Classification,
+    config: &LanesConfig,
+) -> onus_lanes::judge::Judgment {
+    let run = |repo: &Path, commit: &str, image: &str, setup: Option<&str>, command: &str| {
+        onus_doors::runner::run(repo, commit, image, setup, command)
+    };
+    let store = onus_env::store::Store::for_repo(repo).ok();
+    judge_with(sub, classification, config, repo, &run, store.as_ref())
 }
 
 pub fn classify_cmd(args: LaneArgs) -> Result<i32> {
@@ -338,12 +419,7 @@ pub fn judge_cmd(args: LaneArgs) -> Result<i32> {
     let Some(sub) = submission else {
         bail!("the judge needs a submission (onus submit)");
     };
-    let run = |repo: &Path, commit: &str, image: &str, setup: Option<&str>, command: &str| {
-        onus_doors::runner::run(repo, commit, image, setup, command)
-    };
-    // Runs recorded in an environment are checked against their manifests.
-    let store = onus_env::store::Store::for_repo(&args.repo).ok();
-    let j = judge_with(&sub, &c, &config, &args.repo, &run, store.as_ref());
+    let j = judge_submission(&args.repo, &sub, &c, &config);
     let out = serde_json::json!({ "classification": c, "judgment": j });
     println!("{}", serde_json::to_string_pretty(&out)?);
     Ok(match j.verdict {
@@ -351,6 +427,71 @@ pub fn judge_cmd(args: LaneArgs) -> Result<i32> {
         Verdict::Reject => 2,
         Verdict::Escalate => 3,
     })
+}
+
+pub const RESULTS: &[&str] = &[
+    "merged",
+    "reverted",
+    "rolled-back",
+    "incident",
+    "closed",
+    "open",
+];
+
+/// Appends an outcome after checking its result.
+pub fn record_outcome(file: &Path, outcome: &Outcome) -> Result<()> {
+    if !RESULTS.contains(&outcome.result.as_str()) {
+        bail!(
+            "the result is merged, reverted, rolled-back (a flag or rollout), incident, closed or open"
+        );
+    }
+    if let Some(dir) = file.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir)?;
+    }
+    outcomes::append(file, outcome)
+}
+
+/// Records reverts found in git history; returns how many were found and
+/// how many were recorded.
+pub fn ingest_reverts(file: &Path, repo: &Path, since: Option<&str>) -> Result<(usize, usize)> {
+    let all = if file.exists() {
+        outcomes::load(file)?
+    } else {
+        Vec::new()
+    };
+    let reverts = outcomes::find_reverts(repo, since)?;
+    let added = outcomes::ingest_reverts(&all, &reverts, onus_doors::gateway::now());
+    for o in &added {
+        outcomes::append(file, o)?;
+    }
+    Ok((reverts.len(), added.len()))
+}
+
+/// Records an incident against a change on record.
+pub fn record_incident(
+    file: &Path,
+    change: &str,
+    involved: Vec<String>,
+    note: String,
+) -> Result<()> {
+    let all = outcomes::load(file)?;
+    let Some(last) = outcomes::latest(&all)
+        .into_iter()
+        .find(|o| o.change == change)
+        .cloned()
+    else {
+        bail!("`{change}` is not on record in {}", file.display());
+    };
+    outcomes::append(
+        file,
+        &Outcome {
+            at: onus_doors::gateway::now(),
+            result: "incident".into(),
+            involved,
+            note: Some(note),
+            ..last
+        },
+    )
 }
 
 pub fn outcomes_cmd(cmd: OutcomesCmd) -> Result<i32> {
@@ -367,15 +508,7 @@ pub fn outcomes_cmd(cmd: OutcomesCmd) -> Result<i32> {
             missed,
             commit,
         } => {
-            if !matches!(
-                result.as_str(),
-                "merged" | "reverted" | "rolled-back" | "incident" | "closed" | "open"
-            ) {
-                bail!(
-                    "--result is merged, reverted, rolled-back (a flag or rollout), incident, closed or open"
-                );
-            }
-            outcomes::append(
+            record_outcome(
                 &file,
                 &Outcome {
                     at: onus_doors::gateway::now(),
@@ -395,17 +528,8 @@ pub fn outcomes_cmd(cmd: OutcomesCmd) -> Result<i32> {
             Ok(0)
         }
         OutcomesCmd::IngestReverts { file, repo, since } => {
-            let all = outcomes::load(&file)?;
-            let reverts = outcomes::find_reverts(&repo, since.as_deref())?;
-            let added = outcomes::ingest_reverts(&all, &reverts, onus_doors::gateway::now());
-            for o in &added {
-                outcomes::append(&file, o)?;
-            }
-            println!(
-                "{} reverts found, {} recorded against changes on record",
-                reverts.len(),
-                added.len()
-            );
+            let (found, added) = ingest_reverts(&file, &repo, since.as_deref())?;
+            println!("{found} reverts found, {added} recorded against changes on record");
             Ok(0)
         }
         OutcomesCmd::Incident {
@@ -414,24 +538,7 @@ pub fn outcomes_cmd(cmd: OutcomesCmd) -> Result<i32> {
             involved,
             note,
         } => {
-            let all = outcomes::load(&file)?;
-            let Some(last) = outcomes::latest(&all)
-                .into_iter()
-                .find(|o| o.change == change)
-                .cloned()
-            else {
-                bail!("`{change}` is not on record in {}", file.display());
-            };
-            outcomes::append(
-                &file,
-                &Outcome {
-                    at: onus_doors::gateway::now(),
-                    result: "incident".into(),
-                    involved,
-                    note: Some(note),
-                    ..last
-                },
-            )?;
+            record_incident(&file, &change, involved, note)?;
             Ok(0)
         }
         OutcomesCmd::Backlog { file } => {

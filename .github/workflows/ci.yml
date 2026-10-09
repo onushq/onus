@@ -47,6 +47,29 @@ jobs:
       - name: onus --version
         run: cargo run --locked --quiet -p onus-cli -- --version
 
+  ui:
+    name: Web interface
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Type-check and build
+        working-directory: ui
+        run: |
+          npm ci
+          npm run check
+          npm run build
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: The binary embeds the built interface
+        env:
+          ONUS_REQUIRE_UI: "1"
+        run: cargo test --locked -p onus-cli --test ui
+
   deny:
     name: cargo-deny
     runs-on: ubuntu-latest

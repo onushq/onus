@@ -42,7 +42,7 @@ steps:
   - uses: actions/checkout@v7
     with:
       fetch-depth: 0
-  - uses: onushq/onus/action@v0.8.0
+  - uses: onushq/onus/action@v0.9.0
     with:
       fail-on: secrets          # optional: rule-violation, secrets
 ```
@@ -84,6 +84,14 @@ onus query dependents UserPreferences --depth 2     # the same questions from a 
 ```
 
 All agents and worktrees of a repository share one map server that follows file changes and re-parses only what changed: warm answers take milliseconds, and a rebuild after an edit about 2 s on Twenty's 31,000-file monorepo. See [`onus help agents`](crates/onus-cli/guide/agents.md) and [ADR 0007](docs/adr/0007-map-server-for-agents.md).
+
+## In your browser
+
+```sh
+onus ui
+```
+
+opens everything for the repository you are in: the component graph, every component, symbol and file with its dependents, tests and what a change would break; reports of uncommitted work or any two refs; lanes and the judge; environments and their evidence; tokens, escalations, the audit log and outcomes. It is served from the binary on 127.0.0.1, behind a per-session token (`onus help web-interface`).
 
 ## Scopes, lanes and evidence
 

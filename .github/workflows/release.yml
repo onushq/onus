@@ -30,9 +30,31 @@ jobs:
             exit 1
           fi
 
+  ui:
+    name: Build the web interface
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - working-directory: ui
+        run: |
+          npm ci
+          npm run check
+          npm run build
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ui-build
+          path: ui/build
+          if-no-files-found: error
+
   build:
     name: Build (${{ matrix.target }})
-    needs: check
+    needs: [check, ui]
     strategy:
       fail-fast: false
       matrix:
@@ -66,9 +88,15 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y musl-tools
+      - uses: actions/download-artifact@v8
+        with:
+          name: ui-build
+          path: ui/build
       - name: Build
         shell: bash
         env:
+          # Every release binary carries `onus ui`.
+          ONUS_REQUIRE_UI: "1"
           # Static, and without paths of the build machine in the binary.
           RUSTFLAGS: >-
             ${{ contains(matrix.target, 'musl') && '-C target-feature=+crt-static' || '' }}

@@ -215,43 +215,22 @@ impl Store {
     }
 }
 
-/// Sums the `<testsuite>` counts of a JUnit XML file. Only suites without
-/// nested suites count, so totals that parents repeat are not doubled.
+/// Counts the test cases of a JUnit XML file by their `<testcase>`
+/// elements, which every reporter writes (suite totals are optional, and
+/// some reporters, such as Node's, leave them out).
 pub fn junit_counts(xml: &str) -> TestCounts {
-    let tag = regex::Regex::new(r"<(/?)testsuite\b([^>]*?)(/?)>").expect("valid regex");
-    let attr = |attrs: &str, name: &str| -> u32 {
-        regex::Regex::new(&format!(r#"\b{name}="(\d+)""#))
-            .expect("valid regex")
-            .captures(attrs)
-            .and_then(|c| c[1].parse().ok())
-            .unwrap_or(0)
-    };
+    let case =
+        regex::Regex::new(r"(?s)<testcase\b[^>]*?(?:/>|>(.*?)</testcase>)").expect("valid regex");
     let mut counts = TestCounts::default();
-    let mut add = |attrs: &str| {
-        counts.tests += attr(attrs, "tests");
-        counts.failures += attr(attrs, "failures");
-        counts.errors += attr(attrs, "errors");
-        counts.skipped += attr(attrs, "skipped");
-    };
-    // Open suites: their attributes, and whether a suite was nested in them.
-    let mut open: Vec<(String, bool)> = Vec::new();
-    for c in tag.captures_iter(xml) {
-        let attrs = c.get(2).map_or("", |m| m.as_str());
-        if !c[1].is_empty() {
-            if let Some((attrs, parent)) = open.pop()
-                && !parent
-            {
-                add(&attrs);
-            }
-            continue;
-        }
-        if let Some(top) = open.last_mut() {
-            top.1 = true;
-        }
-        if c[3].is_empty() {
-            open.push((attrs.to_string(), false));
-        } else {
-            add(attrs);
+    for c in case.captures_iter(xml) {
+        counts.tests += 1;
+        let body = c.get(1).map_or("", |m| m.as_str());
+        if body.contains("<failure") {
+            counts.failures += 1;
+        } else if body.contains("<error") {
+            counts.errors += 1;
+        } else if body.contains("<skipped") {
+            counts.skipped += 1;
         }
     }
     counts
@@ -311,25 +290,30 @@ mod tests {
     }
 
     #[test]
-    fn junit_counts_sum_the_innermost_suites() {
+    fn junit_counts_count_test_cases() {
+        // Suites nested, with totals.
         let xml = r#"<?xml version="1.0"?>
 <testsuites tests="5" failures="1">
   <testsuite name="a" tests="3" failures="1" errors="0" skipped="1">
     <testcase name="x"/>
+    <testcase name="y"><failure message="boom">at x.ts:3</failure></testcase>
+    <testcase name="z"><skipped/></testcase>
   </testsuite>
-  <testsuite name="b" tests="2" failures="0" errors="0">
-    <testsuite name="b1" tests="2" failures="0" errors="0"><testcase name="y"/></testsuite>
+  <testsuite name="b" tests="2">
+    <testsuite name="b1"><testcase name="p"></testcase><testcase name="q"><error/></testcase></testsuite>
   </testsuite>
-  <testsuite name="c" tests="0" />
 </testsuites>"#;
         assert_eq!(
             junit_counts(xml),
             TestCounts {
                 tests: 5,
                 failures: 1,
-                errors: 0,
+                errors: 1,
                 skipped: 1
             }
         );
+        // Node's reporter: test cases without a suite, totals in comments.
+        let node = "<testsuites>\n\t<testcase name=\"a\" time=\"0.1\" classname=\"test\"/>\n\t<testcase name=\"b\" time=\"0.1\" classname=\"test\"/>\n\t<!-- tests 2 -->\n</testsuites>";
+        assert_eq!(junit_counts(node).tests, 2);
     }
 }

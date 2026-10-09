@@ -41,6 +41,17 @@ cargo run -p onus-cli -- schema --out schemas
 
 The user guide lives in `crates/onus-cli/guide/` and is compiled into the binary (`onus help <topic>`); `docs/guide.md` indexes it. When you change behavior a user can see, update the guide in the same pull request. Tests check that it still lists the built-in registry, the defaults and every kind of change the scenarios produce.
 
+The web interface (`onus ui`) is a SvelteKit app in `ui/`, built to static files that `crates/onus-cli/build.rs` embeds in the binary. It talks only to the JSON API in `crates/onus-cli/src/ui/`. To work on it with Node 22:
+
+```sh
+cd ui && npm ci
+ONUS_UI_TOKEN=dev cargo run -p onus-cli -- ui --no-open   # in one terminal, at a repository
+npm run dev                                               # then open http://localhost:5173/#token=dev
+npm run check && npm run build                            # before a pull request; rebuild onus-cli to embed it
+```
+
+The pages use Tailwind CSS and shadcn-svelte components (`ui/src/lib/components/ui/`), themed in `ui/src/app.css`. Add a component with `npx shadcn-svelte@latest add <name>`; `components.json` points the CLI at `tsconfig.shadcn.json`, because it cannot read SvelteKit 3's `$app/tsconfig`.
+
 To measure performance on a generated workspace of about 200,000 lines:
 
 ```sh
