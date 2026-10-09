@@ -35,12 +35,18 @@ pub fn parse(text: &str) -> Result<LoadedConfig, MapError> {
 pub fn load(path: &Path) -> Result<LoadedConfig, MapError> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| MapError::Io(format!("{}: {e}", path.display())))?;
-    let mut loaded = parse(&text).map_err(|e| match e {
+    load_text(&text, path)
+}
+
+/// Loads a config from `text` as if it were the file at `path`: packs are
+/// read relative to its folder, and errors name it. Nothing is written.
+pub fn load_text(text: &str, path: &Path) -> Result<LoadedConfig, MapError> {
+    let mut loaded = parse(text).map_err(|e| match e {
         MapError::Config(msg) => MapError::Config(format!("{}: {msg}", path.display())),
         other => other,
     })?;
     let dir = path.parent().unwrap_or(Path::new("."));
-    let mut hashed = text.clone();
+    let mut hashed = text.to_string();
     for pack in &loaded.config.extractors.packs {
         let pack_path = onus_core::paths::native(dir, pack);
         let pack_text = std::fs::read_to_string(&pack_path)

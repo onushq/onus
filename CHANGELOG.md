@@ -4,6 +4,8 @@ All notable changes to Onus are recorded here. The format follows [Keep a Change
 
 ## Unreleased
 
+- **Edit onus.yaml in `onus ui`**: a form for components, labels, boundary rules, contracts, lanes, events and external services, tests and the environment, beside a YAML editor and the `onus init` suggestion. Edits are checked as you make them (the same loading the map does, packs included), shown as a diff before saving, and written so that only the changed lines change: comments, alignment and quoting stay as written. Saving refuses a config that does not load and a file changed on disk since it was opened, writes atomically and rebuilds the map at once.
+
 ## [0.10.0] - 2026-10-09
 
 Track records that fill themselves in, and agents that work through Onus.

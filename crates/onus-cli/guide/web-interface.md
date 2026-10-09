@@ -20,7 +20,7 @@ It prints an address such as `http://127.0.0.1:4387/#token=…` and opens it.
 | Tokens & scopes | Generate a root key, plan a task, suggest reads, mint, inspect, check and narrow tokens |
 | Escalations | File requests with evidence; decide by policy, grant or deny |
 | Audit log | Every decision, and whether the hash chain is intact |
-| onus.yaml | What is declared, and what `onus init` would suggest |
+| onus.yaml | Edit it with a form (components, labels, boundary rules, contracts, lanes, events and services, tests, the environment) or as YAML, checked as you type; review the changes and save. Edits touch only the lines they change, so comments and alignment stay as written, and the map is rebuilt with the new config at once. Start from what `onus init` suggests |
 | Guide | This guide |
 
 The map follows the files on disk, so pages show your work as you edit.

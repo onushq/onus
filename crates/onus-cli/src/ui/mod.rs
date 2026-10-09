@@ -314,6 +314,7 @@ async fn api_request(state: Arc<State>, name: String, req: Request<Incoming>) ->
     match answer {
         Ok(Ok(value)) => json_reply(StatusCode::OK, &serde_json::json!({ "ok": value })),
         Ok(Err(api::Error::NotFound(what))) => error(StatusCode::NOT_FOUND, what),
+        Ok(Err(api::Error::Conflict(what))) => error(StatusCode::CONFLICT, what),
         Ok(Err(api::Error::Failed(e))) => error(StatusCode::BAD_REQUEST, format!("{e:#}")),
         Err(e) => error(
             StatusCode::INTERNAL_SERVER_ERROR,

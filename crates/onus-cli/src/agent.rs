@@ -29,7 +29,7 @@ const PASSTHROUGH: &[&str] = &[
 
 fn call(state: &State, name: &str, input: Value) -> Result<Value> {
     api::call(state, name, input).map_err(|e| match e {
-        api::Error::NotFound(what) => anyhow!(what),
+        api::Error::NotFound(what) | api::Error::Conflict(what) => anyhow!(what),
         api::Error::Failed(e) => e,
     })
 }
