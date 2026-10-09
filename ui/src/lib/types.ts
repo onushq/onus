@@ -410,6 +410,20 @@ export interface Outcomes {
 	backlog: { target: string; incidents: number }[];
 	results: string[];
 	ingested?: { found: number; recorded: number };
+	source: { kind: 'file'; path: string } | { kind: 'branch'; ref: string; updatedAt: number | null } | { kind: 'none'; path: string };
+	trend: { week: number; counts: Record<string, number> }[];
+	agents: { agent: string; merged: number; recentIncidents: number; eligible: boolean; needs: number }[];
+	minRecord: number;
+	inFlight: {
+		at: number;
+		change: string;
+		base: string;
+		head: string;
+		agent: { tool: string; model: string; config: string };
+		lane: Lane;
+		verdict?: string | null;
+		approvals?: { row: string; by: string }[];
+	}[];
 }
 
 // ---- Environments and evidence

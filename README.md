@@ -42,7 +42,7 @@ steps:
   - uses: actions/checkout@v7
     with:
       fetch-depth: 0
-  - uses: onushq/onus/action@v0.9.0
+  - uses: onushq/onus/action@v0.10.0
     with:
       fail-on: secrets          # optional: rule-violation, secrets
 ```
@@ -76,7 +76,7 @@ Other languages and frameworks plug in through plugins, SCIP indexes and languag
 
 ## For coding agents
 
-`onus mcp` gives coding agents `onus_check`, which reports the changes in meaning of the work in progress before it is committed, and `onus_impact`, which says what a change would break before it is made, plus tools to navigate the map. In [our evaluation](docs/evaluation/2026-10-07-map-for-agents.md) the navigation tools did not make agents faster or more correct; agents did use `onus_check`, so verification is where the map earns its place.
+`onus mcp` gives coding agents `onus_check`, which reports the changes in meaning of the work in progress before it is committed, and `onus_impact`, which says what a change would break before it is made, plus tools to navigate the map. Agents also hand their work in through it: they run tests in environments, submit the change with that evidence, ask the judge, and ask for more access with an escalation. They cannot approve themselves, record outcomes or widen their own scope. In [our evaluation](docs/evaluation/2026-10-07-map-for-agents.md) the navigation tools did not make agents faster or more correct; agents did use `onus_check`, so verification is where the map earns its place.
 
 ```sh
 claude mcp add onus -- onus mcp
@@ -91,7 +91,7 @@ All agents and worktrees of a repository share one map server that follows file 
 onus ui
 ```
 
-opens everything for the repository you are in: the component graph, every component, symbol and file with its dependents, tests and what a change would break; reports of uncommitted work or any two refs; lanes and the judge; environments and their evidence; tokens, escalations, the audit log and outcomes. It is served from the binary on 127.0.0.1, behind a per-session token (`onus help web-interface`).
+opens everything for the repository you are in: the component graph, every component, symbol and file with its dependents, tests and what a change would break; reports of uncommitted work or any two refs; lanes and the judge; environments and their evidence; tokens, escalations, the audit log and each agent's track record week by week. It is served from the binary on 127.0.0.1, behind a per-session token (`onus help web-interface`).
 
 ## Scopes, lanes and evidence
 
@@ -99,6 +99,7 @@ Onus works with whichever agent you use, and none of this depends on one:
 
 - **Scoped tokens** give a task exactly the paths, hosts and secrets it needs. A git gateway enforces them, and agents ask for more with evidence (`onus help scopes`).
 - **Risk lanes** send each change to auto-merge, the judge, a person or nowhere, by rules you write and floors no rule can lower. The judge re-runs the evidence before it judges anything (`onus help lanes`).
+- **Track records keep themselves.** With `records: true`, the GitHub Action classifies every pull request with its agent's record. It records what happened when the pull request closes and catches reverts on the default branch. People add approvals, audits and incidents with `/onus` comments. The records live on an `onus/records` branch of the repository; an agent earns auto-merge from them (`onus help ci`).
 - **Environments** built from a commit run the tests and keep what they recorded in a content-addressed store, so approval rests on evidence an environment produced, not on an agent's claim (`onus help environments`).
 
 ## Roadmap

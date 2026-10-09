@@ -105,6 +105,7 @@ pub const RECENT: usize = 20;
 /// An agent setup's record: changes still merged (not reverted, no
 /// incident), and incidents among its last [`RECENT`] changes.
 pub fn record_for(outcomes: &[Outcome], agent: &str) -> Record {
+    let had = had_incident(outcomes);
     let mine: Vec<&Outcome> = latest(outcomes)
         .into_iter()
         .filter(|o| o.agent == agent)
@@ -115,9 +116,19 @@ pub fn record_for(outcomes: &[Outcome], agent: &str) -> Record {
             .iter()
             .rev()
             .take(RECENT)
-            .filter(|o| o.result == "incident")
+            .filter(|o| had.contains(o.change.as_str()))
             .count() as u32,
     }
+}
+
+/// Changes that caused an incident at any point: reverting one later does
+/// not erase the incident from its agent setup's record.
+fn had_incident(outcomes: &[Outcome]) -> std::collections::HashSet<&str> {
+    outcomes
+        .iter()
+        .filter(|o| o.result == "incident")
+        .map(|o| o.change.as_str())
+        .collect()
 }
 
 /// A revert found in git history: the commit it reverts.
@@ -179,7 +190,9 @@ pub fn ingest_reverts(outcomes: &[Outcome], reverts: &[Revert], at: u64) -> Vec<
             o.commit
                 .as_deref()
                 .is_some_and(|c| c.starts_with(&r.reverted) || r.reverted.starts_with(c))
-                && o.result == "merged"
+                // Landed and not undone yet: an incident is often what
+                // gets a change reverted.
+                && matches!(o.result.as_str(), "merged" | "incident")
         }) else {
             continue;
         };
@@ -227,14 +240,16 @@ pub struct Tally {
 }
 
 impl Tally {
-    fn add(&mut self, o: &Outcome) {
+    fn add(&mut self, o: &Outcome, incident: bool) {
         self.changes += 1;
         match o.result.as_str() {
             "merged" => self.merged += 1,
             // A flag turned off or a rollout rolled back undoes a change too.
             "reverted" | "rolled-back" => self.reverted += 1,
-            "incident" => self.incidents += 1,
             _ => {}
+        }
+        if incident {
+            self.incidents += 1;
         }
         if o.lane == Lane::AutoMerge && o.result == "merged" {
             self.auto_merged += 1;
@@ -263,11 +278,16 @@ pub struct Summary {
 
 pub fn summarize(outcomes: &[Outcome]) -> Summary {
     let mut s = Summary::default();
+    let had = had_incident(outcomes);
     for o in latest(outcomes) {
-        s.total.add(o);
-        s.by_agent.entry(o.agent.clone()).or_default().add(o);
+        let incident = had.contains(o.change.as_str());
+        s.total.add(o, incident);
+        s.by_agent
+            .entry(o.agent.clone())
+            .or_default()
+            .add(o, incident);
         if let Some(j) = &o.judge {
-            s.by_judge.entry(j.clone()).or_default().add(o);
+            s.by_judge.entry(j.clone()).or_default().add(o, incident);
         }
         *s.by_lane.entry(o.lane.as_str().to_string()).or_default() += 1;
     }

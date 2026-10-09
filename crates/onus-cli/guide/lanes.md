@@ -68,6 +68,8 @@ The verdict is `approve`, `reject` with reasons the agent can act on, or `escala
 
 ## Outcomes
 
+The GitHub Action keeps these records for you with `records: true`: outcomes when pull requests close, reverts when the default branch moves, and approvals, audits and incidents from `/onus` comments (`onus help ci`). By hand, or from another system:
+
     onus outcomes record --file outcomes.jsonl --change acme/shop#42 --agent claude-code/sonnet/default \
       --lane auto-merge --verdict approve --judge 1a2b3c4d --result merged --audited
     onus outcomes summary --file outcomes.jsonl
@@ -87,4 +89,4 @@ Reverts are found from commit messages (`This reverts commit …`) and recorded 
 
 ## In CI
 
-The action classifies every pull request with `lanes: true` and shows the lane in its comment. `apply-lane: true` labels the pull request `onus/lane:<lane>` and fails the job for `blocked`; `auto-merge: true` enables GitHub's auto-merge for the `auto-merge` lane. See `onus help ci`.
+The action classifies every pull request with `lanes: true` and shows the lane in its comment. `apply-lane: true` labels the pull request `onus/lane:<lane>` and fails the job for `blocked`; `auto-merge: true` enables GitHub's auto-merge for the `auto-merge` lane. See `onus help ci`. With `records: true`, the action also keeps the outcome records on an `onus/records` branch: outcomes when pull requests close, reverts when the default branch moves, and approvals, audits and incidents from `/onus` comments.

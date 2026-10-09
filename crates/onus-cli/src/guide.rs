@@ -42,7 +42,7 @@ pub const TOPICS: &[Topic] = &[
     },
     Topic {
         name: "ci",
-        summary: "Running Onus on every pull request",
+        summary: "Running Onus on every pull request, and outcome records kept by CI",
         text: include_str!("../guide/ci.md"),
     },
     Topic {

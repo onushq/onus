@@ -1,6 +1,6 @@
 # Running Onus in CI
 
-Onus only reads the checked-out files, so it is safe on pull requests from forks with read-only permissions.
+Onus only reads the checked-out files, so it is safe on pull requests from forks with read-only permissions. The one thing it writes, with `records: true`, is its own `onus/records` branch.
 
 ## GitHub Actions
 
@@ -18,7 +18,7 @@ The Onus action downloads the release binary for the runner, checks its SHA-256,
           - uses: actions/checkout@v7
             with:
               fetch-depth: 0
-          - uses: onushq/onus/action@v0.9.0
+          - uses: onushq/onus/action@v0.10.0
             id: onus
             with:
               fail-on: rule-violation,secrets
@@ -55,6 +55,74 @@ Notes:
 - The comment starts with a hidden `<!-- onus-report -->` marker, which is how the action finds its own comment to update.
 - The action runs on Linux (x86_64 and ARM64), macOS and Windows runners.
 
+## Outcome records on every pull request
+
+With `records: true`, the action keeps the track record lanes depend on without anyone typing an outcome. The records live on a branch of the repository, `onus/records` (input `records-branch`), as two files that only grow by whole lines: `pulls.jsonl` (what Onus knew about each pull request while it was open) and `outcomes.jsonl` (what happened to it). Nothing outside the repository is needed.
+
+    name: Onus
+    on:
+      pull_request:
+        types: [opened, synchronize, reopened, edited, ready_for_review, closed]
+      issue_comment:
+        types: [created]
+      push:
+        branches: [main]
+    permissions:
+      contents: write           # the onus/records branch
+      pull-requests: write      # the comment
+      actions: write            # re-running the check after /onus approve
+    jobs:
+      onus:
+        # Comments matter only when they are /onus commands on pull requests.
+        if: >-
+          github.event_name != 'issue_comment' ||
+          (github.event.issue.pull_request && startsWith(github.event.comment.body, '/onus'))
+        runs-on: ubuntu-latest
+        steps:
+          - uses: actions/checkout@v7
+            with:
+              fetch-depth: 0
+          - uses: onushq/onus/action@v0.10.0
+            with:
+              records: true
+
+What happens on each event:
+
+- **Opened or pushed:** the change is submitted with the report as its evidence, classified with the policy, the hard floors and its agent setup's record, and judged when the lane is `judge` and `judge: true`. The comment shows the lane, why, the agent setup's record and an `/onus approve` command for each row that needs a person. The latest classification is appended to `pulls.jsonl`.
+- **Merged or closed:** the pull request's latest record becomes an outcome (`merged` or `closed`), with the commit it landed as. Running twice records it once.
+- **A push to the default branch:** commits that revert a merged change (`This reverts commit …`) are recorded against it; a reverted change no longer counts toward its agent setup's record.
+- **A `/onus` comment** from someone with write access (owner, member or collaborator); anyone else's is answered with a 😕 and ignored:
+
+      /onus approve new-external-service:external:acme-sms@notifications
+      /onus audit ok
+      /onus audit miss the opt-out was ignored
+      /onus incident SMS sent twice involved: notifications, notifications:src/sms.ts#sendSms
+
+  `approve` records a person's approval of a row and re-runs the check, so the lane updates. `audit` records a human audit of a merged change, the miss rate that says whether the automatic lanes can be trusted. `incident` marks a merged change as having caused one, with the components and symbols involved: an agent setup with an incident among its last 20 changes cannot auto-merge, and `onus outcomes backlog` lists where incidents happen. The action reacts with 👍 and replies with what it recorded.
+
+### Who made the change
+
+Each outcome is kept against an agent setup. Onus reads it from what git and GitHub show, in order:
+
+1. An `Onus-Agent: tool/model/config` trailer on the head commit, such as `Onus-Agent: claude-code/opus/plan-first`. The most precise; agents can be told to add it.
+2. A branch named after an agent: `claude/`, `claude-code/`, `codex/`, `cursor/`, `copilot/`, `devin/`, `jules/`, `aider/`, and `onus/` for changes pushed through the Onus gateway.
+3. The bot that opened the pull request, such as `copilot-swe-agent` or `devin-ai-integration[bot]`; any other bot under its own name.
+4. A `Co-authored-by` trailer naming an agent.
+5. Otherwise the person who opened it, as `person/<login>`.
+
+### Reading the records
+
+`onus ui` reads `origin/onus/records` when there is no local outcomes file: the Outcomes page shows changes by week and lane, each agent setup's record and whether it may auto-merge, and the pull requests in flight. Its *Fetch from origin* button fetches the branch. On the command line:
+
+    onus ci records pull --dir records
+    onus outcomes summary --file records/outcomes.jsonl
+
+### Notes
+
+- Pull requests from forks get a read-only token on `pull_request` events, so they are classified but not recorded.
+- Concurrent runs merge their records by taking every line from both sides, and retry the push when another run pushed first.
+- The `onus ci` commands the action runs work in any CI system: `onus ci pr`, `onus ci closed`, `onus ci comment`, `onus ci push` and `onus ci records pull|push` (see `onus help commands` and `onus ci --help`).
+
 ## Caching the base map
 
 Most of a report's time goes into mapping the two commits. A pull request is reported on every push, but its base commit rarely changes, so the action caches the base map (input `cache`). On the command line, the same cache is `--cache-dir`:
@@ -88,7 +156,7 @@ To acknowledge those replies with a 🚀, add a second workflow; the same action
         if: github.event.issue.pull_request && startsWith(github.event.comment.body, '/onus caught')
         runs-on: ubuntu-latest
         steps:
-          - uses: onushq/onus/action@v0.9.0
+          - uses: onushq/onus/action@v0.10.0
 
 The comment also carries the report's metrics line in a hidden HTML comment. `scripts/onus-metrics.sh` in the Onus repository reads all of it back with the GitHub CLI, one JSON line per pull request, or one line of totals with `--summary` (reports, large reports, the share of 👍 on large pull requests, the catch rate, changed lines per row, time to first review):
 
