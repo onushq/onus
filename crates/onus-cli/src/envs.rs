@@ -89,7 +89,8 @@ fn store(repo: &Path, store: Option<PathBuf>) -> Result<Store> {
     }
 }
 
-fn grants(token: Option<&str>, key: Option<&Path>) -> Result<Grants> {
+/// What a task token lets an environment have: its hosts and secrets.
+pub fn grants(token: Option<&str>, key: Option<&Path>) -> Result<Grants> {
     let Some(token) = token else {
         return Ok(Grants::default());
     };
@@ -161,31 +162,7 @@ pub fn env_cmd(cmd: EnvCmd) -> Result<i32> {
             let store = store(&repo, dir)?;
             let command = command.join(" ");
             let (id, m) = env::run(&name, &command, &store)?;
-            let log = m
-                .artifacts
-                .iter()
-                .find(|a| a.kind == ArtifactKind::Log)
-                .map(|a| store.get(&a.sha256))
-                .transpose()?
-                .unwrap_or_default();
-            let run = TestRun {
-                commit: m.commit.clone(),
-                image: m.environment.image.clone(),
-                // The judge re-runs the command in a fresh container: with the
-                // environment's setup and its seed, so it sees the same data.
-                setup: {
-                    let steps: Vec<&str> = [&m.environment.setup, &m.environment.seed]
-                        .into_iter()
-                        .flatten()
-                        .map(String::as_str)
-                        .collect();
-                    (!steps.is_empty()).then(|| steps.join(" && "))
-                },
-                command,
-                exit_code: m.exit_code,
-                output_tail: tail(&String::from_utf8_lossy(&log), 40),
-                manifest: Some(id),
-            };
+            let run = test_run_of(&store, id, &m)?;
             println!("{}", serde_json::to_string_pretty(&run)?);
             Ok(if run.failed() { 1 } else { 0 })
         }
@@ -217,7 +194,36 @@ pub fn env_cmd(cmd: EnvCmd) -> Result<i32> {
     }
 }
 
-fn short_commit(repo: &Path, reference: &str) -> Result<String> {
+/// A recorded run as a test run for a submission: it names its manifest.
+pub fn test_run_of(store: &Store, id: String, m: &onus_env::store::Manifest) -> Result<TestRun> {
+    let log = m
+        .artifacts
+        .iter()
+        .find(|a| a.kind == ArtifactKind::Log)
+        .map(|a| store.get(&a.sha256))
+        .transpose()?
+        .unwrap_or_default();
+    Ok(TestRun {
+        commit: m.commit.clone(),
+        image: m.environment.image.clone(),
+        // The judge re-runs the command in a fresh container: with the
+        // environment's setup and its seed, so it sees the same data.
+        setup: {
+            let steps: Vec<&str> = [&m.environment.setup, &m.environment.seed]
+                .into_iter()
+                .flatten()
+                .map(String::as_str)
+                .collect();
+            (!steps.is_empty()).then(|| steps.join(" && "))
+        },
+        command: m.command.clone(),
+        exit_code: m.exit_code,
+        output_tail: tail(&String::from_utf8_lossy(&log), 40),
+        manifest: Some(id),
+    })
+}
+
+pub fn short_commit(repo: &Path, reference: &str) -> Result<String> {
     let out = Command::new("git")
         .arg("-C")
         .arg(repo)

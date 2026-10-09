@@ -352,6 +352,9 @@ Examples:
         #[command(subcommand)]
         cmd: envs::EvidenceCmd,
     },
+    /// Open the web interface for a repository: the map, reports, lanes,
+    /// environments, evidence, scopes and outcomes, served on 127.0.0.1.
+    Ui(ui::UiArgs),
     /// Bundle a change for review: report, changed files, evidence, scope and agent setup.
     Submit(lanes::SubmitArgs),
     /// Which lane a change takes (auto-merge, judge, human, blocked), and why.
@@ -533,6 +536,7 @@ fn backend(root: &std::path::Path, no_server: bool) -> std::sync::Arc<dyn onus_c
 mod doors;
 mod envs;
 mod lanes;
+mod ui;
 
 fn main() -> ExitCode {
     let cli = match Cli::try_parse() {
@@ -730,6 +734,7 @@ fn run(cli: Cli) -> Result<i32> {
         Cmd::RunTest(args) => doors::run_test(args),
         Cmd::Env { cmd } => envs::env_cmd(cmd),
         Cmd::Evidence { cmd } => envs::evidence_cmd(cmd),
+        Cmd::Ui(args) => ui::run(args),
         Cmd::Help { topic } => help(topic.as_deref()),
         Cmd::Mcp {
             repo,

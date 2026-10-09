@@ -4,6 +4,10 @@ All notable changes to Onus are recorded here. The format follows [Keep a Change
 
 ## Unreleased
 
+- **`onus ui`**: a web interface for the repository, embedded in the binary and served on 127.0.0.1 behind a per-session token ([ADR 0011](docs/adr/0011-web-interface.md), `onus help web-interface`). It covers the component graph and every component, symbol and file (dependents, dependencies, tests, invariants and the impact of a change); reports of uncommitted work and of any two refs; the lane policy, submissions, classification and the judge; environments, runs and the evidence store; outcomes, incidents and reverts; root keys, task plans, minting, inspecting and narrowing tokens; escalations; the audit log; onus.yaml; and the guide.
+- JUnit results are counted by their `<testcase>` elements, so reporters that write no suite totals (such as Node's) are counted.
+- Lane and judge reasons quote row titles instead of wrapping them in backticks, which broke the code spans inside them.
+
 ## [0.8.0] - 2026-10-09
 
 Phase 5 complete: environments, the evidence store, traces, the production loop and contract-level scopes ([ADR 0010](docs/adr/0010-evidence-factory.md), `onus help environments`).

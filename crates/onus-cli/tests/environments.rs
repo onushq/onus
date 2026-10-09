@@ -52,7 +52,7 @@ environment:
 const TEST_SH: &str = r#"set -e
 test -f .deps && test -f data/seed.json
 mkdir -p reports otel
-echo '<testsuites><testsuite name="a" tests="2" failures="0"><testcase name="x"/></testsuite></testsuites>' > reports/junit.xml
+echo '<testsuites><testsuite name="a" tests="2" failures="0"><testcase name="x"/><testcase name="y"/></testsuite></testsuites>' > reports/junit.xml
 echo '{"resourceSpans": []}' > otel/trace.json
 echo "key is ${API_KEY:-none}"
 "#;
