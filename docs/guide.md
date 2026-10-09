@@ -10,7 +10,7 @@ The guide ships inside the `onus` binary: `onus help <topic>` prints any of thes
 | [changes](../crates/onus-cli/guide/changes.md) | Every kind and subkind of change Onus reports |
 | [configuration](../crates/onus-cli/guide/configuration.md) | The `onus.yaml` reference: components, rules, labels, extractors |
 | [intent](../crates/onus-cli/guide/intent.md) | Checking a change against its stated intent |
-| [ci](../crates/onus-cli/guide/ci.md) | Running Onus on every pull request |
+| [ci](../crates/onus-cli/guide/ci.md) | Running Onus on every pull request, and outcome records kept by CI |
 | [agents](../crates/onus-cli/guide/agents.md) | The map for coding agents: `onus mcp`, its tools, many agents and worktrees |
 | [scopes](../crates/onus-cli/guide/scopes.md) | Task tokens, the git gateway, escalation with evidence and the audit log |
 | [lanes](../crates/onus-cli/guide/lanes.md) | Risk lanes, change submissions, the verifying judge and outcome records |

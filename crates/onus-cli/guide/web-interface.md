@@ -16,7 +16,7 @@ It prints an address such as `http://127.0.0.1:4387/#token=…` and opens it.
 | Changes | Check uncommitted work (what `onus_check` gives an agent), or report any two refs, with an intent; download Markdown or JSON |
 | Lanes & judge | The lane policy; submissions agents handed in over MCP; make a submission with evidence from the store, classify it and run the judge |
 | Environments | Create environments, run commands, browse the evidence store and its artifacts, run a test once |
-| Outcomes | Records, totals per agent setup and judge, the human-lane share and audit miss rate; record outcomes and incidents, find reverts |
+| Outcomes | Changes by week and lane, each agent setup's progress toward auto-merge, pull requests in flight, totals per agent setup and judge, the human-lane share and audit miss rate; record outcomes and incidents and find reverts, or fetch the records the GitHub Action keeps |
 | Tokens & scopes | Generate a root key, plan a task, suggest reads, mint, inspect, check and narrow tokens |
 | Escalations | File requests with evidence; decide by policy, grant or deny |
 | Audit log | Every decision, and whether the hash chain is intact |
@@ -27,7 +27,7 @@ The map follows the files on disk, so pages show your work as you edit.
 
 ## Where things are kept
 
-- Outcome records: `.onus/outcomes.jsonl` (`--outcomes`)
+- Outcome records: `.onus/outcomes.jsonl` (`--outcomes`); when that file does not exist, the `onus/records` branch the GitHub Action keeps (`origin/onus/records`), read-only
 - The audit log: `.onus/audit.jsonl` (`--audit`)
 - Escalation requests: `.onus/escalations/` (`--escalations`), with granted tokens beside them for the agent to collect
 - Submissions from agents: `.onus/submissions/`

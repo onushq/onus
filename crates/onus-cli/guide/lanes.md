@@ -68,6 +68,8 @@ The verdict is `approve`, `reject` with reasons the agent can act on, or `escala
 
 ## Outcomes
 
+The GitHub Action keeps these records for you with `records: true`: outcomes when pull requests close, reverts when the default branch moves, and approvals, audits and incidents from `/onus` comments (`onus help ci`). By hand, or from another system:
+
     onus outcomes record --file outcomes.jsonl --change acme/shop#42 --agent claude-code/sonnet/default \
       --lane auto-merge --verdict approve --judge 1a2b3c4d --result merged --audited
     onus outcomes summary --file outcomes.jsonl

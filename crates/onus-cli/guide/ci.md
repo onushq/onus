@@ -1,6 +1,6 @@
 # Running Onus in CI
 
-Onus only reads the checked-out files, so it is safe on pull requests from forks with read-only permissions.
+Onus only reads the checked-out files, so it is safe on pull requests from forks with read-only permissions. The one thing it writes, with `records: true`, is its own `onus/records` branch.
 
 ## GitHub Actions
 
@@ -18,7 +18,7 @@ The Onus action downloads the release binary for the runner, checks its SHA-256,
           - uses: actions/checkout@v7
             with:
               fetch-depth: 0
-          - uses: onushq/onus/action@v0.9.0
+          - uses: onushq/onus/action@v0.10.0
             id: onus
             with:
               fail-on: rule-violation,secrets
@@ -82,7 +82,7 @@ With `records: true`, the action keeps the track record lanes depend on without 
           - uses: actions/checkout@v7
             with:
               fetch-depth: 0
-          - uses: onushq/onus/action@v0.9.0
+          - uses: onushq/onus/action@v0.10.0
             with:
               records: true
 
@@ -156,7 +156,7 @@ To acknowledge those replies with a 🚀, add a second workflow; the same action
         if: github.event.issue.pull_request && startsWith(github.event.comment.body, '/onus caught')
         runs-on: ubuntu-latest
         steps:
-          - uses: onushq/onus/action@v0.9.0
+          - uses: onushq/onus/action@v0.10.0
 
 The comment also carries the report's metrics line in a hidden HTML comment. `scripts/onus-metrics.sh` in the Onus repository reads all of it back with the GitHub CLI, one JSON line per pull request, or one line of totals with `--summary` (reports, large reports, the share of 👍 on large pull requests, the catch rate, changed lines per row, time to first review):
 
