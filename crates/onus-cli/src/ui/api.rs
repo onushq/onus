@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 use super::State;
 use crate::{doors, envs, lanes};
 
+#[derive(Debug)]
 pub enum Error {
     NotFound(String),
     Failed(anyhow::Error),
@@ -55,6 +56,10 @@ pub fn call(state: &State, name: &str, body: Value) -> Answer {
         "lanes.submit" => lanes_submit(state, body),
         "lanes.classify" => lanes_classify(state, body),
         "lanes.judge" => lanes_judge(state, body),
+        "submissions.list" => submissions_list(state),
+        "submissions.show" => submissions_show(state, body),
+        "submissions.save" => submissions_save(state, body),
+        "submissions.judge" => submissions_judge(state, body),
         "outcomes" => outcomes(state),
         "outcomes.record" => outcomes_record(state, body),
         "outcomes.incident" => outcomes_incident(state, body),
@@ -557,7 +562,7 @@ fn lanes_submit(state: &State, body: Value) -> Answer {
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
     let scope = match q.token.as_deref().filter(|t| !t.trim().is_empty()) {
-        Some(t) => Some(lanes::scope_used(t, &state.keys.join("root.pub"))?),
+        Some(t) => Some(lanes::scope_used(t, &state.public_key)?),
         None => None,
     };
     let approvals = q
@@ -611,6 +616,105 @@ fn lanes_judge(state: &State, body: Value) -> Answer {
     let c = lanes::classify_with(&sub.report, Some(&sub), &config, Some(&state.outcomes))?;
     let j = lanes::judge_submission(&state.root, &sub, &c, &config);
     Ok(json!({ "classification": c, "judgment": j }))
+}
+
+// Submissions handed in by agents, kept as <id>.json with the judge's
+// verdict beside them as <id>.judgment.json.
+
+fn submission_path(state: &State, id: &str, suffix: &str) -> anyhow::Result<PathBuf> {
+    if id.len() < 6 || !id.chars().all(|c| c.is_ascii_hexdigit()) {
+        bail!("`{id}` is not a submission id");
+    }
+    Ok(state.submissions.join(format!("{id}{suffix}")))
+}
+
+fn submissions_save(state: &State, body: Value) -> Answer {
+    let sub = submission_in(body)?;
+    let json = serde_json::to_vec_pretty(&sub)?;
+    let id: String = {
+        use sha2::Digest;
+        sha2::Sha256::digest(&json)[..6]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    };
+    std::fs::create_dir_all(&state.submissions).map_err(anyhow::Error::from)?;
+    std::fs::write(submission_path(state, &id, ".json")?, json).map_err(anyhow::Error::from)?;
+    Ok(json!({ "id": id }))
+}
+
+fn load_submission(state: &State, id: &str) -> Result<onus_lanes::submission::Submission, Error> {
+    let path = submission_path(state, id, ".json")?;
+    let text = std::fs::read_to_string(&path)
+        .map_err(|_| Error::NotFound(format!("no submission {id}")))?;
+    Ok(serde_json::from_str(&text)?)
+}
+
+fn load_judgment(state: &State, id: &str) -> Option<Value> {
+    std::fs::read_to_string(submission_path(state, id, ".judgment.json").ok()?)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+}
+
+fn submissions_list(state: &State) -> Answer {
+    let mut out = Vec::new();
+    if let Ok(dir) = std::fs::read_dir(&state.submissions) {
+        for e in dir.filter_map(Result::ok) {
+            let name = e.file_name().to_string_lossy().to_string();
+            let Some(id) = name.strip_suffix(".json").filter(|n| !n.contains('.')) else {
+                continue;
+            };
+            let Ok(sub) = load_submission(state, id) else {
+                continue;
+            };
+            let at = e
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_secs());
+            let judgment = load_judgment(state, id);
+            out.push(json!({
+                "id": id,
+                "at": at,
+                "base": sub.base,
+                "head": sub.head,
+                "agent": sub.agent,
+                "intent": sub.intent,
+                "rows": sub.report.changes.len(),
+                "needsPerson": sub.report.summary.needs_attention,
+                "evidence": sub.evidence.len(),
+                "task": sub.scope.as_ref().map(|s| s.task.clone()),
+                "verdict": judgment.as_ref().map(|j| j["judgment"]["verdict"].clone()),
+                "lane": judgment.as_ref().map(|j| j["judgment"]["lane"].clone()),
+            }));
+        }
+    }
+    out.sort_by(|a, b| b["at"].as_u64().cmp(&a["at"].as_u64()));
+    Ok(json!({ "dir": state.submissions, "submissions": out }))
+}
+
+#[derive(Deserialize)]
+struct IdIn {
+    id: String,
+}
+
+fn submissions_show(state: &State, body: Value) -> Answer {
+    let q: IdIn = input(body)?;
+    let sub = load_submission(state, &q.id)?;
+    Ok(json!({ "id": q.id, "submission": sub, "judgment": load_judgment(state, &q.id) }))
+}
+
+fn submissions_judge(state: &State, body: Value) -> Answer {
+    let q: IdIn = input(body)?;
+    let sub = load_submission(state, &q.id)?;
+    let out = lanes_judge(state, json!({ "submission": sub }))?;
+    std::fs::write(
+        submission_path(state, &q.id, ".judgment.json")?,
+        serde_json::to_vec_pretty(&out)?,
+    )
+    .map_err(anyhow::Error::from)?;
+    Ok(out)
 }
 
 fn load_outcomes(state: &State) -> anyhow::Result<Vec<onus_lanes::outcomes::Outcome>> {
@@ -744,8 +848,10 @@ fn envs_create(state: &State, body: Value) -> Answer {
         &state.root,
         config.as_ref().and_then(|c| c.config.environment.as_ref()),
     )?;
-    let public = state.keys.join("root.pub");
-    let grants = envs::grants(token.as_deref(), token.as_ref().map(|_| public.as_path()))?;
+    let grants = envs::grants(
+        token.as_deref(),
+        token.as_ref().map(|_| state.public_key.as_path()),
+    )?;
     let name = match q.name.filter(|n| !n.trim().is_empty()) {
         Some(n) => n,
         None => envs::short_commit(&state.root, &q.reference)?,
@@ -856,7 +962,7 @@ fn keys_generate(state: &State) -> Answer {
 }
 
 fn verified(state: &State, token: &str) -> anyhow::Result<onus_doors::token::Verified> {
-    let public = doors::read_key(&state.keys.join("root.pub"))?;
+    let public = doors::read_key(&state.public_key)?;
     onus_doors::token::verify(token, &onus_doors::token::public_key(&public)?)
 }
 
@@ -937,7 +1043,7 @@ fn scope_suggest(state: &State, body: Value) -> Answer {
 // ---------------------------------------------------------------------------
 // Escalations and the audit log
 
-fn request_path(state: &State, id: &str) -> anyhow::Result<PathBuf> {
+pub fn request_path(state: &State, id: &str) -> anyhow::Result<PathBuf> {
     if id.is_empty()
         || !id
             .chars()
@@ -949,7 +1055,7 @@ fn request_path(state: &State, id: &str) -> anyhow::Result<PathBuf> {
 }
 
 /// Decisions on record in the audit log, by request id.
-fn decisions(state: &State) -> BTreeMap<String, Value> {
+pub fn decisions(state: &State) -> BTreeMap<String, Value> {
     let mut out = BTreeMap::new();
     let Ok(entries) = onus_doors::audit::AuditLog::new(&state.audit).verify() else {
         return out;
@@ -1026,6 +1132,17 @@ fn ensure_audit_dir(state: &State) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn keep_token(state: &State, id: &str, token: &str) -> anyhow::Result<()> {
+    doors::keep_token(&request_path(state, id)?, token)
+}
+
+/// A granted token kept for request `id`, if any.
+pub fn kept_token(state: &State, id: &str) -> Option<String> {
+    std::fs::read_to_string(request_path(state, id).ok()?.with_extension("token"))
+        .ok()
+        .map(|t| t.trim().to_string())
+}
+
 fn escalations_decide(state: &State, body: Value) -> Answer {
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
@@ -1063,14 +1180,19 @@ fn escalations_decide(state: &State, body: Value) -> Answer {
                 .unwrap_or_else(|| "npx vitest run {test}".into()),
         });
     ensure_audit_dir(state)?;
-    Ok(doors::decide_request(
+    let id = req.id.clone();
+    let out = doors::decide_request(
         req,
         &original,
         &state.keys.join("root.key"),
         reproduce.as_ref(),
         q.max_blast_radius.unwrap_or(20),
         Some(&state.audit),
-    )?)
+    )?;
+    if let Some(t) = out["token"].as_str() {
+        keep_token(state, &id, t)?;
+    }
+    Ok(out)
 }
 
 fn escalations_grant(state: &State, body: Value) -> Answer {
@@ -1091,6 +1213,7 @@ fn escalations_grant(state: &State, body: Value) -> Answer {
         &q.by,
         Some(&state.audit),
     )?;
+    keep_token(state, &req.id, &token)?;
     Ok(json!({ "token": token }))
 }
 

@@ -12,9 +12,9 @@ It prints an address such as `http://127.0.0.1:4387/#token=…` and opens it.
 | Page | What you can do |
 |---|---|
 | Overview | Map totals, the component graph, uncommitted work, recent commits, what is set up |
-| Map | The component graph, components, files, events and external services; find symbols; per component, symbol and file: owners, public surface, dependents, dependencies, tests, declared invariants, and the impact of a change |
+| Map | The component graph (pan and zoom, by layer or by folder, focus on a component and its neighbours, filter imports, calls and types), a treemap by folder and size, components, files, events and external services; find symbols; per component, symbol and file: owners, public surface, dependents, dependencies, tests, declared invariants, and the impact of a change |
 | Changes | Check uncommitted work (what `onus_check` gives an agent), or report any two refs, with an intent; download Markdown or JSON |
-| Lanes & judge | The lane policy; make a submission with evidence from the store, classify it and run the judge |
+| Lanes & judge | The lane policy; submissions agents handed in over MCP; make a submission with evidence from the store, classify it and run the judge |
 | Environments | Create environments, run commands, browse the evidence store and its artifacts, run a test once |
 | Outcomes | Records, totals per agent setup and judge, the human-lane share and audit miss rate; record outcomes and incidents, find reverts |
 | Tokens & scopes | Generate a root key, plan a task, suggest reads, mint, inspect, check and narrow tokens |
@@ -29,7 +29,8 @@ The map follows the files on disk, so pages show your work as you edit.
 
 - Outcome records: `.onus/outcomes.jsonl` (`--outcomes`)
 - The audit log: `.onus/audit.jsonl` (`--audit`)
-- Escalation requests: `.onus/escalations/` (`--escalations`)
+- Escalation requests: `.onus/escalations/` (`--escalations`), with granted tokens beside them for the agent to collect
+- Submissions from agents: `.onus/submissions/`
 - The root key pair: `~/.onus-keys` (`--keys`)
 - Evidence: the repository's git directory, as for `onus env`
 

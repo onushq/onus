@@ -536,6 +536,22 @@ fn record(audit: Option<&Path>, r: Record) -> Result<()> {
     Ok(())
 }
 
+/// Keeps a granted token beside its request (`<request>.token`), readable
+/// only by its owner, so the agent that asked can collect it
+/// (`onus_escalation`).
+pub fn keep_token(request: &Path, token: &str) -> Result<()> {
+    use std::io::Write;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    writeln!(opts.open(request.with_extension("token"))?, "{token}")?;
+    Ok(())
+}
+
 /// How `decide` reproduces failing-test evidence.
 #[derive(Debug, Clone)]
 pub struct Reproduce {
@@ -677,6 +693,9 @@ pub fn escalation(cmd: EscalationCmd) -> Result<i32> {
                 max_blast_radius,
                 audit.as_deref(),
             )?;
+            if let Some(t) = out["token"].as_str() {
+                keep_token(&request, t)?;
+            }
             println!("{}", serde_json::to_string_pretty(&out)?);
             Ok(if out["decision"] == "granted" { 0 } else { 3 })
         }
@@ -689,10 +708,9 @@ pub fn escalation(cmd: EscalationCmd) -> Result<i32> {
         } => {
             let req = load_request(&request)?;
             let original = token.verify()?;
-            println!(
-                "{}",
-                grant_request(&req, &original, &key, &by, audit.as_deref())?
-            );
+            let minted = grant_request(&req, &original, &key, &by, audit.as_deref())?;
+            keep_token(&request, &minted)?;
+            println!("{minted}");
             Ok(0)
         }
         EscalationCmd::Deny {

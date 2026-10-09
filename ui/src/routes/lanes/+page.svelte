@@ -22,7 +22,7 @@
 	import RefPicker from '#lib/components/RefPicker.svelte';
 	import { ago, download, short } from '#lib/format.ts';
 	import { Task } from '#lib/task.svelte.ts';
-	import type { Classification, Judgment, LanesPolicy, Run, Submission } from '#lib/types.ts';
+	import type { Classification, Judgment, Lane, LanesPolicy, Run, Submission } from '#lib/types.ts';
 	import ChevronDown from '@lucide/svelte/icons/chevron-down';
 	import CircleCheck from '@lucide/svelte/icons/circle-check';
 	import CircleDashed from '@lucide/svelte/icons/circle-dashed';
@@ -39,6 +39,23 @@
 	const submission = new Task<Submission>();
 	const classification = new Task<Classification>();
 	const judgment = new Task<{ classification: Classification; judgment: Judgment }>();
+	const saved = new Task<{ dir: string; submissions: SavedSubmission[] }>();
+	let savedId = $state('');
+
+	interface SavedSubmission {
+		id: string;
+		at: number;
+		base: string;
+		head: string;
+		agent: { tool: string; model: string; config: string };
+		intent?: string | null;
+		rows: number;
+		needsPerson: number;
+		evidence: number;
+		task?: string | null;
+		verdict?: string | null;
+		lane?: Lane | null;
+	}
 
 	let base = $state(page.url.searchParams.get('base') ?? '');
 	let head = $state(page.url.searchParams.get('head') ?? 'HEAD');
@@ -51,6 +68,7 @@
 
 	onMount(() => {
 		policy.run(() => api<LanesPolicy>('lanes.policy'));
+		saved.run(() => api('submissions.list'));
 		runs.run(() => api('evidence.list'));
 		app.loadRefs().then((r) => {
 			if (!base) base = r?.default ?? 'main';
@@ -63,8 +81,19 @@
 		evidence = on ? [...evidence, id] : evidence.filter((e) => e !== id);
 	}
 
+	async function openSaved(id: string) {
+		const r = await api<{ submission: Submission; judgment: { classification: Classification; judgment: Judgment } | null }>('submissions.show', { id });
+		savedId = id;
+		submission.value = r.submission;
+		judgment.reset();
+		if (r.judgment) judgment.value = r.judgment;
+		classification.run(() => api<Classification>('lanes.classify', { submission: r.submission }));
+		document.getElementById('submission')?.scrollIntoView({ behavior: 'smooth' });
+	}
+
 	async function submit(e: SubmitEvent) {
 		e.preventDefault();
+		savedId = '';
 		classification.reset();
 		judgment.reset();
 		const sub = await submission.run(() =>
@@ -82,9 +111,12 @@
 		if (sub) classification.run(() => api<Classification>('lanes.classify', { submission: sub }));
 	}
 
-	function judge() {
+	async function judge() {
 		const sub = submission.value;
-		if (sub) judgment.run(() => api('lanes.judge', { submission: sub }));
+		if (!sub) return;
+		// A submission an agent handed in keeps its verdict beside it.
+		const r = await judgment.run(() => (savedId ? api('submissions.judge', { id: savedId }) : api('lanes.judge', { submission: sub })));
+		if (r && savedId) saved.run(() => api('submissions.list'));
 	}
 
 	const p = $derived(policy.value?.policy);
@@ -159,6 +191,28 @@
 	{/if}
 </Card>
 
+{#if saved.value?.submissions.length}
+	<Card title="Submitted by agents" subtitle="Handed in with onus_submit over MCP; open one to classify and judge it here." pad={false}>
+		<Table.Root>
+			<Table.Header><Table.Row><Table.Head class="pl-4">Submission</Table.Head><Table.Head>Agent</Table.Head><Table.Head>Task</Table.Head><Table.Head>Change</Table.Head><Table.Head class="text-right">Rows</Table.Head><Table.Head class="text-right">Evidence</Table.Head><Table.Head>Verdict</Table.Head><Table.Head class="pr-4"></Table.Head></Table.Row></Table.Header>
+			<Table.Body>
+				{#each saved.value.submissions as s (s.id)}
+					<Table.Row class={savedId === s.id ? 'bg-muted/60' : ''}>
+						<Table.Cell class="pl-4"><span class="font-mono text-xs">{s.id}</span><div class="text-xs text-muted-foreground">{ago(s.at)}</div></Table.Cell>
+						<Table.Cell class="font-mono text-xs">{s.agent.tool}{s.agent.model ? `/${s.agent.model}` : ''}</Table.Cell>
+						<Table.Cell class="text-xs">{s.task ?? '–'}</Table.Cell>
+						<Table.Cell class="font-mono text-xs">{short(s.base)} → {short(s.head)}</Table.Cell>
+						<Table.Cell class="text-right tabular-nums">{s.rows}{#if s.needsPerson}<span class="ml-1 text-xs text-signal-foreground">({s.needsPerson} person)</span>{/if}</Table.Cell>
+						<Table.Cell class="text-right tabular-nums">{s.evidence}</Table.Cell>
+						<Table.Cell>{#if s.verdict}<Badge tone={verdictTone(s.verdict)}>{s.verdict}</Badge>{:else}<span class="text-xs text-muted-foreground">not judged</span>{/if}</Table.Cell>
+						<Table.Cell class="pr-4 text-right"><Button variant="outline" size="xs" onclick={() => openSaved(s.id)}>Open</Button></Table.Cell>
+					</Table.Row>
+				{/each}
+			</Table.Body>
+		</Table.Root>
+	</Card>
+{/if}
+
 <Card title="Submit a change" subtitle="What a reviewer needs and nothing of the author's reasoning.">
 	<form class="grid gap-5" onsubmit={submit}>
 		<div class="grid gap-3 md:grid-cols-2">
@@ -213,7 +267,7 @@
 
 {#if submission.value}
 	{@const sub = submission.value}
-	<div class="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+	<div id="submission" class="grid scroll-mt-16 gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
 		<Card title="Lane">
 			{#if classification.value}<ClassificationView classification={classification.value} />{:else if classification.error}<ErrorBox error={classification.error} />{:else}<Loading />{/if}
 		</Card>

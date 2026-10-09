@@ -9,7 +9,7 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use common::{copy_dir, fixture};
+use common::{apply_overlay, copy_dir, fixture};
 use onus_cli::session::Session;
 use onus_map::FactsCache;
 
@@ -173,12 +173,24 @@ fn mcp_serves_the_map_tools_over_stdio() {
             "onus_component",
             "onus_dependencies",
             "onus_dependents",
+            "onus_env_create",
+            "onus_env_destroy",
+            "onus_env_run",
+            "onus_envs",
+            "onus_escalate",
+            "onus_escalation",
+            "onus_evidence",
             "onus_file",
             "onus_find",
             "onus_impact",
             "onus_invariants",
+            "onus_judge",
+            "onus_lanes",
+            "onus_outcomes",
             "onus_owners",
+            "onus_run_test",
             "onus_status",
+            "onus_submit",
             "onus_symbol",
             "onus_tests_for"
         ]
@@ -458,4 +470,137 @@ fn mcp_with_a_task_token_answers_only_within_its_read_scope() {
             .to_string()
             .contains("services/billing/src/discount.ts")
     );
+}
+
+#[test]
+fn agents_hand_in_changes_and_ask_for_more_through_mcp() {
+    let repo = shop_repo();
+    let r = repo.path();
+    // A change on a branch, committed as an agent would.
+    git(r, &["checkout", "-q", "-b", "feature/sms"]);
+    apply_overlay(&fixture().join("scenarios/s1-sms-alerts"), r);
+    git(r, &["add", "-A"]);
+    git(r, &["commit", "-q", "-m", "sms"]);
+    let keys = tempfile::tempdir().unwrap();
+    let onus = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_onus"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    onus(&["token", "keygen", "--out", keys.path().to_str().unwrap()]);
+    let plan = keys.path().join("plan.yaml");
+    std::fs::write(
+        &plan,
+        "task: sms-alerts\nwrites: [\"services/notifications/**\"]\n",
+    )
+    .unwrap();
+    let key = keys.path().join("root.key");
+    let token = onus(&[
+        "token",
+        "mint",
+        "--plan",
+        plan.to_str().unwrap(),
+        "--key",
+        key.to_str().unwrap(),
+    ]);
+    let public = keys.path().join("root.pub");
+    let mut mcp = Mcp::start_with(
+        r,
+        &["--token", &token, "--key-public", public.to_str().unwrap()],
+    );
+
+    let (failed, policy) = mcp.tool("onus_lanes", serde_json::json!({}));
+    assert!(!failed, "{policy}");
+    assert_eq!(policy["configured"], false);
+
+    // Submitting: the report, the lane and why, under the token's scope.
+    let (failed, sub) = mcp.tool(
+        "onus_submit",
+        serde_json::json!({
+            "base": "main",
+            "head": "feature/sms",
+            "intent": "summary: Text customers when their order ships\ntouches: [notifications]",
+            "agent_tool": "claude-code",
+        }),
+    );
+    assert!(!failed, "{sub}");
+    // The change also edits user-preferences, outside the token's scope: the
+    // scope the server attached, not one the agent chose, blocks it.
+    assert_eq!(sub["lane"], "blocked", "{sub}");
+    assert!(
+        sub["why"].to_string().contains("outside its token's scope"),
+        "{sub}"
+    );
+    assert_eq!(sub["scope"]["task"], "sms-alerts");
+    let id = sub["id"].as_str().unwrap();
+    assert!(r.join(format!(".onus/submissions/{id}.json")).exists());
+    assert!(sub["rows"].as_array().unwrap().len() >= 3);
+
+    // Asking for more: filed as the token's task, whatever the agent says.
+    let (failed, esc) = mcp.tool(
+        "onus_escalate",
+        serde_json::json!({
+            "scopes": ["write:path:services/orders/src/**"],
+            "evidence": ["rationale:the shipped event must carry the phone number"],
+            "reason": "the event needs the phone",
+            "task": "someone-else",
+        }),
+    );
+    assert!(!failed, "{esc}");
+    assert_eq!(esc["task"], "sms-alerts");
+    let eid = esc["id"].as_str().unwrap().to_string();
+    let (_, state) = mcp.tool("onus_escalation", serde_json::json!({ "id": eid }));
+    assert_eq!(state["state"], "open", "{state}");
+
+    // A person grants it from the command line; the agent collects the token.
+    let request = r.join(format!(".onus/escalations/{eid}.json"));
+    onus(&[
+        "escalation",
+        "grant",
+        request.to_str().unwrap(),
+        "--token",
+        &token,
+        "--key-public",
+        public.to_str().unwrap(),
+        "--key",
+        key.to_str().unwrap(),
+        "--by",
+        "@lead",
+        "--audit",
+        r.join(".onus/audit.jsonl").to_str().unwrap(),
+    ]);
+    let (_, state) = mcp.tool("onus_escalation", serde_json::json!({ "id": eid }));
+    assert_eq!(state["state"], "granted", "{state}");
+    let granted = state["token"].as_str().unwrap();
+    let check = Command::new(env!("CARGO_BIN_EXE_onus"))
+        .args([
+            "token",
+            "check",
+            "--token",
+            granted,
+            "--key-public",
+            public.to_str().unwrap(),
+            "write:path:services/orders/src/ship.ts",
+        ])
+        .output()
+        .unwrap();
+    assert!(check.status.success());
+
+    // Outcomes are for reading only; nothing lets an agent record its own.
+    let (failed, outcomes) = mcp.tool("onus_outcomes", serde_json::json!({}));
+    assert!(!failed, "{outcomes}");
+
+    // Without actions, only questions.
+    drop(mcp);
+    let mut quiet = Mcp::start_with(r, &["--no-actions"]);
+    let (failed, msg) = quiet.tool("onus_lanes", serde_json::json!({}));
+    assert!(failed);
+    assert!(msg.as_str().unwrap().contains("only answers questions"));
 }

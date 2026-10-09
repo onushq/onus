@@ -7,7 +7,7 @@
 //! through DNS rebinding), and the API only with the session's token, which
 //! the opened URL carries in its fragment.
 
-mod api;
+pub mod api;
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -61,7 +61,48 @@ pub struct State {
     pub outcomes: PathBuf,
     pub audit: PathBuf,
     pub escalations: PathBuf,
+    /// Submissions handed in by agents (`onus_submit`) and their judgments.
+    pub submissions: PathBuf,
     pub keys: PathBuf,
+    /// The root public key that verifies task tokens.
+    pub public_key: PathBuf,
+}
+
+/// Where a repository's records are kept unless flags say otherwise.
+#[derive(Debug, Default)]
+pub struct Places {
+    pub outcomes: Option<PathBuf>,
+    pub audit: Option<PathBuf>,
+    pub escalations: Option<PathBuf>,
+    pub keys: Option<PathBuf>,
+    pub public_key: Option<PathBuf>,
+}
+
+impl State {
+    /// The state for the worktree `root`; records go to `.onus/` in it.
+    pub fn new(root: PathBuf, token: String, port: u16, places: Places) -> State {
+        let dot = root.join(".onus");
+        let keys = places
+            .keys
+            .or_else(|| home().map(|h| h.join(".onus-keys")))
+            .unwrap_or_else(|| dot.join("keys"));
+        State {
+            token,
+            port,
+            server: onus_cli::daemon::Server::new(),
+            outcomes: places
+                .outcomes
+                .unwrap_or_else(|| dot.join("outcomes.jsonl")),
+            audit: places.audit.unwrap_or_else(|| dot.join("audit.jsonl")),
+            escalations: places
+                .escalations
+                .unwrap_or_else(|| dot.join("escalations")),
+            submissions: dot.join("submissions"),
+            public_key: places.public_key.unwrap_or_else(|| keys.join("root.pub")),
+            keys,
+            root,
+        }
+    }
 }
 
 /// 128 random bits as hex, from the same generator as root keys.
@@ -82,7 +123,6 @@ pub fn run(args: UiArgs) -> Result<i32> {
     };
     let root = onus_cli::daemon::canonical(&onus_cli::daemon::worktree_root(&start))
         .with_context(|| format!("cannot open {}", start.display()))?;
-    let dot = root.join(".onus");
     let token = args.session_token.clone().unwrap_or_else(random_token);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
@@ -94,19 +134,18 @@ pub fn run(args: UiArgs) -> Result<i32> {
             .await
             .with_context(|| format!("cannot listen on {addr} (try --port 0)"))?;
         let bound = listener.local_addr()?;
-        let state = Arc::new(State {
-            root: root.clone(),
-            token: token.clone(),
-            port: bound.port(),
-            server: onus_cli::daemon::Server::new(),
-            outcomes: args.outcomes.unwrap_or_else(|| dot.join("outcomes.jsonl")),
-            audit: args.audit.unwrap_or_else(|| dot.join("audit.jsonl")),
-            escalations: args.escalations.unwrap_or_else(|| dot.join("escalations")),
-            keys: args
-                .keys
-                .or_else(|| home().map(|h| h.join(".onus-keys")))
-                .unwrap_or_else(|| dot.join("keys")),
-        });
+        let state = Arc::new(State::new(
+            root.clone(),
+            token.clone(),
+            bound.port(),
+            Places {
+                outcomes: args.outcomes,
+                audit: args.audit,
+                escalations: args.escalations,
+                keys: args.keys,
+                public_key: None,
+            },
+        ));
         let url = format!("http://127.0.0.1:{}/#token={token}", bound.port());
         // The URL is the first line on stdout, so scripts and tests can read it.
         println!("{url}");
