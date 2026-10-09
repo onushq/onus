@@ -1,4 +1,6 @@
 <script lang="ts">
+	import * as C from '$lib/components/ui/card/index.js';
+	import { cn } from '$lib/utils.js';
 	import type { Snippet } from 'svelte';
 
 	let {
@@ -7,7 +9,8 @@
 		actions,
 		children,
 		pad = true,
-		tone
+		tone,
+		class: className
 	}: {
 		title?: string;
 		subtitle?: string;
@@ -15,51 +18,23 @@
 		children: Snippet;
 		pad?: boolean;
 		tone?: 'signal';
+		class?: string;
 	} = $props();
 </script>
 
-<section class="card" class:signal={tone === 'signal'}>
+<C.Root
+	class={cn(
+		'min-w-0 gap-0 py-0 shadow-xs',
+		tone === 'signal' && 'border-signal/60 ring-1 ring-signal/20',
+		className
+	)}
+>
 	{#if title || actions}
-		<header>
-			<div class="titles">
-				{#if title}<h2>{title}</h2>{/if}
-				{#if subtitle}<p class="muted small">{subtitle}</p>{/if}
-			</div>
-			{#if actions}<div class="row">{@render actions()}</div>{/if}
-		</header>
+		<C.Header class="border-b px-4 py-3 [.border-b]:pb-3">
+			{#if title}<C.Title class="text-sm font-semibold">{title}</C.Title>{/if}
+			{#if subtitle}<C.Description class="text-xs break-words">{subtitle}</C.Description>{/if}
+			{#if actions}<C.Action class="flex items-center gap-2">{@render actions()}</C.Action>{/if}
+		</C.Header>
 	{/if}
-	<div class="body" class:pad>{@render children()}</div>
-</section>
-
-<style>
-	.card {
-		background: var(--surface);
-		border: 1px solid var(--line);
-		border-radius: var(--radius-m);
-		min-width: 0;
-	}
-	.card.signal {
-		border-color: var(--signal);
-		box-shadow: inset 3px 0 0 var(--signal);
-	}
-	header {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: var(--space-3);
-		padding: var(--space-3) var(--space-4);
-		border-bottom: 1px solid var(--line);
-		flex-wrap: wrap;
-	}
-	.titles {
-		display: grid;
-		gap: 2px;
-		min-width: 0;
-	}
-	.body {
-		overflow-x: auto;
-	}
-	.pad {
-		padding: var(--space-4);
-	}
-</style>
+	<C.Content class={cn('overflow-x-auto px-0', pad && 'p-4')}>{@render children()}</C.Content>
+</C.Root>

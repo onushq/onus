@@ -38,26 +38,26 @@
 </script>
 
 <div class="shape">
-	<div class="mono sig">{head}{shape.members?.length ? ' {' : ''}</div>
+	<div class="sig font-mono">{head}{shape.members?.length ? ' {' : ''}</div>
 	{#if shape.members?.length}
 		<table>
 			<tbody>
 				{#each shape.members as m (m.name + m.line)}
 					<tr>
-						<td class="mono">
+						<td class="font-mono">
 							{m.readonly ? 'readonly ' : ''}<strong>{m.name}</strong>{m.optional ? '?' : ''}{m.kind === 'method' ? '()' : ''}
 						</td>
-						<td class="mono type">{m.typeText ?? ''}</td>
-						<td class="faint small">
+						<td class="type font-mono">{m.typeText ?? ''}</td>
+						<td class="text-xs text-muted-foreground">
 							{#if file}<a href="/map/file?path={encodeURIComponent(file)}&line={m.line}">:{m.line}</a>{:else}:{m.line}{/if}
 						</td>
 					</tr>
 				{/each}
 			</tbody>
 		</table>
-		<div class="mono sig">{'}'}</div>
+		<div class="sig font-mono">{'}'}</div>
 	{/if}
-	{#if shape.unverified}<p class="small muted">Part of this shape is inferred rather than written.</p>{/if}
+	{#if shape.unverified}<p class="text-xs text-muted-foreground">Part of this shape is inferred rather than written.</p>{/if}
 </div>
 
 <style>
@@ -70,11 +70,12 @@
 		overflow-wrap: anywhere;
 	}
 	table {
+		width: auto;
 		border-collapse: collapse;
-		margin-left: var(--space-4);
+		margin-left: 16px;
 	}
 	td {
-		padding: 2px var(--space-3) 2px 0;
+		padding: 2px 12px 2px 0;
 		vertical-align: top;
 	}
 	.type {

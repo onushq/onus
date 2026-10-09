@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { Button } from '$lib/components/ui/button/index.js';
+	import BookOpen from '@lucide/svelte/icons/book-open';
 	import type { Snippet } from 'svelte';
 
 	let {
@@ -11,29 +13,13 @@
 
 <svelte:head><title>{title} · Onus</title></svelte:head>
 
-<div class="head">
-	<div class="text">
-		<h1>{title}</h1>
-		{#if children}<p class="muted">{@render children()}</p>{/if}
+<div class="flex flex-wrap items-start justify-between gap-4">
+	<div class="grid max-w-3xl gap-1">
+		<h1 class="text-xl font-semibold tracking-tight">{title}</h1>
+		{#if children}<p class="text-sm text-muted-foreground">{@render children()}</p>{/if}
 	</div>
-	<div class="row">
+	<div class="flex items-center gap-2">
 		{#if actions}{@render actions()}{/if}
-		{#if guide}<a class="button ghost" href="/guide/{guide}">Guide</a>{/if}
+		{#if guide}<Button variant="ghost" size="sm" href="/guide/{guide}"><BookOpen />Guide</Button>{/if}
 	</div>
 </div>
-
-<style>
-	.head {
-		display: flex;
-		justify-content: space-between;
-		align-items: flex-start;
-		gap: var(--space-4);
-		margin-bottom: var(--space-5);
-		flex-wrap: wrap;
-	}
-	.text {
-		display: grid;
-		gap: var(--space-1);
-		max-width: 760px;
-	}
-</style>

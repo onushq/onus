@@ -1,0 +1,10 @@
+{
+	"//": "Only for the shadcn-svelte CLI, which cannot read SvelteKit 3's `$app/tsconfig`.",
+	"compilerOptions": {
+		"baseUrl": ".",
+		"paths": {
+			"$lib": ["./src/lib"],
+			"$lib/*": ["./src/lib/*"]
+		}
+	}
+}

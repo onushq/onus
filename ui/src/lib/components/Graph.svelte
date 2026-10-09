@@ -33,7 +33,8 @@
 		}
 		const byDegree = (a: string, b: string) => (degree.get(b) ?? 0) - (degree.get(a) ?? 0) || a.localeCompare(b);
 		let ids: string[];
-		if (focus && graph.components.some((c) => c.id === focus)) {
+		const focused = focus && graph.components.some((c) => c.id === focus) ? focus : '';
+		if (focused) {
 			const near = new Set<string>();
 			for (const e of graph.edges) {
 				if (e.from === focus) near.add(e.to);
@@ -46,8 +47,11 @@
 		const keep = new Set(ids);
 		return {
 			components: graph.components.filter((c) => keep.has(c.id)),
-			edges: graph.edges.filter((e) => keep.has(e.from) && keep.has(e.to)),
-			hidden: focus ? 0 : graph.components.length - keep.size
+			// Focused, only the focus's own edges: a clear picture of its neighbourhood.
+			edges: graph.edges.filter(
+				(e) => keep.has(e.from) && keep.has(e.to) && (!focused || e.from === focused || e.to === focused)
+			),
+			hidden: focused ? 0 : graph.components.length - keep.size
 		};
 	});
 
@@ -184,10 +188,10 @@
 	>
 		<defs>
 			<marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-				<path d="M0,0 L10,5 L0,10 z" fill="var(--ink-faint)" />
+				<path d="M0,0 L10,5 L0,10 z" fill="var(--faint)" />
 			</marker>
 			<marker id="arrow-hot" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-				<path d="M0,0 L10,5 L0,10 z" fill="var(--ink)" />
+				<path d="M0,0 L10,5 L0,10 z" fill="var(--foreground)" />
 			</marker>
 		</defs>
 		{#each shown.edges as e (e.from + '>' + e.to)}
@@ -232,16 +236,16 @@
 <style>
 	.note {
 		font-size: 12px;
-		color: var(--ink-muted);
-		margin: 0 0 var(--space-2);
+		color: var(--muted-foreground);
+		margin: 0 0 8px;
 	}
 	.wrap {
 		overflow: auto;
 		max-height: 70vh;
 		background:
-			radial-gradient(circle, var(--line) 1px, transparent 1px) 0 0 / 18px 18px,
-			var(--sunken);
-		border-radius: var(--radius-s);
+			radial-gradient(circle, var(--border) 1px, transparent 1px) 0 0 / 18px 18px,
+			var(--muted);
+		border-radius: var(--radius);
 	}
 	svg {
 		display: block;
@@ -249,12 +253,12 @@
 	}
 	.edge {
 		fill: none;
-		stroke: var(--ink-faint);
+		stroke: var(--faint);
 		opacity: 0.7;
 		transition: opacity 0.15s;
 	}
 	.edge.hot {
-		stroke: var(--ink);
+		stroke: var(--foreground);
 		opacity: 1;
 	}
 	.edge.dim {
@@ -271,8 +275,8 @@
 		outline: none;
 	}
 	rect {
-		fill: var(--surface);
-		stroke: var(--line);
+		fill: var(--card);
+		stroke: var(--border);
 		stroke-width: 1.5;
 	}
 	rect.hot {
@@ -280,15 +284,15 @@
 	}
 	.node:hover rect,
 	.node:focus-visible rect {
-		stroke: var(--ink);
+		stroke: var(--foreground);
 	}
 	.name {
 		font-weight: 650;
 		font-size: 13px;
-		fill: var(--ink);
+		fill: var(--foreground);
 	}
 	.meta {
 		font-size: 11px;
-		fill: var(--ink-muted);
+		fill: var(--muted-foreground);
 	}
 </style>

@@ -50,6 +50,8 @@ npm run dev                                               # then open http://loc
 npm run check && npm run build                            # before a pull request; rebuild onus-cli to embed it
 ```
 
+The pages use Tailwind CSS and shadcn-svelte components (`ui/src/lib/components/ui/`), themed in `ui/src/app.css`. Add a component with `npx shadcn-svelte@latest add <name>`; `components.json` points the CLI at `tsconfig.shadcn.json`, because it cannot read SvelteKit 3's `$app/tsconfig`.
+
 To measure performance on a generated workspace of about 200,000 lines:
 
 ```sh

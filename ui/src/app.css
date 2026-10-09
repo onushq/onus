@@ -1,0 +1,214 @@
+@import 'tailwindcss';
+@import 'tw-animate-css';
+
+@custom-variant dark (&:is(.dark *));
+
+/*
+  Onus colors on shadcn's tokens. Everything is ink and cool grey; signal
+  (amber) appears only where a person needs to look.
+*/
+:root {
+	--radius: 0.625rem;
+	--background: #ffffff;
+	--foreground: #0b1a24;
+	--card: #ffffff;
+	--card-foreground: #0b1a24;
+	--popover: #ffffff;
+	--popover-foreground: #0b1a24;
+	--primary: #0b1a24;
+	--primary-foreground: #f4f6f7;
+	--secondary: #eef1f3;
+	--secondary-foreground: #0b1a24;
+	--muted: #f1f3f5;
+	--muted-foreground: #56656f;
+	--accent: #eef1f3;
+	--accent-foreground: #0b1a24;
+	--destructive: #c8372d;
+	--border: #e3e8eb;
+	--input: #dde3e7;
+	--ring: #8796a1;
+	--chart-1: #0b1a24;
+	--chart-2: #2d6cb5;
+	--chart-3: #1f8a55;
+	--chart-4: #ffb224;
+	--chart-5: #c8372d;
+	--sidebar: #f4f6f7;
+	--sidebar-foreground: #0b1a24;
+	--sidebar-primary: #0b1a24;
+	--sidebar-primary-foreground: #f4f6f7;
+	--sidebar-accent: #e7ebee;
+	--sidebar-accent-foreground: #0b1a24;
+	--sidebar-border: #e3e8eb;
+	--sidebar-ring: #8796a1;
+
+	--signal: #ffb224;
+	--signal-soft: #fff4dc;
+	--signal-foreground: #8a5a00;
+	--success: #1f8a55;
+	--success-soft: #e3f4ea;
+	--info: #2d6cb5;
+	--info-soft: #e5eef9;
+	--danger-soft: #fbe6e3;
+	--faint: #8796a1;
+}
+
+.dark {
+	--background: #0e1a24;
+	--foreground: #eef2f4;
+	--card: #122130;
+	--card-foreground: #eef2f4;
+	--popover: #122130;
+	--popover-foreground: #eef2f4;
+	--primary: #eef2f4;
+	--primary-foreground: #0b1620;
+	--secondary: #1a2b38;
+	--secondary-foreground: #eef2f4;
+	--muted: #172734;
+	--muted-foreground: #96a6b1;
+	--accent: #1c2e3b;
+	--accent-foreground: #eef2f4;
+	--destructive: #f07a6e;
+	--border: #213342;
+	--input: #2a3d4c;
+	--ring: #5d6e7a;
+	--chart-1: #eef2f4;
+	--chart-2: #7fb0ea;
+	--chart-3: #4cc38a;
+	--chart-4: #ffb224;
+	--chart-5: #f07a6e;
+	--sidebar: #08121a;
+	--sidebar-foreground: #eef2f4;
+	--sidebar-primary: #ffb224;
+	--sidebar-primary-foreground: #0b1a24;
+	--sidebar-accent: #15232e;
+	--sidebar-accent-foreground: #eef2f4;
+	--sidebar-border: #1a2a36;
+	--sidebar-ring: #5d6e7a;
+
+	--signal-soft: #33270f;
+	--signal-foreground: #ffc65c;
+	--success: #4cc38a;
+	--success-soft: #0f2e1e;
+	--info: #7fb0ea;
+	--info-soft: #132a42;
+	--danger-soft: #3a1613;
+	--faint: #5d6e7a;
+}
+
+@theme inline {
+	--font-sans: 'Archivo Variable', 'Archivo', ui-sans-serif, system-ui, sans-serif;
+	--font-mono: 'Geist Mono Variable', 'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+	--radius-sm: calc(var(--radius) - 4px);
+	--radius-md: calc(var(--radius) - 2px);
+	--radius-lg: var(--radius);
+	--radius-xl: calc(var(--radius) + 4px);
+	--color-background: var(--background);
+	--color-foreground: var(--foreground);
+	--color-card: var(--card);
+	--color-card-foreground: var(--card-foreground);
+	--color-popover: var(--popover);
+	--color-popover-foreground: var(--popover-foreground);
+	--color-primary: var(--primary);
+	--color-primary-foreground: var(--primary-foreground);
+	--color-secondary: var(--secondary);
+	--color-secondary-foreground: var(--secondary-foreground);
+	--color-muted: var(--muted);
+	--color-muted-foreground: var(--muted-foreground);
+	--color-accent: var(--accent);
+	--color-accent-foreground: var(--accent-foreground);
+	--color-destructive: var(--destructive);
+	--color-border: var(--border);
+	--color-input: var(--input);
+	--color-ring: var(--ring);
+	--color-chart-1: var(--chart-1);
+	--color-chart-2: var(--chart-2);
+	--color-chart-3: var(--chart-3);
+	--color-chart-4: var(--chart-4);
+	--color-chart-5: var(--chart-5);
+	--color-sidebar: var(--sidebar);
+	--color-sidebar-foreground: var(--sidebar-foreground);
+	--color-sidebar-primary: var(--sidebar-primary);
+	--color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+	--color-sidebar-accent: var(--sidebar-accent);
+	--color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+	--color-sidebar-border: var(--sidebar-border);
+	--color-sidebar-ring: var(--sidebar-ring);
+	--color-signal: var(--signal);
+	--color-signal-soft: var(--signal-soft);
+	--color-signal-foreground: var(--signal-foreground);
+	--color-success: var(--success);
+	--color-success-soft: var(--success-soft);
+	--color-info: var(--info);
+	--color-info-soft: var(--info-soft);
+	--color-danger-soft: var(--danger-soft);
+	--color-faint: var(--faint);
+}
+
+@layer base {
+	* {
+		@apply border-border outline-ring/50;
+	}
+	body {
+		@apply bg-sidebar text-sm text-foreground antialiased;
+		font-feature-settings: 'ss01';
+	}
+	code,
+	kbd,
+	pre,
+	.mono {
+		@apply font-mono;
+	}
+	:not(pre) > code {
+		@apply rounded bg-muted px-1 py-0.5 text-[0.85em] break-words;
+	}
+	pre {
+		@apply overflow-auto rounded-lg border bg-muted/60 p-3 text-xs leading-relaxed;
+	}
+	a {
+		@apply underline-offset-4;
+	}
+}
+
+/* The guide's Markdown. */
+.prose {
+	@apply max-w-3xl text-sm leading-7;
+}
+.prose h1 {
+	@apply mb-4 text-2xl font-semibold tracking-tight;
+}
+.prose h2 {
+	@apply mt-10 mb-3 border-b pb-2 text-lg font-semibold tracking-tight;
+}
+.prose h3 {
+	@apply mt-6 mb-2 font-semibold;
+}
+.prose p,
+.prose ul,
+.prose ol,
+.prose pre,
+.prose table,
+.prose blockquote {
+	@apply my-3;
+}
+.prose ul {
+	@apply list-disc pl-6;
+}
+.prose ol {
+	@apply list-decimal pl-6;
+}
+.prose a {
+	@apply underline;
+}
+.prose table {
+	@apply w-full text-sm;
+}
+.prose th,
+.prose td {
+	@apply border px-3 py-1.5 text-left align-top;
+}
+.prose th {
+	@apply bg-muted font-medium;
+}
+.prose blockquote {
+	@apply border-l-2 pl-4 text-muted-foreground;
+}

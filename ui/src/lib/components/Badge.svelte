@@ -1,58 +1,32 @@
 <script lang="ts">
+	import { cn } from '$lib/utils.js';
 	import type { Snippet } from 'svelte';
+
+	export type Tone = 'neutral' | 'signal' | 'add' | 'del' | 'info' | 'ink' | 'faint';
 
 	let {
 		tone = 'neutral',
 		children,
-		title
-	}: {
-		tone?: 'neutral' | 'signal' | 'add' | 'del' | 'info' | 'ink' | 'faint';
-		children: Snippet;
-		title?: string;
-	} = $props();
+		title,
+		class: className
+	}: { tone?: Tone; children: Snippet; title?: string; class?: string } = $props();
+
+	const tones: Record<Tone, string> = {
+		neutral: 'bg-muted text-muted-foreground',
+		signal: 'bg-signal-soft text-signal-foreground ring-1 ring-inset ring-signal/40',
+		add: 'bg-success-soft text-success',
+		del: 'bg-danger-soft text-destructive',
+		info: 'bg-info-soft text-info',
+		ink: 'bg-primary text-primary-foreground',
+		faint: 'text-muted-foreground ring-1 ring-inset ring-border'
+	};
 </script>
 
-<span class="badge {tone}" {title}>{@render children()}</span>
-
-<style>
-	.badge {
-		display: inline-flex;
-		align-items: center;
-		gap: 4px;
-		height: 20px;
-		padding: 0 7px;
-		border-radius: var(--radius-pill);
-		font-size: 11.5px;
-		font-weight: 600;
-		white-space: nowrap;
-		background: var(--sunken);
-		color: var(--ink-muted);
-		border: 1px solid transparent;
-	}
-	.signal {
-		background: var(--signal-soft);
-		color: var(--signal-ink);
-		border-color: color-mix(in srgb, var(--signal) 45%, transparent);
-	}
-	.add {
-		background: var(--add-soft);
-		color: var(--add);
-	}
-	.del {
-		background: var(--del-soft);
-		color: var(--del);
-	}
-	.info {
-		background: var(--info-soft);
-		color: var(--info);
-	}
-	.ink {
-		background: var(--ink);
-		color: var(--canvas);
-	}
-	.faint {
-		background: transparent;
-		border-color: var(--line);
-		color: var(--ink-faint);
-	}
-</style>
+<span
+	{title}
+	class={cn(
+		'inline-flex h-5 w-fit shrink-0 items-center gap-1 rounded-full px-2 text-[11px] font-medium whitespace-nowrap [&>svg]:size-3',
+		tones[tone],
+		className
+	)}>{@render children()}</span
+>

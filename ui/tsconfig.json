@@ -4,6 +4,10 @@
 	"compilerOptions": {
 		"strict": true,
 		"skipLibCheck": true,
-		"sourceMap": true
+		"sourceMap": true,
+		"paths": {
+			"$lib": ["./src/lib"],
+			"$lib/*": ["./src/lib/*"]
+		}
 	}
 }

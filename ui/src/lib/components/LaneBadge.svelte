@@ -7,22 +7,8 @@
 		lane === 'auto-merge' ? 'add' : lane === 'judge' ? 'info' : lane === 'human' ? 'signal' : 'del'
 	);
 	const label = $derived(
-		lane === 'auto-merge'
-			? 'auto-merge'
-			: lane === 'judge'
-				? 'judge'
-				: lane === 'human'
-					? 'needs a person'
-					: 'blocked'
+		lane === 'auto-merge' ? 'auto-merge' : lane === 'judge' ? 'judge' : lane === 'human' ? 'needs a person' : 'blocked'
 	);
 </script>
 
-<span class:large><Badge {tone}>{label}</Badge></span>
-
-<style>
-	.large :global(.badge) {
-		height: 26px;
-		padding: 0 12px;
-		font-size: 13px;
-	}
-</style>
+<Badge {tone} class={large ? 'h-7 px-3 text-sm' : ''}>{label}</Badge>

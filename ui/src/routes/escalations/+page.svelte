@@ -1,17 +1,30 @@
 <script lang="ts">
+	import { Button } from '$lib/components/ui/button/index.js';
+	import * as Collapsible from '$lib/components/ui/collapsible/index.js';
+	import { Input } from '$lib/components/ui/input/index.js';
+	import { Textarea } from '$lib/components/ui/textarea/index.js';
 	import { api } from '#lib/api.ts';
 	import Badge from '#lib/components/Badge.svelte';
 	import Card from '#lib/components/Card.svelte';
 	import Copy from '#lib/components/Copy.svelte';
 	import Empty from '#lib/components/Empty.svelte';
 	import ErrorBox from '#lib/components/ErrorBox.svelte';
+	import Field from '#lib/components/Field.svelte';
 	import Inline from '#lib/components/Inline.svelte';
 	import Loading from '#lib/components/Loading.svelte';
+	import NativeSelect from '#lib/components/NativeSelect.svelte';
 	import PageHead from '#lib/components/PageHead.svelte';
 	import { ago } from '#lib/format.ts';
 	import { Task } from '#lib/task.svelte.ts';
 	import type { EscalationItem } from '#lib/types.ts';
+	import Ban from '@lucide/svelte/icons/ban';
+	import Check from '@lucide/svelte/icons/check';
+	import ChevronDown from '@lucide/svelte/icons/chevron-down';
+	import ChevronRight from '@lucide/svelte/icons/chevron-right';
+	import Scale from '@lucide/svelte/icons/scale';
+	import Send from '@lucide/svelte/icons/send';
 	import { onMount } from 'svelte';
+	import { toast } from 'svelte-sonner';
 
 	const list = new Task<{ dir: string; requests: EscalationItem[] }>();
 	const created = new Task<unknown>();
@@ -33,114 +46,96 @@
 		);
 		if (r) {
 			form = { task: form.task, kind: 'permission', scopes: '', evidence: '', reason: '' };
+			toast.success('Request filed');
 			refresh();
 		}
 	}
 
-	async function run(name: string, body: Record<string, unknown>) {
+	async function run(name: string, body: Record<string, unknown>, done: string) {
 		const r = await acted.run(() => api(name, body));
-		if (r) refresh();
+		if (r) {
+			toast.success(done);
+			refresh();
+		}
 	}
 
 	const grade = (n: number) => ['', 'failing test', 'trace', 'map path', 'draft diff', 'rationale'][n] ?? `grade ${n}`;
 	const decisionTone = (d: string) => (d === 'granted' ? 'add' : d === 'denied' ? 'del' : 'signal');
+	const open = $derived((list.value?.requests ?? []).filter((r) => !r.decision || r.decision.decision === 'needs-person').length);
 </script>
 
 <PageHead title="Escalations" guide="scopes">
-	When a task needs more than its token allows, it asks with evidence. Low-risk requests with a reproduced
-	failing test are granted by policy; everything else goes to a person.
+	When a task needs more than its token allows, it asks with evidence. Low-risk requests with a reproduced failing test are granted by policy; everything else goes to a person.
 </PageHead>
 
-<div class="stack">
-	<Card title="Ask for more" subtitle="Evidence strongest first: failing-test:&lt;file&gt;, trace:&lt;file&gt;, map-path:&lt;path&gt;, draft-diff:&lt;file&gt;, rationale:&lt;text&gt;.">
-		<form class="stack" onsubmit={create}>
-			<div class="grid-3">
-				<label class="field">Task<input bind:value={form.task} required /></label>
-				<label class="field">Kind
-					<select bind:value={form.kind}>
-						<option value="permission">permission</option>
-						<option value="broken-test">broken test</option>
-						<option value="contradictory-spec">contradictory spec</option>
-						<option value="impossible-task">impossible task</option>
-					</select>
-				</label>
-				<label class="field">Why<input bind:value={form.reason} required /></label>
-			</div>
-			<div class="grid-2">
-				<label class="field">Rights asked for, one per line<textarea rows="3" bind:value={form.scopes} placeholder="write:path:services/orders/src/**"></textarea></label>
-				<label class="field">Evidence, one per line<textarea rows="3" bind:value={form.evidence} placeholder="failing-test:services/orders/src/ship.test.ts"></textarea></label>
-			</div>
-			<div class="row"><button class="primary" type="submit" disabled={created.running}>File the request</button></div>
-			{#if created.error}<ErrorBox error={created.error} />{/if}
-		</form>
-	</Card>
-
-	<Card title="Requests" subtitle={list.value?.dir} pad={false}>
+<div class="grid gap-4 xl:grid-cols-[minmax(0,1fr)_400px]">
+	<Card title="Requests" subtitle={list.value ? `${list.value.requests.length} on file, ${open} waiting · ${list.value.dir}` : undefined} pad={false} class="self-start">
 		{#if list.error}
-			<div style="padding: 16px"><ErrorBox error={list.error} /></div>
+			<div class="p-4"><ErrorBox error={list.error} /></div>
 		{:else if !list.value}
-			<div style="padding: 16px"><Loading /></div>
+			<div class="p-4"><Loading /></div>
 		{:else if !list.value.requests.length}
-			<div style="padding: 16px"><Empty title="No requests" /></div>
+			<div class="p-4"><Empty title="No requests">Agents file them with <code>onus escalate</code>; you can file one here.</Empty></div>
 		{:else}
 			{#each list.value.requests as item (item.request.id)}
 				{@const r = item.request}
-				<div class="req">
-					<button class="ghost head" onclick={() => (openId = openId === r.id ? null : r.id)}>
-						<strong>{r.task}</strong>
-						<span class="mono small">{r.scopes.join(', ') || r.kind}</span>
-						<span class="row">
+				<div class="border-b last:border-b-0">
+					<button class="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-muted/40" onclick={() => (openId = openId === r.id ? null : r.id)}>
+						<ChevronRight class="size-4 shrink-0 text-muted-foreground transition-transform {openId === r.id ? 'rotate-90' : ''}" />
+						<div class="grid min-w-0 flex-1 gap-0.5">
+							<span class="font-medium">{r.task} <span class="font-normal text-muted-foreground">· {r.kind}</span></span>
+							<span class="truncate font-mono text-xs text-muted-foreground">{r.scopes.join(', ') || r.reason}</span>
+						</div>
+						<div class="flex shrink-0 items-center gap-1.5">
 							{#if r.sensitive.length}<Badge tone="signal">{r.sensitive.join(', ')}</Badge>{/if}
-							<Badge tone="faint">blast radius {r.blastRadius}</Badge>
+							<Badge tone="faint">blast {r.blastRadius}</Badge>
 							{#if item.decision}<Badge tone={decisionTone(item.decision.decision)}>{item.decision.decision}</Badge>{:else}<Badge tone="info">open</Badge>{/if}
-						</span>
-						<span class="faint small">{ago(r.at)}</span>
+							<span class="hidden w-16 text-right text-xs text-muted-foreground sm:inline">{ago(r.at)}</span>
+						</div>
 					</button>
 					{#if openId === r.id}
-						<div class="body stack">
-							<p>{r.reason}</p>
-							<ul class="small">
+						<div class="grid gap-4 bg-muted/20 px-11 pt-1 pb-4">
+							<p class="text-sm">{r.reason}</p>
+							<ul class="grid gap-1.5 text-sm">
 								{#each r.evidence as e, i (i)}
-									<li>
+									<li class="flex flex-wrap items-center gap-2">
 										<Badge tone={e.grade === 1 ? 'add' : 'faint'}>{grade(e.grade)}</Badge>
-										<span class="mono">{e.reference}</span>
+										<span class="font-mono text-xs">{e.reference}</span>
 										{#if e.reproduced !== undefined && e.reproduced !== null}<Badge tone={e.reproduced ? 'add' : 'del'}>{e.reproduced ? 'reproduced' : 'not reproduced'}</Badge>{/if}
 									</li>
-								{:else}<li class="muted">No evidence</li>{/each}
+								{:else}<li class="text-muted-foreground">No evidence</li>{/each}
 							</ul>
-							{#if item.decision}
-								<p class="small muted">{item.decision.decision} by {item.decision.by}: {item.decision.reason}</p>
-							{/if}
-							<div class="grid-2">
-								<label class="field">The task's token<input class="mono" bind:value={act.token} /></label>
-								<label class="field">You (for a person's decision)<input bind:value={act.by} placeholder="@team-orders" /></label>
+							{#if item.decision}<p class="text-xs text-muted-foreground">{item.decision.decision} by {item.decision.by}: {item.decision.reason}</p>{/if}
+							<div class="grid gap-3 md:grid-cols-2">
+								<Field label="The task's token"><Input class="font-mono" bind:value={act.token} /></Field>
+								<Field label="You (for a person's decision)"><Input bind:value={act.by} placeholder="@team-orders" /></Field>
 							</div>
-							<details>
-								<summary class="small muted">How to reproduce failing tests</summary>
-								<div class="grid-2" style="margin-top: 8px">
-									<label class="field">At<input class="mono" bind:value={act.reproduceAt} /></label>
-									<label class="field">Image<input class="mono" bind:value={act.image} /></label>
-									<label class="field">Setup<input class="mono" bind:value={act.setup} placeholder="npm ci" /></label>
-									<label class="field">Test command<input class="mono" bind:value={act.testCommand} /></label>
-								</div>
-							</details>
-							<div class="row">
-								<button disabled={!act.token || acted.running} onclick={() => run('escalations.decide', { id: r.id, token: act.token, reproduceAt: act.reproduceAt, image: act.image, setup: act.setup, testCommand: act.testCommand })}>Decide by policy</button>
-								<button class="primary" disabled={!act.token || !act.by || acted.running} onclick={() => run('escalations.grant', { id: r.id, token: act.token, by: act.by })}>Grant</button>
-								<input bind:value={act.reason} placeholder="Why not" />
-								<button class="danger" disabled={!act.by || !act.reason || acted.running} onclick={() => run('escalations.deny', { id: r.id, by: act.by, reason: act.reason })}>Deny</button>
+							<Collapsible.Root>
+								<Collapsible.Trigger class="group flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"><ChevronDown class="size-3.5 transition-transform group-data-[state=open]:rotate-180" />How to reproduce failing tests</Collapsible.Trigger>
+								<Collapsible.Content class="mt-2 grid gap-3 md:grid-cols-2">
+									<Field label="At"><Input class="font-mono" bind:value={act.reproduceAt} /></Field>
+									<Field label="Image"><Input class="font-mono" bind:value={act.image} /></Field>
+									<Field label="Setup"><Input class="font-mono" bind:value={act.setup} placeholder="npm ci" /></Field>
+									<Field label="Test command"><Input class="font-mono" bind:value={act.testCommand} /></Field>
+								</Collapsible.Content>
+							</Collapsible.Root>
+							<div class="flex flex-wrap items-center gap-2">
+								<Button variant="outline" disabled={!act.token || acted.running} onclick={() => run('escalations.decide', { id: r.id, token: act.token, reproduceAt: act.reproduceAt, image: act.image, setup: act.setup, testCommand: act.testCommand }, 'Decided by policy')}><Scale />Decide by policy</Button>
+								<Button disabled={!act.token || !act.by || acted.running} onclick={() => run('escalations.grant', { id: r.id, token: act.token, by: act.by }, 'Granted')}><Check />Grant</Button>
+								<Input class="w-48" bind:value={act.reason} placeholder="Why not" />
+								<Button variant="destructive" disabled={!act.by || !act.reason || acted.running} onclick={() => run('escalations.deny', { id: r.id, by: act.by, reason: act.reason }, 'Denied and logged')}><Ban />Deny</Button>
 							</div>
 							{#if acted.running}<Loading label="Deciding; reproducing a failing test runs a container…" />{/if}
 							{#if acted.error}<ErrorBox error={acted.error} />{/if}
 							{#if acted.value}
 								{#if acted.value.decision}
-									<p><Badge tone={decisionTone(acted.value.decision)}>{acted.value.decision}</Badge> {#each acted.value.reasons ?? [] as r (r)}<Inline text={r} /> {/each}</p>
+									<div class="flex flex-wrap items-center gap-2 text-sm"><Badge tone={decisionTone(acted.value.decision)}>{acted.value.decision}</Badge>{#each acted.value.reasons ?? [] as reason (reason)}<span class="text-muted-foreground"><Inline text={reason} /></span>{/each}</div>
 								{/if}
 								{#if acted.value.token}
-									<div class="spread"><span class="small muted">The new token: the original rights plus exactly what was asked</span><Copy text={acted.value.token} /></div>
-									<pre class="token">{acted.value.token}</pre>
+									<div class="flex items-center justify-between"><span class="text-xs text-muted-foreground">The new token: the original rights plus exactly what was asked</span><Copy text={acted.value.token} /></div>
+									<pre class="max-h-32 break-all whitespace-pre-wrap">{acted.value.token}</pre>
 								{/if}
-								{#if acted.value.denied}<p class="small">Denied and logged.</p>{/if}
+								{#if acted.value.denied}<p class="text-sm text-muted-foreground">Denied and logged.</p>{/if}
 							{/if}
 						</div>
 					{/if}
@@ -148,40 +143,25 @@
 			{/each}
 		{/if}
 	</Card>
-</div>
 
-<style>
-	.req {
-		border-bottom: 1px solid var(--line);
-	}
-	.req:last-child {
-		border-bottom: none;
-	}
-	.head {
-		width: 100%;
-		height: auto;
-		padding: var(--space-3) var(--space-4);
-		display: grid;
-		grid-template-columns: auto 1fr auto auto;
-		gap: var(--space-3);
-		text-align: left;
-		border-radius: 0;
-		font-weight: 400;
-	}
-	.body {
-		padding: 0 var(--space-4) var(--space-4);
-	}
-	.body ul {
-		margin: 0;
-		padding-left: 1.2em;
-		display: grid;
-		gap: 4px;
-	}
-	.token {
-		white-space: pre-wrap;
-		word-break: break-all;
-	}
-	details summary {
-		cursor: pointer;
-	}
-</style>
+	<Card title="Ask for more" subtitle="Evidence, strongest first: failing-test:, trace:, map-path:, draft-diff:, rationale:" class="self-start">
+		<form class="grid gap-3" onsubmit={create}>
+			<div class="grid grid-cols-2 gap-3">
+				<Field label="Task"><Input bind:value={form.task} required /></Field>
+				<Field label="Kind">
+					<NativeSelect bind:value={form.kind}>
+						<option value="permission">permission</option>
+						<option value="broken-test">broken test</option>
+						<option value="contradictory-spec">contradictory spec</option>
+						<option value="impossible-task">impossible task</option>
+					</NativeSelect>
+				</Field>
+			</div>
+			<Field label="Why"><Input bind:value={form.reason} required /></Field>
+			<Field label="Rights asked for, one per line"><Textarea rows={3} class="font-mono text-xs" bind:value={form.scopes} placeholder="write:path:services/orders/src/**" /></Field>
+			<Field label="Evidence, one per line"><Textarea rows={3} class="font-mono text-xs" bind:value={form.evidence} placeholder="failing-test:services/orders/src/ship.test.ts" /></Field>
+			<div><Button type="submit" disabled={created.running}><Send />File the request</Button></div>
+			{#if created.error}<ErrorBox error={created.error} />{/if}
+		</form>
+	</Card>
+</div>

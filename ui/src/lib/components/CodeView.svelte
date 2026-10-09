@@ -5,66 +5,20 @@
 
 	$effect(() => {
 		if (!from || !container) return;
-		const el = container.querySelector<HTMLElement>(`[data-line="${from}"]`);
-		el?.scrollIntoView({ block: 'center' });
+		container.querySelector<HTMLElement>(`[data-line="${from}"]`)?.scrollIntoView({ block: 'center' });
 	});
 </script>
 
-<div class="code" bind:this={container}>
-	<table>
+<div bind:this={container} class="max-h-[75vh] overflow-auto rounded-xl border bg-card font-mono text-[12.5px] leading-6 shadow-xs">
+	<table class="w-full border-collapse">
 		<tbody>
 			{#each lines as line, i (i)}
-				<tr data-line={i + 1} class:hit={from && i + 1 >= from && i + 1 <= (to || from)}>
-					<td class="n">{i + 1}</td>
-					<td class="l"><pre>{line || ' '}</pre></td>
+				{@const hit = from > 0 && i + 1 >= from && i + 1 <= (to || from)}
+				<tr data-line={i + 1} class={hit ? 'bg-signal-soft' : 'hover:bg-muted/50'}>
+					<td class="sticky left-0 w-px bg-inherit pr-3 pl-4 text-right whitespace-nowrap select-none {hit ? 'text-signal-foreground' : 'text-muted-foreground/60'}">{i + 1}</td>
+					<td class="pr-4 whitespace-pre">{line || ' '}</td>
 				</tr>
 			{/each}
 		</tbody>
 	</table>
 </div>
-
-<style>
-	.code {
-		border: 1px solid var(--line);
-		border-radius: var(--radius-s);
-		background: var(--sunken);
-		overflow: auto;
-		max-height: 75vh;
-		font-family: var(--font-mono);
-		font-size: 12.5px;
-	}
-	table {
-		border-collapse: collapse;
-		width: 100%;
-	}
-	td {
-		padding: 0;
-		vertical-align: top;
-	}
-	.n {
-		text-align: right;
-		padding: 0 var(--space-3);
-		color: var(--ink-faint);
-		user-select: none;
-		width: 1%;
-		white-space: nowrap;
-		position: sticky;
-		left: 0;
-		background: var(--sunken);
-	}
-	pre {
-		background: transparent;
-		border: none;
-		border-radius: 0;
-		padding: 0 var(--space-3);
-		overflow: visible;
-		font-size: inherit;
-		line-height: 1.6;
-	}
-	tr.hit td {
-		background: var(--signal-soft);
-	}
-	tr.hit .n {
-		color: var(--signal-ink);
-	}
-</style>

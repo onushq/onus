@@ -7,28 +7,21 @@
 	let { classification }: { classification: Classification } = $props();
 </script>
 
-<div class="stack tight">
-	<div class="row"><span class="muted">Lane</span> <LaneBadge lane={classification.lane} large /></div>
-	<ol class="applied">
+<div class="grid gap-4">
+	<div class="flex items-center gap-3">
+		<span class="text-sm text-muted-foreground">Lane</span>
+		<LaneBadge lane={classification.lane} large />
+	</div>
+	<ol class="relative grid gap-3 border-l pl-5">
 		{#each classification.applied as a, i (i)}
-			<li>
-				<Badge tone="faint">{a.source}</Badge>
-				<LaneBadge lane={a.lane} />
-				<span><Inline text={a.reason} /></span>
+			<li class="relative text-sm">
+				<span class="absolute top-1.5 -left-[25px] size-2.5 rounded-full border-2 border-background bg-muted-foreground/40"></span>
+				<div class="flex flex-wrap items-center gap-1.5">
+					<Badge tone="faint">{a.source}</Badge>
+					<LaneBadge lane={a.lane} />
+				</div>
+				<p class="mt-1 text-muted-foreground"><Inline text={a.reason} /></p>
 			</li>
 		{/each}
 	</ol>
 </div>
-
-<style>
-	.applied {
-		margin: 0;
-		padding-left: 1.2em;
-		display: grid;
-		gap: var(--space-2);
-		font-size: 13px;
-	}
-	.applied li > :global(*) {
-		margin-right: 6px;
-	}
-</style>

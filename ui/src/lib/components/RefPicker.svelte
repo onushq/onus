@@ -1,5 +1,7 @@
 <script lang="ts">
+	import { Input } from '$lib/components/ui/input/index.js';
 	import { app } from '#lib/app.svelte.ts';
+	import Field from './Field.svelte';
 
 	let {
 		value = $bindable(),
@@ -13,15 +15,10 @@
 	});
 </script>
 
-<label class="field">
-	{label}
-	<input list="{id}-refs" bind:value {placeholder} spellcheck="false" autocomplete="off" />
+<Field {label}>
+	<Input list="{id}-refs" bind:value {placeholder} spellcheck={false} autocomplete="off" class="font-mono" />
 	<datalist id="{id}-refs">
-		{#each app.refs?.refs ?? [] as r (r.name)}
-			<option value={r.name}>{r.subject}</option>
-		{/each}
-		{#each app.refs?.commits ?? [] as c (c.sha)}
-			<option value={c.sha}>{c.subject}</option>
-		{/each}
+		{#each app.refs?.refs ?? [] as r (r.name)}<option value={r.name}>{r.subject}</option>{/each}
+		{#each app.refs?.commits ?? [] as c (c.sha)}<option value={c.sha}>{c.subject}</option>{/each}
 	</datalist>
-</label>
+</Field>
