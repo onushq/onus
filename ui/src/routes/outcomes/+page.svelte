@@ -18,10 +18,13 @@
 	import PageHead from '#lib/components/PageHead.svelte';
 	import Stat from '#lib/components/Stat.svelte';
 	import Tabs from '#lib/components/Tabs.svelte';
-	import { ago, idHref, percent } from '#lib/format.ts';
+	import WeeklyChart from '#lib/components/WeeklyChart.svelte';
+	import { ago, idHref, percent, short } from '#lib/format.ts';
 	import { Task } from '#lib/task.svelte.ts';
 	import type { Lane, Outcomes, Tally } from '#lib/types.ts';
 	import Activity from '@lucide/svelte/icons/activity';
+	import GitBranch from '@lucide/svelte/icons/git-branch';
+	import RefreshCw from '@lucide/svelte/icons/refresh-cw';
 	import GitMerge from '@lucide/svelte/icons/git-merge';
 	import SearchCheck from '@lucide/svelte/icons/search-check';
 	import Siren from '@lucide/svelte/icons/siren';
@@ -73,6 +76,14 @@
 		}
 	}
 
+	async function fetchRecords() {
+		const v = await action.run(() => api<Outcomes>('outcomes.fetch'));
+		if (v) {
+			data.value = v;
+			toast.success('Records fetched from origin');
+		}
+	}
+
 	async function reverts(e: SubmitEvent) {
 		e.preventDefault();
 		const v = await action.run(() => api<Outcomes>('outcomes.ingestReverts', { since }));
@@ -107,6 +118,69 @@
 		<Stat label="Human-lane share" value={percent(s.humanShare)} icon={UserRound} hint="the review budget" />
 		<Stat label="Audit miss rate" value={percent(s.auditMissRate)} icon={SearchCheck} hint="audits that found a miss" tone={s.auditMissRate ? 'signal' : undefined} />
 	</div>
+
+	{@const src = data.value.source}
+	<div class="flex flex-wrap items-center gap-3 rounded-xl border bg-card px-4 py-3 text-sm shadow-xs">
+		<GitBranch class="size-4 text-muted-foreground" />
+		{#if src.kind === 'branch'}
+			<span>From <code>{src.ref}</code>, kept by the GitHub Action{src.updatedAt ? ` · updated ${ago(src.updatedAt)}` : ''}.</span>
+			<span class="text-muted-foreground">People add approvals, audits and incidents with <code>/onus</code> comments on pull requests.</span>
+		{:else if src.kind === 'file'}
+			<span>From <code>{src.path}</code>, recorded here or with <code>onus outcomes</code>.</span>
+		{:else}
+			<span>No records yet. Turn on <code>records: true</code> in the Onus GitHub Action and outcomes are recorded as pull requests close (<a class="underline" href="/guide/ci">guide</a>), or record them below.</span>
+		{/if}
+		<Button variant="outline" size="sm" class="ml-auto" onclick={fetchRecords} disabled={action.running}><RefreshCw />Fetch from origin</Button>
+	</div>
+
+	<div class="grid gap-4 xl:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+		<Card title="Changes by week" subtitle="By the lane they took, from when they merged or closed.">
+			{#if data.value.trend.length}
+				<WeeklyChart weeks={data.value.trend.slice(-16)} />
+			{:else}<Empty title="No changes yet" />{/if}
+		</Card>
+		<Card title="Agent setups" subtitle="Auto-merge needs {data.value.minRecord} merged changes on record and no recent incident." pad={false}>
+			{#if data.value.agents.length}
+				<Table.Root>
+					<Table.Header><Table.Row><Table.Head class="pl-4">Setup</Table.Head><Table.Head class="text-right">Merged</Table.Head><Table.Head class="pr-4">Auto-merge</Table.Head></Table.Row></Table.Header>
+					<Table.Body>
+						{#each data.value.agents as a (a.agent)}
+							<Table.Row>
+								<Table.Cell class="pl-4 font-mono text-xs">{a.agent}</Table.Cell>
+								<Table.Cell class="text-right tabular-nums">{a.merged}</Table.Cell>
+								<Table.Cell class="pr-4">
+									{#if a.eligible}<Badge tone="add">eligible</Badge>
+									{:else if a.recentIncidents}<Badge tone="del">recent incident</Badge>
+									{:else}<Badge tone="faint">needs {a.needs} more</Badge>{/if}
+								</Table.Cell>
+							</Table.Row>
+						{/each}
+					</Table.Body>
+				</Table.Root>
+			{:else}<div class="p-4"><Empty title="No agent setups yet" /></div>{/if}
+		</Card>
+	</div>
+
+	{#if data.value.inFlight.length}
+		<Card title="In flight" subtitle="Pull requests classified and not closed yet." pad={false}>
+			<Table.Root>
+				<Table.Header><Table.Row><Table.Head class="pl-4">Change</Table.Head><Table.Head>Agent</Table.Head><Table.Head>Lane</Table.Head><Table.Head>Verdict</Table.Head><Table.Head>Approved rows</Table.Head><Table.Head>Head</Table.Head><Table.Head class="pr-4">Updated</Table.Head></Table.Row></Table.Header>
+				<Table.Body>
+					{#each data.value.inFlight as p (p.change)}
+						<Table.Row>
+							<Table.Cell class="pl-4 font-mono text-xs">{p.change}</Table.Cell>
+							<Table.Cell class="font-mono text-xs">{p.agent.tool}{p.agent.model ? `/${p.agent.model}` : ''}</Table.Cell>
+							<Table.Cell><LaneBadge lane={p.lane} /></Table.Cell>
+							<Table.Cell class="text-xs">{p.verdict ?? '–'}</Table.Cell>
+							<Table.Cell class="text-xs">{p.approvals?.length ?? 0}</Table.Cell>
+							<Table.Cell class="font-mono text-xs">{short(p.head)}</Table.Cell>
+							<Table.Cell class="pr-4 text-xs text-muted-foreground">{ago(p.at)}</Table.Cell>
+						</Table.Row>
+					{/each}
+				</Table.Body>
+			</Table.Root>
+		</Card>
+	{/if}
 
 	<div class="grid gap-4 xl:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
 		<Card title="By agent setup" subtitle="Each setup's record decides whether it may auto-merge." pad={false}>
@@ -161,6 +235,9 @@
 		</div>
 	</div>
 
+	{#if data.value.source.kind === 'branch'}
+		<p class="text-xs text-muted-foreground">These records are kept by the GitHub Action; recording here would write a separate local file. Use <code>/onus audit</code> and <code>/onus incident</code> on the pull request instead.</p>
+	{:else}
 	<Card pad={false}>
 		<div class="border-b px-4 py-3">
 			<Tabs bind:value={tab} tabs={[{ id: 'record', label: 'Record an outcome' }, { id: 'incident', label: 'Record an incident' }, { id: 'reverts', label: 'Find reverts' }]} />
@@ -206,13 +283,14 @@
 			{#if action.error}<div class="mt-3"><ErrorBox error={action.error} /></div>{/if}
 		</div>
 	</Card>
+	{/if}
 
-	<Card title="Records" subtitle={data.value.file} pad={false}>
+	<Card title="Records" subtitle={data.value.source.kind === 'branch' ? `${data.value.source.ref}:outcomes.jsonl` : data.value.file} pad={false}>
 		{#if data.value.records.length}
 			<Table.Root>
 				<Table.Header><Table.Row><Table.Head class="pl-4">When</Table.Head><Table.Head>Change</Table.Head><Table.Head>Agent setup</Table.Head><Table.Head>Lane</Table.Head><Table.Head>Verdict</Table.Head><Table.Head>Result</Table.Head><Table.Head>Audit</Table.Head><Table.Head class="pr-4">Note</Table.Head></Table.Row></Table.Header>
 				<Table.Body>
-					{#each [...data.value.records].reverse() as o, i (i)}
+					{#each [...data.value.records].reverse().sort((a, b) => b.at - a.at) as o, i (i)}
 						<Table.Row>
 							<Table.Cell class="pl-4 text-xs whitespace-nowrap text-muted-foreground">{ago(o.at)}</Table.Cell>
 							<Table.Cell class="font-mono text-xs">{o.change}</Table.Cell>

@@ -1,10 +1,14 @@
 name: Onus report
 description: Report the changes in meaning of a pull request, as a sticky comment and a job summary.
 
-# Two events:
-# - pull_request: report on the change (and keep the comment up to date).
-# - issue_comment: acknowledge `/onus caught <note>` replies, which record that
-#   the report surfaced something the diff hid (see `onus help ci`).
+# Events:
+# - pull_request: report on the change (and keep the comment up to date);
+#   with records, classify it with its agent's track record and, when it
+#   closes, record the outcome.
+# - issue_comment: acknowledge `/onus caught <note>`; with records, act on
+#   `/onus approve`, `/onus audit` and `/onus incident`.
+# - push (to the default branch), with records: record reverts.
+# See `onus help ci`.
 author: Onus
 branding:
   icon: eye
@@ -67,6 +71,31 @@ inputs:
       Required checks still apply. Needs contents: write and pull-requests: write.
     required: false
     default: 'false'
+  records:
+    description: >-
+      'true' to keep outcome records on a branch of the repository (records-branch): each pull
+      request is classified with its agent's track record, its outcome is recorded when it closes,
+      reverts are recorded on pushes to the default branch, and people record approvals, audits and
+      incidents with /onus comments. Implies lanes. Needs contents: write (and actions: write to
+      re-run the check after /onus approve). See `onus help ci`.
+    required: false
+    default: 'false'
+  records-branch:
+    description: The branch that holds the records.
+    required: false
+    default: onus/records
+  judge:
+    description: >-
+      'true' (with records) to run the verifying judge when the lane is judge: it re-runs the
+      evidence in containers and runs held-out checks. Needs Docker, which GitHub's Linux runners have.
+    required: false
+    default: 'false'
+  evidence:
+    description: >-
+      Test runs to submit as evidence, as a glob of JSON files from onus run-test or onus env run
+      made earlier in the job (with records).
+    required: false
+    default: ''
   plugins:
     description: >-
       A plugins file's contents (YAML), for example the Svelte plugin that ships with Onus:
@@ -148,7 +177,10 @@ runs:
 
     - name: Install onus
       id: install
-      if: github.event_name != 'issue_comment'
+      if: >-
+        (github.event_name == 'pull_request' && (github.event.action != 'closed' || inputs.records == 'true')) ||
+        (inputs.records == 'true' && (github.event_name == 'push' ||
+        (github.event_name == 'issue_comment' && startsWith(github.event.comment.body, '/onus'))))
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github-token }}
@@ -206,7 +238,7 @@ runs:
         echo "$dir/onus-$target" >> "$GITHUB_PATH"
 
     - name: Restore the base map
-      if: github.event_name != 'issue_comment' && inputs.cache == 'true' && inputs.base != ''
+      if: github.event_name == 'pull_request' && github.event.action != 'closed' && inputs.cache == 'true' && inputs.base != ''
       uses: actions/cache@v5
       with:
         path: ${{ runner.temp }}/onus-map-cache
@@ -217,7 +249,7 @@ runs:
 
     - name: Report
       id: report
-      if: github.event_name != 'issue_comment'
+      if: github.event_name == 'pull_request' && github.event.action != 'closed'
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       env:
@@ -314,7 +346,9 @@ runs:
 
     - name: Lane
       id: lane
-      if: github.event_name != 'issue_comment' && inputs.lanes == 'true'
+      if: >-
+        github.event_name == 'pull_request' && github.event.action != 'closed' &&
+        (inputs.lanes == 'true' || inputs.records == 'true')
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       env:
@@ -322,8 +356,40 @@ runs:
         REPORT: ${{ steps.report.outputs.report }}
         MD: ${{ steps.report.outputs.markdown }}
         CONFIG: ${{ inputs.config }}
+        RECORDS: ${{ inputs.records }}
+        RECORDS_BRANCH: ${{ inputs.records-branch }}
+        JUDGE: ${{ inputs.judge }}
+        EVIDENCE: ${{ inputs.evidence }}
+        BASE: ${{ inputs.base }}
+        HEAD: ${{ inputs.head }}
+        CHANGE: ${{ github.repository }}#${{ github.event.pull_request.number }}
+        BRANCH: ${{ github.event.pull_request.head.ref }}
+        AUTHOR: ${{ github.event.pull_request.user.login }}
+        PR_BODY: ${{ github.event.pull_request.body }}
       run: |
         set -euo pipefail
+        if [ "$RECORDS" = true ] && "$ONUS" ci --help > /dev/null 2>&1; then
+          dir="$RUNNER_TEMP/onus-records"
+          out="$RUNNER_TEMP/onus/ci"
+          printf '%s' "$PR_BODY" > "$RUNNER_TEMP/onus/pr-body.md"
+          "$ONUS" ci records pull --dir "$dir" --branch "$RECORDS_BRANCH"
+          args=(--base "$BASE" --head "$HEAD" --change "$CHANGE" --branch "$BRANCH" --author "$AUTHOR"
+            --body-file "$RUNNER_TEMP/onus/pr-body.md" --report "$REPORT" --records "$dir" --out "$out")
+          [ -n "$CONFIG" ] && args+=(--config "$CONFIG")
+          [ "$JUDGE" = true ] && args+=(--judge)
+          if [ -n "$EVIDENCE" ]; then
+            shopt -s nullglob globstar
+            for f in $EVIDENCE; do args+=(--evidence "$f"); done
+          fi
+          summary=$("$ONUS" ci pr "${args[@]}")
+          # Pull requests from forks get a read-only token: classified, not recorded.
+          "$ONUS" ci records push --dir "$dir" --branch "$RECORDS_BRANCH" --message "$CHANGE classified" ||
+            echo "::warning::Cannot push the records to $RECORDS_BRANCH (a read-only token on a fork?)."
+          cat "$out/lane.md" >> "$MD"
+          cat "$out/lane.md" >> "$GITHUB_STEP_SUMMARY"
+          echo "lane=$(jq -r .lane <<< "$summary")" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
         if ! "$ONUS" classify --help > /dev/null 2>&1; then
           echo "::notice::This Onus version has no lanes (0.7 and later)."
           exit 0
@@ -341,7 +407,7 @@ runs:
 
     - name: Apply the lane
       if: >-
-        github.event_name != 'issue_comment' && inputs.apply-lane == 'true' &&
+        github.event_name == 'pull_request' && inputs.apply-lane == 'true' &&
         steps.lane.outputs.lane != '' && github.event.pull_request.number &&
         github.event.pull_request.head.repo.full_name == github.repository
       shell: bash
@@ -363,7 +429,7 @@ runs:
 
     - name: Auto-merge
       if: >-
-        github.event_name != 'issue_comment' && inputs.auto-merge == 'true' &&
+        github.event_name == 'pull_request' && inputs.auto-merge == 'true' &&
         steps.lane.outputs.lane == 'auto-merge' && github.event.pull_request.number
       shell: bash
       env:
@@ -374,7 +440,7 @@ runs:
 
     - name: Comment
       if: >-
-        github.event_name != 'issue_comment' &&
+        github.event_name == 'pull_request' && github.event.action != 'closed' &&
         inputs.comment == 'true' && github.event.pull_request.number &&
         github.event.pull_request.head.repo.full_name == github.repository
       shell: bash
@@ -407,7 +473,7 @@ runs:
         fi
 
     - name: Fail on findings
-      if: github.event_name != 'issue_comment' && steps.report.outputs.failed == 'true'
+      if: github.event_name == 'pull_request' && steps.report.outputs.failed == 'true'
       shell: bash
       env:
         FAIL_ON: ${{ inputs.fail-on }}
@@ -417,9 +483,92 @@ runs:
 
     - name: Fail when blocked
       if: >-
-        github.event_name != 'issue_comment' && inputs.apply-lane == 'true' &&
+        github.event_name == 'pull_request' && inputs.apply-lane == 'true' &&
         steps.lane.outputs.lane == 'blocked'
       shell: bash
       run: |
         echo "::error::Onus put this change in the blocked lane (see the report)"
         exit 2
+
+    - name: Record the outcome
+      if: github.event_name == 'pull_request' && github.event.action == 'closed' && inputs.records == 'true'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        ONUS: ${{ steps.install.outputs.onus }}
+        RECORDS_BRANCH: ${{ inputs.records-branch }}
+        CHANGE: ${{ github.repository }}#${{ github.event.pull_request.number }}
+        MERGED: ${{ github.event.pull_request.merged }}
+        COMMIT: ${{ github.event.pull_request.merge_commit_sha }}
+      run: |
+        set -euo pipefail
+        dir="$RUNNER_TEMP/onus-records"
+        "$ONUS" ci records pull --dir "$dir" --branch "$RECORDS_BRANCH"
+        args=(--change "$CHANGE" --records "$dir")
+        if [ "$MERGED" = true ]; then args+=(--merged --commit "$COMMIT"); fi
+        "$ONUS" ci closed "${args[@]}"
+        "$ONUS" ci records push --dir "$dir" --branch "$RECORDS_BRANCH" --message "$CHANGE closed" ||
+          echo "::warning::Cannot push the records to $RECORDS_BRANCH (a read-only token on a fork?)."
+
+    - name: /onus commands
+      if: >-
+        github.event_name == 'issue_comment' && inputs.records == 'true' &&
+        github.event.issue.pull_request != null && startsWith(github.event.comment.body, '/onus')
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        ONUS: ${{ steps.install.outputs.onus }}
+        GH_TOKEN: ${{ inputs.github-token }}
+        RECORDS_BRANCH: ${{ inputs.records-branch }}
+        REPO: ${{ github.repository }}
+        PR: ${{ github.event.issue.number }}
+        CHANGE: ${{ github.repository }}#${{ github.event.issue.number }}
+        COMMENT_ID: ${{ github.event.comment.id }}
+        AUTHOR: ${{ github.event.comment.user.login }}
+        ASSOCIATION: ${{ github.event.comment.author_association }}
+        WORKFLOW: ${{ github.workflow }}
+        # Through the environment, never pasted into the script.
+        BODY: ${{ github.event.comment.body }}
+      run: |
+        set -euo pipefail
+        dir="$RUNNER_TEMP/onus-records"
+        printf '%s' "$BODY" > "$RUNNER_TEMP/onus-comment.md"
+        "$ONUS" ci records pull --dir "$dir" --branch "$RECORDS_BRANCH"
+        answer=$("$ONUS" ci comment --change "$CHANGE" --body-file "$RUNNER_TEMP/onus-comment.md" \
+          --author "$AUTHOR" --association "$ASSOCIATION" --records "$dir")
+        command=$(jq -r '.command // empty' <<< "$answer")
+        [ -z "$command" ] || [ "$command" = caught ] && exit 0
+        "$ONUS" ci records push --dir "$dir" --branch "$RECORDS_BRANCH" --message "$CHANGE: /onus $command by $AUTHOR"
+        reaction=$([ "$(jq -r .ok <<< "$answer")" = true ] && echo '+1' || echo confused)
+        gh api --method POST "repos/$REPO/issues/comments/$COMMENT_ID/reactions" -f content="$reaction" > /dev/null
+        reply=$(jq -r '.reply // empty' <<< "$answer")
+        [ -n "$reply" ] && gh api --method POST "repos/$REPO/issues/$PR/comments" -f body="$reply" > /dev/null
+        # After an approval, classify the pull request again by re-running its check.
+        if [ "$(jq -r .rerun <<< "$answer")" = true ]; then
+          sha=$(gh pr view "$PR" --repo "$REPO" --json headRefOid --jq .headRefOid)
+          run=$(gh run list --repo "$REPO" --workflow "$WORKFLOW" --commit "$sha" --event pull_request \
+            --limit 1 --json databaseId --jq '.[0].databaseId // empty')
+          if [ -n "$run" ]; then
+            gh run rerun "$run" --repo "$REPO" || echo "::warning::Cannot re-run the check (needs actions: write); push to update the lane."
+          fi
+        fi
+
+    - name: Record reverts
+      if: github.event_name == 'push' && inputs.records == 'true'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        ONUS: ${{ steps.install.outputs.onus }}
+        RECORDS_BRANCH: ${{ inputs.records-branch }}
+        BEFORE: ${{ github.event.before }}
+      run: |
+        set -euo pipefail
+        dir="$RUNNER_TEMP/onus-records"
+        "$ONUS" ci records pull --dir "$dir" --branch "$RECORDS_BRANCH"
+        args=(--records "$dir")
+        # Only the commits this push added, when the push says which.
+        if [ -n "$BEFORE" ] && [ "$BEFORE" != 0000000000000000000000000000000000000000 ] && git cat-file -e "$BEFORE^{commit}" 2> /dev/null; then
+          args+=(--since "$BEFORE")
+        fi
+        "$ONUS" ci push "${args[@]}"
+        "$ONUS" ci records push --dir "$dir" --branch "$RECORDS_BRANCH" --message "Reverts on ${GITHUB_REF_NAME}"

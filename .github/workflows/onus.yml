@@ -1,18 +1,31 @@
 name: Onus
 
 # Onus reports on its own pull requests, using the action in this repository
-# with a binary built from the pull request.
+# with a binary built from the pull request, and keeps its own outcome
+# records on the onus/records branch: pull requests are classified with
+# their agent's track record, outcomes are recorded when they close, reverts
+# when main moves, and /onus comments record approvals, audits and incidents.
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, edited, ready_for_review, closed]
+  issue_comment:
+    types: [created]
+  push:
+    branches: [main]
 
 permissions:
-  contents: read
-  pull-requests: write
+  contents: write # the onus/records branch
+  pull-requests: write # the comment
+  actions: write # re-running the check after /onus approve
 
 jobs:
   report:
     name: Onus report
+    # Comments matter only when they are /onus commands on pull requests.
+    if: >-
+      github.event_name != 'issue_comment' ||
+      (github.event.issue.pull_request && startsWith(github.event.comment.body, '/onus'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -28,6 +41,7 @@ jobs:
           onus-path: target/release/onus
           fail-on: secrets
           lanes: true
+          records: true
       - uses: actions/upload-artifact@v7
         if: always() && steps.onus.outputs.report
         with:

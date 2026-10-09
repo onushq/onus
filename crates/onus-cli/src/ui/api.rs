@@ -61,6 +61,7 @@ pub fn call(state: &State, name: &str, body: Value) -> Answer {
         "submissions.save" => submissions_save(state, body),
         "submissions.judge" => submissions_judge(state, body),
         "outcomes" => outcomes(state),
+        "outcomes.fetch" => outcomes_fetch(state),
         "outcomes.record" => outcomes_record(state, body),
         "outcomes.incident" => outcomes_incident(state, body),
         "outcomes.ingestReverts" => outcomes_ingest(state, body),
@@ -717,27 +718,165 @@ fn submissions_judge(state: &State, body: Value) -> Answer {
     Ok(out)
 }
 
-fn load_outcomes(state: &State) -> anyhow::Result<Vec<onus_lanes::outcomes::Outcome>> {
-    if state.outcomes.exists() {
-        onus_lanes::outcomes::load(&state.outcomes)
-    } else {
-        Ok(Vec::new())
+/// The branch the GitHub Action keeps its records on (`onus ci`).
+const RECORDS_BRANCH: &str = "onus/records";
+
+fn parse_lines<T: for<'de> Deserialize<'de>>(text: &str) -> Vec<T> {
+    // A line that does not parse (a newer format) is skipped, not fatal.
+    text.lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect()
+}
+
+/// A file of the records branch, from the remote's copy or a local branch.
+fn branch_file(state: &State, file: &str) -> Option<(String, String)> {
+    for r in [
+        format!("origin/{RECORDS_BRANCH}"),
+        RECORDS_BRANCH.to_string(),
+    ] {
+        if let Ok(text) = git(&state.root, &["show", &format!("{r}:{file}")]) {
+            return Some((r, text));
+        }
     }
+    None
+}
+
+/// Where outcomes come from: the local file when there is one (recorded
+/// here or with `onus outcomes`), else the records branch the Action keeps.
+fn outcomes_source(state: &State) -> anyhow::Result<(Value, Vec<onus_lanes::outcomes::Outcome>)> {
+    if state.outcomes.exists() {
+        return Ok((
+            json!({ "kind": "file", "path": state.outcomes }),
+            onus_lanes::outcomes::load(&state.outcomes)?,
+        ));
+    }
+    if let Some((r, text)) = branch_file(state, "outcomes.jsonl") {
+        let at = git(&state.root, &["log", "-1", "--format=%ct", &r])
+            .ok()
+            .and_then(|t| t.trim().parse::<u64>().ok());
+        return Ok((
+            json!({ "kind": "branch", "ref": r, "updatedAt": at }),
+            parse_lines(&text),
+        ));
+    }
+    Ok((
+        json!({ "kind": "none", "path": state.outcomes }),
+        Vec::new(),
+    ))
+}
+
+/// Monday of the week `at` falls in, as Unix seconds (UTC).
+fn week_of(at: u64) -> u64 {
+    let day = at / 86_400;
+    // 1970-01-01 was a Thursday: day 0 is weekday 3 counting from Monday.
+    let weekday = (day + 3) % 7;
+    (day - weekday) * 86_400
 }
 
 fn outcomes(state: &State) -> Answer {
-    let all = load_outcomes(state)?;
-    let backlog: Vec<Value> = onus_lanes::outcomes::backlog(&all)
+    use onus_lanes::outcomes;
+    let (source, all) = outcomes_source(state)?;
+    let backlog: Vec<Value> = outcomes::backlog(&all)
         .into_iter()
         .map(|(what, n)| json!({ "target": what, "incidents": n }))
         .collect();
+    let config = lanes::lanes_config(&state.root, None).unwrap_or_default();
+
+    // Weekly: changes by lane, and what went wrong, by when they first landed.
+    let mut first: BTreeMap<&str, u64> = BTreeMap::new();
+    for o in &all {
+        first.entry(o.change.as_str()).or_insert(o.at);
+    }
+    let mut weeks: BTreeMap<u64, BTreeMap<&str, u32>> = BTreeMap::new();
+    let incidents: BTreeSet<&str> = all
+        .iter()
+        .filter(|o| o.result == "incident")
+        .map(|o| o.change.as_str())
+        .collect();
+    for o in outcomes::latest(&all) {
+        let w = weeks.entry(week_of(first[o.change.as_str()])).or_default();
+        *w.entry(o.lane.as_str()).or_default() += 1;
+        *w.entry("changes").or_default() += 1;
+        if matches!(o.result.as_str(), "reverted" | "rolled-back") {
+            *w.entry("reverted").or_default() += 1;
+        }
+        if incidents.contains(o.change.as_str()) {
+            *w.entry("incidents").or_default() += 1;
+        }
+        if o.audited {
+            *w.entry("audited").or_default() += 1;
+        }
+        if o.missed {
+            *w.entry("missed").or_default() += 1;
+        }
+    }
+    let trend: Vec<Value> = weeks
+        .into_iter()
+        .map(|(week, counts)| json!({ "week": week, "counts": counts }))
+        .collect();
+
+    // Each agent setup's record, and whether it may auto-merge.
+    let mut keys: BTreeSet<&str> = all.iter().map(|o| o.agent.as_str()).collect();
+    let pulls_text = branch_file(state, "pulls.jsonl")
+        .map(|(_, t)| t)
+        .unwrap_or_default();
+    let pulls: Vec<onus_lanes::pulls::PullRecord> = parse_lines(&pulls_text);
+    let keys_owned: Vec<String> = pulls.iter().map(|p| p.agent.key()).collect();
+    keys.extend(keys_owned.iter().map(String::as_str));
+    let agents: Vec<Value> = keys
+        .into_iter()
+        .map(|k| {
+            let r = outcomes::record_for(&all, k);
+            let eligible = r.changes >= config.min_record && r.recent_incidents == 0;
+            json!({
+                "agent": k,
+                "merged": r.changes,
+                "recentIncidents": r.recent_incidents,
+                "eligible": eligible,
+                "needs": config.min_record.saturating_sub(r.changes),
+            })
+        })
+        .collect();
+
+    // Pull requests classified but not closed yet.
+    let closed: BTreeSet<&str> = all.iter().map(|o| o.change.as_str()).collect();
+    let mut open: BTreeMap<&str, &onus_lanes::pulls::PullRecord> = BTreeMap::new();
+    for p in &pulls {
+        if !closed.contains(p.change.as_str()) {
+            open.insert(p.change.as_str(), p);
+        }
+    }
+    let mut in_flight: Vec<&onus_lanes::pulls::PullRecord> = open.into_values().collect();
+    in_flight.sort_by_key(|p| std::cmp::Reverse(p.at));
+
     Ok(json!({
         "file": state.outcomes,
+        "source": source,
         "records": all,
-        "summary": onus_lanes::outcomes::summarize(&all),
+        "summary": outcomes::summarize(&all),
         "backlog": backlog,
         "results": lanes::RESULTS,
+        "trend": trend,
+        "agents": agents,
+        "minRecord": config.min_record,
+        "inFlight": in_flight,
     }))
+}
+
+fn outcomes_fetch(state: &State) -> Answer {
+    git(
+        &state.root,
+        &[
+            "fetch",
+            "--no-tags",
+            "--quiet",
+            "origin",
+            &format!("+refs/heads/{RECORDS_BRANCH}:refs/remotes/origin/{RECORDS_BRANCH}"),
+        ],
+    )
+    .map_err(|e| anyhow!("cannot fetch {RECORDS_BRANCH} from origin: {e:#}"))?;
+    outcomes(state)
 }
 
 fn outcomes_record(state: &State, body: Value) -> Answer {

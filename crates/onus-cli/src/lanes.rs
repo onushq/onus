@@ -167,7 +167,7 @@ impl From<LaneArg> for Lane {
     }
 }
 
-fn git_lines(repo: &Path, args: &[&str]) -> Result<Vec<String>> {
+pub fn git_lines(repo: &Path, args: &[&str]) -> Result<Vec<String>> {
     let out = std::process::Command::new("git")
         .arg("-C")
         .arg(repo)
@@ -237,22 +237,27 @@ pub fn make_submission(
         ..Default::default()
     };
     let outcome = onus_cli::diff_dirs(pair.base.dir.path(), pair.head.dir.path(), &opts)?;
+    submission_with_report(repo, &pair.base.sha, &pair.head.sha, outcome.report, parts)
+}
+
+/// A submission around a report made elsewhere (by `onus report` in CI).
+pub fn submission_with_report(
+    repo: &Path,
+    base_sha: &str,
+    head_sha: &str,
+    report: SemanticReport,
+    parts: SubmissionParts,
+) -> Result<Submission> {
     let changed_files = git_lines(
         repo,
-        &[
-            "diff",
-            "--name-only",
-            "--no-renames",
-            &pair.base.sha,
-            &pair.head.sha,
-        ],
+        &["diff", "--name-only", "--no-renames", base_sha, head_sha],
     )?;
     Ok(Submission {
         schema: onus_lanes::submission::SCHEMA,
-        base: pair.base.sha.clone(),
-        head: pair.head.sha.clone(),
+        base: base_sha.to_string(),
+        head: head_sha.to_string(),
         intent: parts.intent,
-        report: outcome.report,
+        report,
         changed_files,
         evidence: parts.evidence,
         scope: parts.scope,

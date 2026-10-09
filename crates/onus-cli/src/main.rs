@@ -356,6 +356,12 @@ Examples:
         #[command(subcommand)]
         cmd: envs::EvidenceCmd,
     },
+    /// What the GitHub Action runs at each event: classify pull requests, record
+    /// outcomes when they close, act on /onus comments, record reverts.
+    Ci {
+        #[command(subcommand)]
+        cmd: ci::CiCmd,
+    },
     /// Open the web interface for a repository: the map, reports, lanes,
     /// environments, evidence, scopes and outcomes, served on 127.0.0.1.
     Ui(ui::UiArgs),
@@ -538,9 +544,11 @@ fn backend(root: &std::path::Path, no_server: bool) -> std::sync::Arc<dyn onus_c
 }
 
 mod agent;
+mod ci;
 mod doors;
 mod envs;
 mod lanes;
+mod records;
 mod ui;
 
 fn main() -> ExitCode {
@@ -740,6 +748,7 @@ fn run(cli: Cli) -> Result<i32> {
         Cmd::Env { cmd } => envs::env_cmd(cmd),
         Cmd::Evidence { cmd } => envs::evidence_cmd(cmd),
         Cmd::Ui(args) => ui::run(args),
+        Cmd::Ci { cmd } => ci::run(cmd),
         Cmd::Help { topic } => help(topic.as_deref()),
         Cmd::Mcp {
             repo,
@@ -859,12 +868,13 @@ fn help(topic: Option<&str>) -> Result<i32> {
         println!("{EXIT_CODES}");
         return Ok(0);
     };
-    if let Some(sub) = cmd.find_subcommand_mut(name) {
-        print!("{}", sub.render_long_help());
-        return Ok(0);
-    }
+    // A guide topic named like a command (`ci`) wins; `onus ci --help` has the flags.
     if let Some(t) = onus_cli::guide::find(name) {
         print!("{}", t.text);
+        return Ok(0);
+    }
+    if let Some(sub) = cmd.find_subcommand_mut(name) {
+        print!("{}", sub.render_long_help());
         return Ok(0);
     }
     eprintln!("onus: no command or guide topic named `{name}`\n");
