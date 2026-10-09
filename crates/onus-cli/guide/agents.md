@@ -2,7 +2,7 @@
 
 `onus mcp` gives a coding agent the codebase map as MCP tools: where things are, what depends on what, which tests cover what, who owns it, and what a change means before it is committed. Every answer is computed from the code, never generated, and carries the file and line it comes from.
 
-The tools are read-only.
+It also lets the agent hand its work in the way Onus expects: run the tests in an environment, submit the change with that evidence, see its lane and the judge's verdict, and ask for more access with evidence instead of working around its token. Nothing it offers lets an agent approve itself.
 
 **What helps agents today is `onus_check`.** We tested whether the map makes coding agents faster or more correct when they implement a feature ([evaluation](https://github.com/onushq/onus/blob/main/docs/evaluation/2026-10-07-map-for-agents.md)). It did not, measurably: agents found code with text search just as well and rarely called the navigation tools. They did call `onus_check` before finishing, and Phase 2 now focuses on making it precise. The navigation tools below are experimental.
 
@@ -14,7 +14,7 @@ Claude Code:
 
 Any MCP client that starts servers over stdio: run `onus mcp` in the repository (or pass `--repo <worktree>`). The map is the map of the worktree the server is started in, as it is on disk now, saved but not committed changes included.
 
-Clients that connect over HTTP (streamable HTTP): run `onus mcp --http 127.0.0.1:8765` and point the client at `http://127.0.0.1:8765/`. Only requests naming a loopback host are answered, which keeps other machines and DNS rebinding out; `--allow-host <name>` adds a host for a network you trust. The tools are read-only but describe your code, and there is no authentication. Every tool answers the same over stdio and HTTP, and to every client.
+Clients that connect over HTTP (streamable HTTP): run `onus mcp --http 127.0.0.1:8765` and point the client at `http://127.0.0.1:8765/`. Only requests naming a loopback host are answered, which keeps other machines and DNS rebinding out; `--allow-host <name>` adds a host for a network you trust. The tools describe your code and can run containers, and there is no authentication. Every tool answers the same over stdio and HTTP, and to every client.
 
 ## Tools
 
@@ -35,6 +35,21 @@ Navigation (experimental):
 - `onus_owners`: owners and sensitivity labels.
 - `onus_component`: a component's public surface, the components it uses and that use it, its external services and events.
 - `onus_file`: a file's symbols, imports and importers.
+
+Handing work in (leave these out with `onus mcp --no-actions`):
+
+- `onus_lanes`: the lane policy: what merges on its own, what goes to the judge or a person, and the floors no policy can lower.
+- `onus_env_create`, `onus_env_run`, `onus_envs`, `onus_env_destroy`: an environment built from a commit, and commands run in it. Each run is recorded as evidence (output, JUnit results, traces) under a run id. See `onus help environments`.
+- `onus_evidence`: recorded runs, a run's manifest, or one of its artifacts.
+- `onus_run_test`: a test command once in a throwaway container, to reproduce a failure; nothing is recorded.
+- `onus_submit`: hands in a committed change with an intent and run ids as evidence. Onus reports it, attaches the scope of the server's task token, classifies it, and keeps it in `.onus/submissions/` where people see it in `onus ui`. Returns the lane, every reason, and a submission id.
+- `onus_judge`: the verifying judge on a submission: evidence re-run in fresh containers, intent, contracts, tests, held-out checks. The verdict is kept beside the submission.
+- `onus_escalate`, `onus_escalation`: ask for rights the token lacks, with evidence, and check the answer. A granted request returns the new token: the old rights plus exactly what was asked.
+- `onus_outcomes`: track records and the held-out backlog, read-only.
+
+The order an agent should follow is in the server's instructions: commit, run the tests with `onus_env_create` and `onus_env_run`, `onus_submit` with an intent and those runs, then `onus_judge`.
+
+What agents cannot do through MCP: record outcomes, grant or deny escalations, mint or widen tokens, or choose the scope a submission is checked against. With `--token`, submissions, environments (their hosts and secrets) and escalations use the server's task token, whatever the agent asks for.
 
 Targets can be a symbol id (`billing:src/payments.ts#chargeCard`), a bare symbol name, a file path, a module id or a component id. Answers are JSON, sorted, and limited (default 50 items, `limit` up to 500); `truncated` says when there is more. Each answer also says which version of the map it came from and whether the map was rebuilt for it.
 

@@ -10,7 +10,9 @@
 	import Card from '#lib/components/Card.svelte';
 	import Empty from '#lib/components/Empty.svelte';
 	import ErrorBox from '#lib/components/ErrorBox.svelte';
-	import Graph from '#lib/components/Graph.svelte';
+	import ComponentPanel from '#lib/components/ComponentPanel.svelte';
+	import MapCanvas from '#lib/components/MapCanvas.svelte';
+	import Treemap from '#lib/components/Treemap.svelte';
 	import Loading from '#lib/components/Loading.svelte';
 	import NativeSelect from '#lib/components/NativeSelect.svelte';
 	import PageHead from '#lib/components/PageHead.svelte';
@@ -33,7 +35,23 @@
 	let componentText = $state('');
 	let tests = $state<'all' | 'code' | 'tests'>('all');
 	let focus = $state(page.url.searchParams.get('focus') ?? '');
-	let limit = $state(40);
+	let limit = $state(60);
+	let hops = $state(1);
+	let layout = $state<'layers' | 'folders'>('layers');
+	let treeColor = $state<'dependents' | 'sensitive'>('dependents');
+	let selected = $state(page.url.searchParams.get('select') ?? '');
+	const edgeKinds = [
+		{ id: 'imports', label: 'imports' },
+		{ id: 'calls', label: 'calls' },
+		{ id: 'references-type', label: 'types' }
+	];
+	let kinds = $state(new Set(['imports', 'calls', 'references-type', 'reads', 'writes']));
+	function toggleKind(k: string) {
+		const next = new Set(kinds);
+		if (next.has(k)) next.delete(k);
+		else next.add(k);
+		kinds = next;
+	}
 
 	onMount(() => {
 		graph.run(() => api<G>('map.graph'));
@@ -80,6 +98,7 @@
 		bind:value={tab}
 		tabs={[
 			{ id: 'graph', label: 'Graph' },
+			{ id: 'treemap', label: 'Treemap' },
 			{ id: 'components', label: 'Components', count: graph.value?.components.length },
 			{ id: 'files', label: 'Files' },
 			{ id: 'events', label: 'Events & externals', count: graph.value ? graph.value.events.length + graph.value.externals.length : undefined },
@@ -90,30 +109,71 @@
 
 {#if graph.error}<ErrorBox error={graph.error} />{/if}
 
-{#if tab === 'graph'}
+{#if tab === 'graph' || tab === 'treemap'}
 	{#if graph.value}
 		{#if graph.value.components.length}
 			<Card pad={false}>
-				<div class="flex flex-wrap items-center gap-3 border-b px-4 py-3">
-					<div class="relative">
-						<Input list="graph-components" bind:value={focus} placeholder="Focus on a component" class="w-64 pr-8" />
-						<datalist id="graph-components">{#each graph.value.components as c (c.id)}<option value={c.id}></option>{/each}</datalist>
+				<div class="flex flex-wrap items-center gap-2 border-b px-4 py-3">
+					{#if tab === 'graph'}
+						<div class="inline-flex rounded-lg bg-muted p-0.5 text-sm">
+							{#each [['layers', 'Layers'], ['folders', 'Folders']] as [id, label] (id)}
+								<button class="rounded-md px-2.5 py-1 {layout === id ? 'bg-background shadow-sm' : 'text-muted-foreground'}" onclick={() => (layout = id as 'layers' | 'folders')}>{label}</button>
+							{/each}
+						</div>
+						<div class="relative">
+							<Input list="graph-components" bind:value={focus} placeholder="Focus on a component" class="w-56 pr-8" />
+							<datalist id="graph-components">{#each graph.value.components as c (c.id)}<option value={c.id}></option>{/each}</datalist>
+							{#if focus}
+								<button class="absolute top-1/2 right-2 -translate-y-1/2 text-muted-foreground hover:text-foreground" aria-label="Clear" onclick={() => (focus = '')}><X class="size-4" /></button>
+							{/if}
+						</div>
 						{#if focus}
-							<button class="absolute top-1/2 right-2 -translate-y-1/2 text-muted-foreground hover:text-foreground" aria-label="Clear" onclick={() => (focus = '')}><X class="size-4" /></button>
+							<NativeSelect bind:value={hops} aria-label="Neighbourhood">
+								<option value={1}>direct neighbours</option>
+								<option value={2}>two steps away</option>
+							</NativeSelect>
 						{/if}
-					</div>
-					<label class="flex items-center gap-2 text-sm text-muted-foreground">
-						Show at most
-						<NativeSelect bind:value={limit}>{#each [20, 40, 80, 160, 1000] as n (n)}<option value={n}>{n === 1000 ? 'all' : n}</option>{/each}</NativeSelect>
-					</label>
-					<span class="ml-auto hidden items-center gap-3 text-xs text-muted-foreground md:flex">
-						<span class="flex items-center gap-1.5"><span class="h-0.5 w-5 rounded bg-faint"></span>uses</span>
-						<span class="flex items-center gap-1.5"><span class="size-3 rounded border-2 border-signal"></span>sensitive label</span>
-					</span>
+						<div class="flex items-center gap-1">
+							{#each edgeKinds as k (k.id)}
+								<button
+									class="rounded-full border px-2.5 py-0.5 text-xs {kinds.has(k.id) ? 'border-foreground/40 bg-foreground/5 text-foreground' : 'text-muted-foreground line-through'}"
+									onclick={() => toggleKind(k.id)}
+									title="Show {k.label} edges">{k.label}</button
+								>
+							{/each}
+						</div>
+						<label class="ml-auto flex items-center gap-2 text-sm text-muted-foreground">
+							At most
+							<NativeSelect bind:value={limit}>{#each [30, 60, 120, 250, 1000] as n (n)}<option value={n}>{n === 1000 ? 'all' : n}</option>{/each}</NativeSelect>
+						</label>
+					{:else}
+						<span class="text-sm text-muted-foreground">Each folder, then each component, sized by lines of code. Colour:</span>
+						<div class="inline-flex rounded-lg bg-muted p-0.5 text-sm">
+							{#each [['dependents', 'What depends on it'], ['sensitive', 'Sensitive labels']] as [id, label] (id)}
+								<button class="rounded-md px-2.5 py-1 {treeColor === id ? 'bg-background shadow-sm' : 'text-muted-foreground'}" onclick={() => (treeColor = id as 'dependents' | 'sensitive')}>{label}</button>
+							{/each}
+						</div>
+					{/if}
 				</div>
-				<div class="p-3"><Graph graph={graph.value} {sensitive} {limit} focus={focus.trim()} /></div>
+				<div class="grid gap-3 p-3 {selected ? 'xl:grid-cols-[minmax(0,1fr)_320px]' : ''}">
+					{#if tab === 'graph'}
+						<MapCanvas graph={graph.value} {sensitive} {layout} {kinds} focus={focus.trim()} {hops} {limit} bind:selected onopen={(id) => goto(componentHref(id))} />
+					{:else}
+						<Treemap graph={graph.value} {sensitive} color={treeColor} bind:selected onopen={(id) => goto(componentHref(id))} />
+					{/if}
+					{#if selected}
+						<ComponentPanel
+							id={selected}
+							onselect={(id) => (selected = id)}
+							onfocus={(id) => {
+								tab = 'graph';
+								focus = id;
+							}}
+							onclose={() => (selected = '')}
+						/>
+					{/if}
+				</div>
 			</Card>
-			<p class="text-xs text-muted-foreground">An arrow points from a component to one it uses; thicker arrows carry more imports, calls and type references. Hover to trace, click to open.</p>
 		{:else}
 			<Empty title="No components">Onus reads TypeScript and JavaScript workspaces. Declare components in onus.yaml, or add plugins for other languages.</Empty>
 		{/if}

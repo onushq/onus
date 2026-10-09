@@ -4,6 +4,9 @@ All notable changes to Onus are recorded here. The format follows [Keep a Change
 
 ## Unreleased
 
+- **Agents hand work in through MCP** ([ADR 0012](docs/adr/0012-agents-act-through-mcp.md), `onus help agents`): `onus mcp` adds `onus_env_create`, `onus_env_run`, `onus_envs`, `onus_env_destroy`, `onus_evidence`, `onus_run_test`, `onus_submit`, `onus_judge`, `onus_escalate`, `onus_escalation`, `onus_lanes` and `onus_outcomes`. Agents cannot record outcomes, grant escalations, mint tokens or choose their scope; `--no-actions` leaves the tools out. Submissions are kept in `.onus/submissions/` and shown in `onus ui`; granted escalation tokens are kept beside their request for the agent to collect.
+- **A better map in `onus ui`**: pan and zoom, a layout by folder beside the layers, focus on a component with one or two steps of neighbours, filters for imports, calls and types, a side panel for the selected component, and a treemap of the repository by folder and size.
+
 ## [0.9.0] - 2026-10-09
 
 A web interface for everything Onus does.

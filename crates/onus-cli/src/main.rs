@@ -269,8 +269,8 @@ Examples:
         /// Serve streamable HTTP on this address (such as 127.0.0.1:8765) instead of stdio.
         #[arg(long, value_name = "ADDR")]
         http: Option<std::net::SocketAddr>,
-        /// A host name clients may use besides localhost (repeatable). The tools are read-only
-        /// but describe the code: only allow hosts on a network you trust.
+        /// A host name clients may use besides localhost (repeatable). The tools describe the
+        /// code and can run containers: only allow hosts on a network you trust.
         #[arg(long, value_name = "HOST", requires = "http")]
         allow_host: Vec<String>,
         /// A task token (default: $ONUS_TOKEN): answers leave out everything the task may
@@ -286,6 +286,10 @@ Examples:
         /// The root public key that verifies --token.
         #[arg(long, value_name = "FILE")]
         key_public: Option<PathBuf>,
+        /// Only answer questions: leave out the tools that act (submit, environments,
+        /// escalations).
+        #[arg(long)]
+        no_actions: bool,
     },
     /// Ask the codebase map a question; the same answers as the MCP tools.
     #[command(after_long_help = "\
@@ -533,6 +537,7 @@ fn backend(root: &std::path::Path, no_server: bool) -> std::sync::Arc<dyn onus_c
     std::sync::Arc::new(onus_cli::daemon::Server::new())
 }
 
+mod agent;
 mod doors;
 mod envs;
 mod lanes;
@@ -743,8 +748,25 @@ fn run(cli: Cli) -> Result<i32> {
             allow_host,
             token,
             key_public,
+            no_actions,
         } => {
             let root = onus_cli::daemon::worktree_root(&repo);
+            let actions: Option<std::sync::Arc<dyn onus_cli::mcp::Actions>> = if no_actions {
+                None
+            } else {
+                Some(std::sync::Arc::new(agent::AgentActions {
+                    state: ui::State::new(
+                        onus_cli::daemon::canonical(&root).unwrap_or_else(|_| root.clone()),
+                        String::new(),
+                        0,
+                        ui::Places {
+                            public_key: key_public.clone(),
+                            ..Default::default()
+                        },
+                    ),
+                    token: token.clone(),
+                }))
+            };
             let read_scope = match (token, key_public) {
                 (Some(t), Some(k)) => {
                     let key = std::fs::read_to_string(&k)
@@ -760,13 +782,17 @@ fn run(cli: Cli) -> Result<i32> {
                     root.clone(),
                     backend(&root, no_server),
                     read_scope,
+                    actions,
                     addr,
                     allow_host,
                     |bound| eprintln!("onus: MCP over HTTP at http://{bound}/"),
                 )?,
-                None => {
-                    onus_cli::mcp::serve_stdio(root.clone(), backend(&root, no_server), read_scope)?
-                }
+                None => onus_cli::mcp::serve_stdio(
+                    root.clone(),
+                    backend(&root, no_server),
+                    read_scope,
+                    actions,
+                )?,
             }
             Ok(0)
         }
