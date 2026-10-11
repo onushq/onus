@@ -199,6 +199,12 @@ impl onus_cli::mcp::Actions for AgentActions {
             "agent.escalate" => self.escalate(input),
             "agent.escalation" => self.escalation(input),
             "agent.outcomes" => self.outcomes(input),
+            n if n.starts_with("cloud.") => onus_cli::cloud::act(
+                &onus_cli::cloud::Client::require()?,
+                &self.state.root,
+                n,
+                input,
+            ),
             n if PASSTHROUGH.contains(&n) => call(&self.state, n, input),
             _ => bail!("agents cannot call `{name}`"),
         }

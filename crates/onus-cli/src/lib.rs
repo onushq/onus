@@ -1,5 +1,6 @@
 //! The pieces behind the `onus` command, shared by the binary and its tests.
 
+pub mod cloud;
 pub mod daemon;
 pub mod guide;
 pub mod mcp;

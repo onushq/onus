@@ -4,6 +4,8 @@ All notable changes to Onus are recorded here. The format follows [Keep a Change
 
 ## Unreleased
 
+- **Onus Cloud from the CLI** (`onus help cloud`): `onus login` signs the CLI in as you (a one-time code approved in the browser, the device authorization grant), `onus logout` revokes it, and `ONUS_API_KEY` stands in for it in CI. `onus cloud env create|run|list|show|log|destroy` builds hosted environments from a pushed commit on Onus Cloud's machines and records each run there; `onus cloud evidence` attaches a recorded run to a pull request, where the judge checks it against the recording; `onus cloud pulls|pull` reads governed pull requests and their lanes; `onus cloud status|use` shows and picks the organisation. When the CLI is signed in, `onus mcp` adds the same as `onus_cloud_*` tools for agents.
+- **Records written after the fact keep their time**: `onus ci pr --at <seconds>` and `onus ci closed --at <seconds>` record a pull request and its outcome at the moment they happened instead of now. For catching up on history: a hosted service backfilling a repository's merged pull requests, or a CI system replaying them.
 - **Edit onus.yaml in `onus ui`**: a form for components, labels, boundary rules, contracts, lanes, events and external services, tests and the environment, beside a YAML editor and the `onus init` suggestion. Edits are checked as you make them (the same loading the map does, packs included), shown as a diff before saving, and written so that only the changed lines change: comments, alignment and quoting stay as written. Saving refuses a config that does not load and a file changed on disk since it was opened, writes atomically and rebuilds the map at once.
 
 ## [0.10.0] - 2026-10-09

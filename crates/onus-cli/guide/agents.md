@@ -47,6 +47,12 @@ Handing work in (leave these out with `onus mcp --no-actions`):
 - `onus_escalate`, `onus_escalation`: ask for rights the token lacks, with evidence, and check the answer. A granted request returns the new token: the old rights plus exactly what was asked.
 - `onus_outcomes`: track records and the held-out backlog, read-only.
 
+Onus Cloud (listed only when the CLI is signed in with `onus login`, or `ONUS_API_KEY` is set; see `onus help cloud`):
+
+- `onus_cloud_env_create`, `onus_cloud_env_run`, `onus_cloud_envs`, `onus_cloud_env_destroy`: environments built and run on Onus Cloud's machines from a pushed commit, each run recorded by Onus Cloud.
+- `onus_cloud_attach_evidence`: a recorded run to a pull request, for the judge.
+- `onus_cloud_status`, `onus_cloud_pulls`, `onus_cloud_pull`: who the CLI is and what its plan allows; governed pull requests, their lanes and evidence.
+
 The order an agent should follow is in the server's instructions: commit, run the tests with `onus_env_create` and `onus_env_run`, `onus_submit` with an intent and those runs, then `onus_judge`.
 
 What agents cannot do through MCP: record outcomes, grant or deny escalations, mint or widen tokens, or choose the scope a submission is checked against. With `--token`, submissions, environments (their hosts and secrets) and escalations use the server's task token, whatever the agent asks for.

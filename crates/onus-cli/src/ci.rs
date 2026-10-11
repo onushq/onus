@@ -65,6 +65,10 @@ pub enum CiCmd {
         /// Where to write the submission, classification, judgment and comment section.
         #[arg(long, value_name = "DIR")]
         out: PathBuf,
+        /// When it happened, in seconds since 1970; now when left out. For records
+        /// written after the fact, such as a hosted service catching up on history.
+        #[arg(long, value_name = "SECONDS")]
+        at: Option<u64>,
     },
     /// A pull request was closed: its last record becomes an outcome.
     Closed {
@@ -78,6 +82,10 @@ pub enum CiCmd {
         commit: Option<String>,
         #[arg(long, value_name = "DIR")]
         records: PathBuf,
+        /// When it happened, in seconds since 1970; now when left out. For records
+        /// written after the fact, such as a hosted service catching up on history.
+        #[arg(long, value_name = "SECONDS")]
+        at: Option<u64>,
     },
     /// A comment on a pull request: `/onus approve <row>`, `/onus audit ok|miss`,
     /// `/onus incident <what happened>`. Prints what to reply.
@@ -186,6 +194,7 @@ pub fn run(cmd: CiCmd) -> Result<i32> {
             judge,
             config,
             out,
+            at,
         } => pr(PrArgs {
             repo,
             base,
@@ -200,13 +209,15 @@ pub fn run(cmd: CiCmd) -> Result<i32> {
             judge,
             config,
             out,
+            at,
         }),
         CiCmd::Closed {
             change,
             merged,
             commit,
             records,
-        } => closed(&change, merged, commit, &records),
+            at,
+        } => closed(&change, merged, commit, &records, at.unwrap_or_else(now)),
         CiCmd::Comment {
             change,
             body_file,
@@ -284,6 +295,7 @@ struct PrArgs {
     judge: bool,
     config: Option<PathBuf>,
     out: PathBuf,
+    at: Option<u64>,
 }
 
 fn verdict_name(v: onus_lanes::judge::Verdict) -> &'static str {
@@ -370,7 +382,7 @@ fn pr(a: PrArgs) -> Result<i32> {
     pulls::append(
         &pulls_file(&a.records),
         &PullRecord {
-            at: now(),
+            at: a.at.unwrap_or_else(now),
             change: a.change.clone(),
             base,
             head,
@@ -456,7 +468,13 @@ fn pr(a: PrArgs) -> Result<i32> {
     Ok(0)
 }
 
-fn closed(change: &str, merged: bool, commit: Option<String>, records: &Path) -> Result<i32> {
+fn closed(
+    change: &str,
+    merged: bool,
+    commit: Option<String>,
+    records: &Path,
+    at: u64,
+) -> Result<i32> {
     check_change(change)?;
     std::fs::create_dir_all(records)?;
     let all = pulls::load(&pulls_file(records))?;
@@ -477,7 +495,7 @@ fn closed(change: &str, merged: bool, commit: Option<String>, records: &Path) ->
     lanes::record_outcome(
         &outcomes_file(records),
         &Outcome {
-            at: now(),
+            at,
             change: change.to_string(),
             agent: last.agent.key(),
             judge: last.judge.clone(),
