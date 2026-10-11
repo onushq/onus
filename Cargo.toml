@@ -36,6 +36,7 @@ scip = "0.10"
 protobuf = "=3.7.2"
 lsp-types = "0.97"
 url = "2"
+ureq = { version = "3.1", features = ["json"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 rmcp = { version = "3.5", default-features = false, features = ["server", "macros", "transport-io", "transport-streamable-http-server"] }

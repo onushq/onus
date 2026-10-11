@@ -71,6 +71,11 @@ pub const TOPICS: &[Topic] = &[
         text: include_str!("../guide/environments.md"),
     },
     Topic {
+        name: "cloud",
+        summary: "Onus Cloud from the CLI: onus login, hosted environments, evidence and agents",
+        text: include_str!("../guide/cloud.md"),
+    },
+    Topic {
         name: "plugins",
         summary: "New languages and frameworks, SCIP indexes, language servers, trusted mode",
         text: include_str!("../guide/plugins.md"),
@@ -95,6 +100,8 @@ const ALIASES: &[(&str, &str)] = &[
     ("onus.yaml", "configuration"),
     ("kinds", "changes"),
     ("faq", "troubleshooting"),
+    ("login", "cloud"),
+    ("onus-cloud", "cloud"),
     ("scip", "plugins"),
     ("lsp", "plugins"),
 ];

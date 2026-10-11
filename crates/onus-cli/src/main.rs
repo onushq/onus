@@ -382,6 +382,32 @@ Examples:
         /// The audit log (JSONL).
         log: PathBuf,
     },
+    /// Sign the CLI in to Onus Cloud: approve a one-time code in the browser. In CI, set
+    /// ONUS_API_KEY (an organisation's API key) instead.
+    #[command(after_long_help = "\
+Examples:
+  onus login
+  onus login --org acme
+  onus login --no-browser          # print the link, for a machine without a browser")]
+    Login(cloud_cmd::LoginArgs),
+    /// Sign the CLI out of Onus Cloud (its token is revoked).
+    Logout,
+    /// Onus Cloud: hosted environments that record evidence, governed pull requests and
+    /// their lanes. Needs `onus login`, or ONUS_API_KEY in CI.
+    #[command(after_long_help = "\
+Examples:
+  onus cloud status
+  onus cloud env create                       # this folder's repository at its pushed HEAD
+  onus cloud env run web-3f2a1c -- npm test
+  onus cloud evidence acme/web#42 --run <run id>
+  onus cloud pulls --attention")]
+    Cloud {
+        /// The organisation (slug) to act in (default: $ONUS_CLOUD_ORG, else your login's).
+        #[arg(long, global = true, value_name = "SLUG")]
+        org: Option<String>,
+        #[command(subcommand)]
+        cmd: cloud_cmd::CloudCmd,
+    },
     /// Show help for a command, or a topic from the guide.
     #[command(after_long_help = "\
 Examples:
@@ -545,6 +571,7 @@ fn backend(root: &std::path::Path, no_server: bool) -> std::sync::Arc<dyn onus_c
 
 mod agent;
 mod ci;
+mod cloud_cmd;
 mod doors;
 mod envs;
 mod lanes;
@@ -749,6 +776,9 @@ fn run(cli: Cli) -> Result<i32> {
         Cmd::Evidence { cmd } => envs::evidence_cmd(cmd),
         Cmd::Ui(args) => ui::run(args),
         Cmd::Ci { cmd } => ci::run(cmd),
+        Cmd::Login(args) => cloud_cmd::login(args),
+        Cmd::Logout => cloud_cmd::logout(),
+        Cmd::Cloud { org, cmd } => cloud_cmd::run(org, cmd),
         Cmd::Help { topic } => help(topic.as_deref()),
         Cmd::Mcp {
             repo,
@@ -786,22 +816,24 @@ fn run(cli: Cli) -> Result<i32> {
                 }
                 _ => None,
             };
+            // The Onus Cloud tools, when this process is signed in (and may act).
+            let cloud =
+                actions.is_some() && matches!(onus_cli::cloud::Client::discover(), Ok(Some(_)));
+            let tools = onus_cli::mcp::Tools {
+                read_scope,
+                actions,
+                cloud,
+            };
             match http {
                 Some(addr) => onus_cli::mcp::serve_http(
                     root.clone(),
                     backend(&root, no_server),
-                    read_scope,
-                    actions,
+                    tools,
                     addr,
                     allow_host,
                     |bound| eprintln!("onus: MCP over HTTP at http://{bound}/"),
                 )?,
-                None => onus_cli::mcp::serve_stdio(
-                    root.clone(),
-                    backend(&root, no_server),
-                    read_scope,
-                    actions,
-                )?,
+                None => onus_cli::mcp::serve_stdio(root.clone(), backend(&root, no_server), tools)?,
             }
             Ok(0)
         }

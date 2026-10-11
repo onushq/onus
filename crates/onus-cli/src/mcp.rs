@@ -287,6 +287,76 @@ pub struct OutcomesParams {
     pub agent: Option<String>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CloudEnvCreateParams {
+    /// The GitHub repository, `owner/name` (default: this worktree's).
+    #[serde(default)]
+    pub repository: Option<String>,
+    /// A branch, tag, commit or `pull/<n>` (default: this worktree's HEAD, which must be pushed).
+    #[serde(default, rename = "ref")]
+    pub reference: Option<String>,
+    /// A name for it (default: the repository's and a few letters).
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Hosts it may reach (`api.example.com`, `*.npmjs.org`); none means no network.
+    #[serde(default)]
+    pub hosts: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CloudEnvRunParams {
+    /// The environment, from `onus_cloud_env_create` or `onus_cloud_envs`.
+    pub name: String,
+    /// A shell command run at the repository root, such as `npm test`.
+    pub command: String,
+    /// Stop it after this many seconds (default 1800).
+    #[serde(default, rename = "timeoutSeconds")]
+    pub timeout_seconds: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CloudEnvsParams {
+    /// Also the recently ended ones.
+    #[serde(default)]
+    pub all: bool,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CloudPullsParams {
+    /// Only this repository, `owner/name`.
+    #[serde(default)]
+    pub repository: Option<String>,
+    /// `open`, `closed` or `merged`.
+    #[serde(default)]
+    pub state: Option<String>,
+    /// `auto-merge`, `judge`, `human` or `blocked`.
+    #[serde(default)]
+    pub lane: Option<String>,
+    /// Only those waiting for a person.
+    #[serde(default)]
+    pub attention: bool,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CloudPullParams {
+    /// The pull request's number.
+    pub number: u64,
+    /// Its repository, `owner/name` (default: this worktree's).
+    #[serde(default)]
+    pub repository: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CloudEvidenceParams {
+    /// The pull request's number.
+    pub number: u64,
+    /// Its repository, `owner/name` (default: this worktree's).
+    #[serde(default)]
+    pub repository: Option<String>,
+    /// The run's id, from `onus_cloud_env_run`.
+    pub run: String,
+}
+
 impl std::fmt::Debug for OnusMcp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OnusMcp")
@@ -332,6 +402,24 @@ impl OnusMcp {
             )]),
             Err(e) => CallToolResult::error(vec![ContentBlock::text(format!("{e:#}"))]),
         })
+    }
+
+    /// Keeps the Onus Cloud tools only when this process can sign in (`onus login`, or
+    /// ONUS_API_KEY): an agent that cannot use them is not shown them.
+    pub fn with_cloud(mut self, signed_in: bool) -> OnusMcp {
+        if !signed_in {
+            let names: Vec<String> = self
+                .tool_router
+                .list_all()
+                .into_iter()
+                .map(|t| t.name.to_string())
+                .filter(|n| n.starts_with("onus_cloud_"))
+                .collect();
+            for n in names {
+                self.tool_router.remove_route(&n);
+            }
+        }
+        self
     }
 
     /// Limits every answer to what `scope`'s token may read.
@@ -756,6 +844,113 @@ impl OnusMcp {
         self.act("agent.outcomes", serde_json::json!({ "agent": p.agent }))
             .await
     }
+
+    #[tool(
+        name = "onus_cloud_status",
+        description = "Onus Cloud: who this CLI is signed in as, the organisation it acts in, and what its plan allows of hosted environments (how many at once, minutes left)."
+    )]
+    async fn cloud_status(&self) -> Result<CallToolResult, ErrorData> {
+        self.act("cloud.status", serde_json::json!({})).await
+    }
+
+    #[tool(
+        name = "onus_cloud_env_create",
+        description = "Create a hosted environment in Onus Cloud: a container built from a pushed commit (default: this worktree's HEAD) with the repository's declared image, setup and seed, on Onus Cloud's machines. Waits until it is ready (minutes, the first time). Run commands in it with onus_cloud_env_run. Use it to simulate a change in a clean environment when you cannot or should not run containers here."
+    )]
+    async fn cloud_env_create(
+        &self,
+        Parameters(p): Parameters<CloudEnvCreateParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.act(
+            "cloud.envCreate",
+            serde_json::json!({ "repository": p.repository, "ref": p.reference, "name": p.name, "hosts": p.hosts }),
+        )
+        .await
+    }
+
+    #[tool(
+        name = "onus_cloud_env_run",
+        description = "Run a command (such as the tests) in a hosted environment. Onus Cloud records the run: its output, JUnit results and traces, under a manifest the judge can check. Waits for it and returns the state (passed, failed, error), exit code, test counts and the end of the output, with the run id for onus_cloud_attach_evidence."
+    )]
+    async fn cloud_env_run(
+        &self,
+        Parameters(p): Parameters<CloudEnvRunParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.act(
+            "cloud.envRun",
+            serde_json::json!({ "name": p.name, "command": p.command, "timeoutSeconds": p.timeout_seconds }),
+        )
+        .await
+    }
+
+    #[tool(
+        name = "onus_cloud_envs",
+        description = "Hosted environments of the organisation: name, repository, commit, status, and what the plan allows."
+    )]
+    async fn cloud_envs(
+        &self,
+        Parameters(p): Parameters<CloudEnvsParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.act("cloud.envs", serde_json::json!({ "all": p.all }))
+            .await
+    }
+
+    #[tool(
+        name = "onus_cloud_env_destroy",
+        description = "Destroy a hosted environment when you are done with it (idle ones are destroyed after a while, but their minutes count until then)."
+    )]
+    async fn cloud_env_destroy(
+        &self,
+        Parameters(p): Parameters<EnvNameParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.act("cloud.envDestroy", serde_json::json!({ "name": p.name }))
+            .await
+    }
+
+    #[tool(
+        name = "onus_cloud_pulls",
+        description = "Pull requests Onus Cloud governs for the organisation, newest first: lane (auto-merge, judge, human, blocked), state, agent and what needs attention. Read-only."
+    )]
+    async fn cloud_pulls(
+        &self,
+        Parameters(p): Parameters<CloudPullsParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.act(
+            "cloud.pulls",
+            serde_json::json!({ "repository": p.repository, "state": p.state, "lane": p.lane, "attention": p.attention }),
+        )
+        .await
+    }
+
+    #[tool(
+        name = "onus_cloud_pull",
+        description = "One pull request in Onus Cloud: its lane and why, its analyses (with the judge's verdict) and the evidence attached to it. Read-only."
+    )]
+    async fn cloud_pull(
+        &self,
+        Parameters(p): Parameters<CloudPullParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.act(
+            "cloud.pull",
+            serde_json::json!({ "repository": p.repository, "number": p.number }),
+        )
+        .await
+    }
+
+    #[tool(
+        name = "onus_cloud_attach_evidence",
+        description = "Attach a run recorded in a hosted environment (onus_cloud_env_run) to a pull request as evidence. Onus Cloud analyses the pull request again when the run is for its head commit, and the judge checks the run against the recording. It approves nothing by itself."
+    )]
+    async fn cloud_attach_evidence(
+        &self,
+        Parameters(p): Parameters<CloudEvidenceParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.act(
+            "cloud.attachEvidence",
+            serde_json::json!({ "repository": p.repository, "number": p.number, "run": p.run }),
+        )
+        .await
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -773,8 +968,38 @@ impl ServerHandler for OnusMcp {
                  change in: commit it, run its tests with onus_env_create and onus_env_run, then \
                  onus_submit with an intent and those runs as evidence, and onus_judge to see the \
                  verdict. If your token does not allow what the task needs, onus_escalate with \
-                 evidence instead of working around it.",
+                 evidence instead of working around it. When the onus_cloud_ tools are listed, this \
+                 CLI is signed in to Onus Cloud: onus_cloud_env_create and onus_cloud_env_run build \
+                 and run a pushed commit on Onus Cloud's machines and record the runs, which \
+                 onus_cloud_attach_evidence attaches to the pull request for the judge.",
             )
+    }
+}
+
+/// What a server offers besides the map: a task token's read scope, the tools that act,
+/// and whether the Onus Cloud tools are listed.
+#[derive(Clone, Default)]
+pub struct Tools {
+    pub read_scope: Option<Arc<ReadScope>>,
+    pub actions: Option<Arc<dyn Actions>>,
+    pub cloud: bool,
+}
+
+impl std::fmt::Debug for Tools {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Tools")
+            .field("read_scope", &self.read_scope)
+            .field("actions", &self.actions.is_some())
+            .field("cloud", &self.cloud)
+            .finish()
+    }
+}
+
+impl OnusMcp {
+    fn with_tools(self, tools: &Tools) -> OnusMcp {
+        self.with_read_scope(tools.read_scope.clone())
+            .with_cloud(tools.cloud)
+            .with_actions(tools.actions.clone())
     }
 }
 
@@ -785,8 +1010,7 @@ impl ServerHandler for OnusMcp {
 pub fn serve_http(
     root: PathBuf,
     backend: Arc<dyn Backend>,
-    read_scope: Option<Arc<ReadScope>>,
-    actions: Option<Arc<dyn Actions>>,
+    tools: Tools,
     addr: std::net::SocketAddr,
     allowed_hosts: Vec<String>,
     ready: impl FnOnce(std::net::SocketAddr),
@@ -806,11 +1030,7 @@ pub fn serve_http(
             config = config.with_allowed_hosts(hosts);
         }
         let service = StreamableHttpService::new(
-            move || {
-                Ok(OnusMcp::new(root.clone(), backend.clone())
-                    .with_read_scope(read_scope.clone())
-                    .with_actions(actions.clone()))
-            },
+            move || Ok(OnusMcp::new(root.clone(), backend.clone()).with_tools(&tools)),
             Arc::new(LocalSessionManager::default()),
             config,
         );
@@ -831,20 +1051,14 @@ pub fn serve_http(
 }
 
 /// Serves MCP on stdin and stdout until the client disconnects.
-pub fn serve_stdio(
-    root: PathBuf,
-    backend: Arc<dyn Backend>,
-    read_scope: Option<Arc<ReadScope>>,
-    actions: Option<Arc<dyn Actions>>,
-) -> Result<()> {
+pub fn serve_stdio(root: PathBuf, backend: Arc<dyn Backend>, tools: Tools) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
         .build()?;
     runtime.block_on(async move {
         let service = OnusMcp::new(root, backend)
-            .with_read_scope(read_scope)
-            .with_actions(actions)
+            .with_tools(&tools)
             .serve(rmcp::transport::stdio())
             .await?;
         service.waiting().await?;

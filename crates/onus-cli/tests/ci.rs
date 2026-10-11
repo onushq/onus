@@ -324,3 +324,59 @@ fn a_pull_request_is_recorded_from_open_to_revert() {
         "{all}"
     );
 }
+
+#[test]
+fn records_written_after_the_fact_keep_their_time() {
+    let tmp = tempfile::tempdir().unwrap();
+    let t = tmp.path();
+    let r = t.join("shop");
+    copy_dir(&fixture().join("base"), &r);
+    git(&r, &["init", "-q", "-b", "main"]);
+    git(&r, &["add", "-A"]);
+    git(&r, &["commit", "-q", "-m", "base"]);
+    git(&r, &["checkout", "-q", "-b", "codex/sms"]);
+    apply_overlay(&fixture().join("scenarios/s1-sms-alerts"), &r);
+    git(&r, &["add", "-A"]);
+    git(&r, &["commit", "-q", "-m", "Text customers"]);
+    let rec = t.join("records");
+    let rs = rec.to_str().unwrap();
+    let change = "acme/shop#3";
+    // A pull request merged last spring, recorded today.
+    onus(
+        &r,
+        &[
+            "ci",
+            "pr",
+            "--base",
+            "main",
+            "--head",
+            "codex/sms",
+            "--change",
+            change,
+            "--branch",
+            "codex/sms",
+            "--records",
+            rs,
+            "--out",
+            t.join("out").to_str().unwrap(),
+            "--at",
+            "1745000000",
+        ],
+    );
+    onus(
+        &r,
+        &[
+            "ci",
+            "closed",
+            "--change",
+            change,
+            "--merged",
+            "--records",
+            rs,
+            "--at",
+            "1745090000",
+        ],
+    );
+    assert_eq!(lines(&rec.join("pulls.jsonl"))[0]["at"], 1_745_000_000);
+    assert_eq!(lines(&rec.join("outcomes.jsonl"))[0]["at"], 1_745_090_000);
+}

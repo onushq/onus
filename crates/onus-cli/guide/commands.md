@@ -121,6 +121,23 @@ What the GitHub Action runs to keep outcome records on a branch (`onus help ci`)
 - `ci closed` turns the pull request's latest record into an outcome; `ci push` records reverts.
 - `ci records` takes `--remote` (default `origin`) and `--branch` (default `onus/records`).
 
+## onus login, onus logout, onus cloud
+
+Onus Cloud from the terminal (`onus help cloud`). `onus login` signs the CLI in as you (approve the code it shows in the browser); in CI, `ONUS_API_KEY` stands in for it.
+
+    onus login [--org acme] [--no-browser]
+    onus cloud status
+    onus cloud env create [--repo acme/shop] [--ref pull/42] [--name sms] [--host registry.npmjs.org]
+    onus cloud env run sms -- npm test
+    onus cloud evidence acme/shop#42 --run <run id>
+    onus cloud pulls --attention
+    onus logout
+
+- `cloud env create|run|list|show|log|destroy`: hosted environments; `create` and `run` wait unless `--no-wait`, and `run` exits 1 when the command failed. `--json` prints the API's answer.
+- `cloud pulls`, `cloud pull <owner/name#n>`: governed pull requests, their lanes, analyses and evidence.
+- `cloud evidence <owner/name#n> --run <id>`: a recorded run to a pull request, for the judge.
+- `--org <slug>` on any `cloud` command, or `ONUS_CLOUD_ORG`, picks the organisation; `ONUS_CLOUD_URL` the address.
+
 ## onus help [command | topic]
 
     onus help                 # commands and guide topics

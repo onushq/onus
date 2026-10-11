@@ -101,6 +101,7 @@ Onus works with whichever agent you use, and none of this depends on one:
 - **Risk lanes** send each change to auto-merge, the judge, a person or nowhere, by rules you write and floors no rule can lower. The judge re-runs the evidence before it judges anything (`onus help lanes`).
 - **Track records keep themselves.** With `records: true`, the GitHub Action classifies every pull request with its agent's record. It records what happened when the pull request closes and catches reverts on the default branch. People add approvals, audits and incidents with `/onus` comments. The records live on an `onus/records` branch of the repository; an agent earns auto-merge from them (`onus help ci`).
 - **Environments** built from a commit run the tests and keep what they recorded in a content-addressed store, so approval rests on evidence an environment produced, not on an agent's claim (`onus help environments`).
+- **Onus Cloud**, the hosted service, does all of this for every pull request of an organisation. `onus login` signs the CLI in. You and your agents can then build environments on its machines from a pushed commit, and attach their recorded runs to pull requests as evidence the judge checks (`onus help cloud`).
 
 ## Roadmap
 
