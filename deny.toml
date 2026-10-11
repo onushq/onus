@@ -31,6 +31,8 @@ allow = [
   "CC0-1.0",
   "MPL-2.0",
 ]
+# Mozilla's root certificates (ureq's TLS for Onus Cloud): a permissive data licence.
+exceptions = [{ name = "webpki-roots", allow = ["CDLA-Permissive-2.0"] }]
 
 [bans]
 multiple-versions = "allow"
