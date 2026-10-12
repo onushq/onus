@@ -1,6 +1,7 @@
 //! Phase 3 commands: task tokens, scope suggestions, the git gateway and the
 //! audit log (ADR 0008).
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -461,6 +462,13 @@ pub enum EscalationCmd {
         /// Who decided.
         #[arg(long)]
         by: String,
+        /// The request that was decided: a file that holds another one is refused.
+        #[arg(long, value_name = "ID")]
+        id: Option<String>,
+        /// A scope that was granted, as Onus Cloud shows it (repeat for each): the
+        /// request must ask for exactly these, or nothing is minted.
+        #[arg(long = "scope", value_name = "RIGHT")]
+        scopes: Vec<String>,
         #[arg(long, value_name = "FILE")]
         audit: Option<PathBuf>,
     },
@@ -520,6 +528,27 @@ pub fn new_request(
         Some(&map),
         &labels,
         now(),
+    ))
+}
+
+/// `req` again, with its blast radius, sensitive labels and owners from the map and
+/// onus.yaml of `repo`, a trusted checkout: what the agent asked for, with facts the
+/// agent's own worktree cannot weaken.
+pub fn request_at(
+    repo: &Path,
+    req: &onus_doors::escalation::Request,
+) -> Result<onus_doors::escalation::Request> {
+    let (config, labels) = sensitive_labels(repo)?;
+    let map = onus_cli::build(repo, config, None)?;
+    Ok(onus_doors::escalation::Request::new(
+        &req.task,
+        req.kind,
+        req.scopes.clone(),
+        req.evidence.clone(),
+        &req.reason,
+        Some(&map),
+        &labels,
+        req.at,
     ))
 }
 
@@ -996,6 +1025,39 @@ fn has_devcontainer(repo: &Path) -> bool {
         .any(|p| repo.join(p).is_file())
 }
 
+/// A request is used only as it was filed: under its own id, unchanged since.
+pub fn check_intact(id: &str, req: &onus_doors::escalation::Request) -> Result<()> {
+    if req.id != id || req.content_id() != req.id {
+        bail!(
+            "escalation {id} was changed after it was filed, so it is not what was decided: nothing is minted from it. File it again with onus_escalate"
+        );
+    }
+    Ok(())
+}
+
+/// A grant made elsewhere (in Onus Cloud) must be of exactly the scopes the request
+/// asks for.
+pub fn same_scopes<'a>(
+    req: &onus_doors::escalation::Request,
+    granted: impl IntoIterator<Item = &'a str>,
+) -> Result<()> {
+    let normal = |s: &str| {
+        s.parse::<Right>()
+            .map_or_else(|_| s.to_string(), |r| r.to_string())
+    };
+    let asked: BTreeSet<String> = req.scopes.iter().map(|r| r.to_string()).collect();
+    let granted: BTreeSet<String> = granted.into_iter().map(normal).collect();
+    if granted != asked {
+        bail!(
+            "[{}] was granted, and request {} asks for [{}]: nothing is minted",
+            granted.into_iter().collect::<Vec<_>>().join(", "),
+            req.id,
+            asked.into_iter().collect::<Vec<_>>().join(", ")
+        );
+    }
+    Ok(())
+}
+
 /// Grants a request as a person: the new token.
 pub fn grant_request(
     req: &onus_doors::escalation::Request,
@@ -1104,9 +1166,17 @@ pub fn escalation(cmd: EscalationCmd) -> Result<i32> {
             token,
             key,
             by,
+            id,
+            scopes,
             audit,
         } => {
             let req = load_request(&request)?;
+            if let Some(id) = &id {
+                check_intact(id, &req)?;
+            }
+            if !scopes.is_empty() {
+                same_scopes(&req, scopes.iter().map(String::as_str))?;
+            }
             let original = token.verify()?;
             let minted = grant_request(&req, &original, &key, &by, audit.as_deref())?;
             keep_token(&request, &minted)?;

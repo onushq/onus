@@ -861,6 +861,19 @@ pub fn parse_hosted_map(bytes: &[u8], want: Option<&str>) -> Result<onus_core::C
     Ok(map)
 }
 
+/// A map asked for by `sha` names that commit, or carries a label (a map of a
+/// checked-out folder, `worktree`) and Onus Cloud says in `x-onus-map-commit` that it is
+/// of that commit. Anything else is neither used nor cached.
+pub fn vouched(map_commit: &str, sha: &str, named: Option<&str>) -> Result<()> {
+    if map_commit == sha || (!is_sha(map_commit) && named == Some(sha)) {
+        return Ok(());
+    }
+    bail!(
+        "Onus Cloud sent a map of {map_commit} (said to be of {}) when {sha} was asked for",
+        named.unwrap_or("no commit")
+    )
+}
+
 /// The map Onus Cloud keeps of a repository (`owner/name`) at `commit`, or of its
 /// default branch's newest commit. Maps of a commit are kept in [`cache_dir`] and
 /// never asked for again.
@@ -877,7 +890,7 @@ pub fn hosted_map(c: &Client, repo: &str, commit: Option<&str>) -> Result<onus_c
         if let Ok(bytes) = std::fs::read(&path)
             && let Ok(map) = parse_hosted_map(&bytes, Some(sha))
         {
-            return Ok(map);
+            return Ok(at_commit(map, sha));
         }
     }
     let mut path = format!("/v1/orgs/{}/repos/{}/map", segment(&org), segment(repo));
@@ -890,11 +903,26 @@ pub fn hosted_map(c: &Client, repo: &str, commit: Option<&str>) -> Result<onus_c
     }
     let want = commit.or(named.as_deref().filter(|s| is_sha(s)));
     let map = parse_hosted_map(&bytes, want)?;
-    if let (Some(sha), Some(dir)) = (cached_sha(commit, named.as_deref()), &cache) {
+    if let Some(sha) = commit {
+        vouched(&map.commit, sha, named.as_deref())?;
+    }
+    let Some(sha) = cached_sha(commit, named.as_deref()) else {
+        return Ok(map);
+    };
+    if let Some(dir) = &cache {
         // Best effort: an unwritable cache only costs a download.
         let _ = write_atomically(&map_cache_path(dir, &c.url, &org, repo, &sha), &bytes);
     }
-    Ok(map)
+    Ok(at_commit(map, &sha))
+}
+
+/// A hosted map names the commit it is of. The worker maps a checked-out folder, so the
+/// map itself may carry a label (`worktree`): the sha Onus Cloud vouched for replaces it.
+pub fn at_commit(mut map: onus_core::CodebaseMap, sha: &str) -> onus_core::CodebaseMap {
+    if !is_sha(&map.commit) {
+        map.commit = sha.to_string();
+    }
+    map
 }
 
 /// The commit to ask the map of: a pull request's head as Onus Cloud analysed it, a
@@ -1473,8 +1501,16 @@ mod tests {
         assert!(err.to_string().contains("update onus"), "{err}");
         let err = parse_hosted_map(&map_json(other, current), Some(sha)).unwrap_err();
         assert!(err.to_string().contains("when 3f2a1c"), "{err}");
-        // A label (a map of a folder) is not a commit to compare.
+        // A label (a map of a folder) is not a commit to compare: Onus Cloud vouches.
         assert!(parse_hosted_map(&map_json("worktree", current), Some(sha)).is_ok());
+        assert!(vouched("worktree", sha, Some(sha)).is_ok());
+        assert!(vouched(sha, sha, None).is_ok());
+        assert!(vouched("worktree", sha, None).is_err());
+        assert!(vouched("worktree", sha, Some(other)).is_err());
+        assert!(vouched(other, sha, Some(sha)).is_err());
+        // The vouched sha replaces the label, so answers name the commit.
+        let labelled = parse_hosted_map(&map_json("worktree", current), Some(sha)).unwrap();
+        assert_eq!(at_commit(labelled, sha).commit, sha);
         assert!(parse_hosted_map(b"{", None).is_err());
     }
 

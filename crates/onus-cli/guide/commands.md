@@ -78,7 +78,7 @@ Serves the map of the current worktree to a coding agent as MCP tools, on stdin 
 
 - `--repo <dir>`: the worktree (default: the one containing the current directory).
 - `--no-server`: build the map in this process instead of the repository's shared map server.
-- `--token <token>` and `--key-public <file>`: the task token every call is checked against; `--key <file>`: the root private key, with which the server mints grants itself; `--audit <file>`: the log; `--no-actions`: only the map tools.
+- `--token <token>` and `--key-public <file>`: the task token every call is checked against; `--key <file>`: the root private key, with which the server mints grants itself; `--trusted-repo <dir>`: a checkout whose files the agent cannot edit, from which the policy decides escalations when signed out; `--audit <file>`: the log; `--no-actions`: only the map tools.
 - `--cloud-token`, `--cloud-repo`, `--cloud-ttl`: how the server signs in to Onus Cloud (`onus help cloud`).
 
 ## onus query <question>

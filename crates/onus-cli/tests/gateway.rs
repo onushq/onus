@@ -451,16 +451,23 @@ fn declared_contracts_need_a_granted_escalation_before_they_change() {
 
     // A person grants the unlock; the same change then lands.
     let request = s.root.join("unlock.json");
-    std::fs::write(
-        &request,
-        serde_json::json!({
-            "id": "r1", "task": "prefs", "kind": "permission",
-            "scopes": ["unlock:path:services/user-preferences/src/types.ts"],
-            "evidence": [], "reason": "add a locale", "blastRadius": 0, "sensitive": [], "at": 0
-        })
-        .to_string(),
-    )
-    .unwrap();
+    let out = onus()
+        .args(["escalate", "--task", "prefs", "--reason", "add a locale"])
+        .args([
+            "--scope",
+            "unlock:path:services/user-preferences/src/types.ts",
+            "--repo",
+        ])
+        .arg(&work)
+        .arg("--out")
+        .arg(&request)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let out = onus()
         .args(["escalation", "grant"])
         .arg(&request)

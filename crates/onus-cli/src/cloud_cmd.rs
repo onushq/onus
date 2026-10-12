@@ -124,9 +124,10 @@ pub enum CloudCmd {
         /// The task (default: the token's).
         #[arg(long)]
         task: Option<String>,
-        /// The worktree whose map gives the blast radius, labels and owners.
+        /// The worktree whose map gives the blast radius, labels and owners, and whose
+        /// escalations folder keeps the report.
         #[arg(long, default_value = ".", value_name = "DIR")]
-        worktree: PathBuf,
+        repo: PathBuf,
         #[command(flatten)]
         door: DoorArgs,
         /// Wait this many seconds for an answer.
@@ -205,7 +206,12 @@ pub enum CloudEscalationCmd {
         json: bool,
     },
     /// Withdraw an escalation you filed.
-    Withdraw { id: String },
+    Withdraw {
+        id: String,
+        /// The worktree whose escalations folder keeps the request.
+        #[arg(long, default_value = ".", value_name = "DIR")]
+        repo: PathBuf,
+    },
 }
 
 /// What `onus cloud escalation <id>` takes.
@@ -213,7 +219,7 @@ pub enum CloudEscalationCmd {
 pub struct ShowArgs {
     /// The worktree whose escalations folder keeps the request.
     #[arg(long, default_value = ".", value_name = "DIR")]
-    worktree: PathBuf,
+    repo: PathBuf,
     #[command(flatten)]
     door: DoorArgs,
     /// Wait this many seconds for a decision.
@@ -664,17 +670,14 @@ pub fn run(org: Option<String>, cmd: CloudCmd) -> Result<i32> {
                 }
                 Ok(0)
             }
-            (Some(CloudEscalationCmd::Withdraw { id }), _) => {
+            (Some(CloudEscalationCmd::Withdraw { id, repo }), _) => {
                 // A request filed from here is known by its local id.
-                let local = onus_cli::daemon::worktree_root(Path::new("."))
-                    .join(".onus/escalations")
-                    .join(format!("{id}.cloud.json"));
-                let remote = std::fs::read_to_string(&local)
-                    .ok()
-                    .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+                let state = local_state(&onus_cli::daemon::worktree_root(&repo));
+                let remote = cloud_doors::filed(&state, &id)
                     .and_then(|v| v["escalationId"].as_str().map(str::to_string))
                     .unwrap_or_else(|| id.clone());
                 let out = cloud::withdraw_escalation(&client, &remote)?;
+                cloud_doors::log_withdrawn(&state, &id, &out["escalation"])?;
                 eprintln!(
                     "onus: escalation {id} is {}",
                     out["escalation"]["state"].as_str().unwrap_or("withdrawn")
@@ -688,12 +691,12 @@ pub fn run(org: Option<String>, cmd: CloudCmd) -> Result<i32> {
             evidence,
             reason,
             task,
-            worktree,
+            repo,
             door,
             wait,
             json,
         } => {
-            let root = onus_cli::daemon::worktree_root(&worktree);
+            let root = onus_cli::daemon::worktree_root(&repo);
             let state = local_state(&root);
             let cloud = plain(client, &door, &root);
             let edoor = escalation_door(&state, &door, &cloud, None)?;
@@ -955,6 +958,8 @@ fn escalation_door<'a>(
         token: door.token.clone().filter(|t| !t.trim().is_empty()),
         public,
         key: door.key.as_deref(),
+        // Signed in, Onus Cloud decides: the local policy never runs here.
+        trusted: None,
         cloud: Some(cloud),
         repository: cloud.repository(),
         pull,
@@ -990,7 +995,7 @@ fn wait_for(door: &EscalationDoor, id: &str, wait: u64) -> Result<Value> {
 }
 
 fn escalation_show(client: Client, id: &str, show: &ShowArgs) -> Result<i32> {
-    let root = onus_cli::daemon::worktree_root(&show.worktree);
+    let root = onus_cli::daemon::worktree_root(&show.repo);
     let state = local_state(&root);
     let cloud = plain(client, &show.door, &root);
     let edoor = escalation_door(&state, &show.door, &cloud, None)?;

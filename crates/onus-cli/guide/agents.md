@@ -59,6 +59,7 @@ Onus Cloud (listed only when the CLI is signed in with `onus login`, `ONUS_CLOUD
 A server signed in with a login never sends the login with an agent's call: it mints a scoped token for the worktree's repository on first use and uses that. The flags:
 
 - `--key <file>`: the root private key, held by the server and never shown to the agent. With it, grants decided by policy, or by a person in Onus Cloud, are minted by the server. Needs `--token`.
+- `--trusted-repo <dir>`: a checkout whose files the agent cannot edit, such as a `git worktree` of the default branch outside the agent's. Signed out, with `--key`, the policy decides escalations from its map and onus.yaml. Without it, a person does. Needs `--key`.
 - `--cloud-token <token>` (`ONUS_CLOUD_TOKEN`): a scoped Onus Cloud token to use as it is.
 - `--cloud-repo <owner/name>` (`ONUS_CLOUD_REPO`): the repository in Onus Cloud, when the worktree's remote is not GitHub.
 - `--cloud-ttl <duration>`: how long the token minted from a login lasts (default `8h`, at most `24h`).

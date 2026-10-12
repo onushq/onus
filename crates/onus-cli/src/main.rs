@@ -302,6 +302,13 @@ Examples:
         /// decided by policy or by a person in Onus Cloud are minted here.
         #[arg(long, value_name = "FILE", requires = "token")]
         key: Option<PathBuf>,
+        /// A checkout whose files the agent cannot edit, such as a git worktree of the
+        /// default branch outside the agent's (it shares git's config and hooks with the
+        /// agent's worktree, so keep those out of the agent's reach too): signed out, with --key, the policy decides escalations
+        /// from its map and onus.yaml (tests.command), and grants low-risk ones. Without
+        /// it, a person decides.
+        #[arg(long, value_name = "DIR", requires = "key")]
+        trusted_repo: Option<PathBuf>,
         /// A scoped Onus Cloud token (default: $ONUS_CLOUD_TOKEN), used as it is for every
         /// Onus Cloud call; neither the login nor ONUS_API_KEY is read.
         #[arg(
@@ -855,6 +862,7 @@ fn run(cli: Cli) -> Result<i32> {
             no_actions,
             audit,
             key,
+            trusted_repo,
             cloud_token,
             cloud_repo,
             cloud_ttl,
@@ -865,6 +873,19 @@ fn run(cli: Cli) -> Result<i32> {
                 // Read now, so a wrong path fails at start rather than at a grant.
                 onus_doors::token::RootKey::from_hex(&doors::read_key(k)?)?;
             }
+            let trusted_repo = match trusted_repo {
+                Some(t) => {
+                    let t = onus_cli::daemon::canonical(&t)
+                        .with_context(|| format!("no checkout at {}", t.display()))?;
+                    if t.starts_with(&canonical) {
+                        bail!(
+                            "--trusted-repo is inside the agent's worktree, which it can edit: give a checkout outside it"
+                        );
+                    }
+                    Some(t)
+                }
+                None => None,
+            };
             let cloud_ttl = onus_cli::cloud::parse_ttl(&cloud_ttl)?;
             // One log for the door and for `onus ui`'s audit page.
             let audit = audit.unwrap_or_else(|| canonical.join(".onus").join("audit.jsonl"));
@@ -928,6 +949,7 @@ fn run(cli: Cli) -> Result<i32> {
                     ),
                     door: door.clone(),
                     key,
+                    trusted: trusted_repo,
                     cloud: cloud_door,
                 }))
             };

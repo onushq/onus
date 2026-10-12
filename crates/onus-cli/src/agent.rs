@@ -26,6 +26,9 @@ pub struct AgentActions {
     /// The root private key the door holds (`onus mcp --key`), never shown to the
     /// agent: grants decided by policy or by a person in Onus Cloud are minted with it.
     pub key: Option<PathBuf>,
+    /// A checkout whose files the agent cannot edit (`onus mcp --trusted-repo`): with the key, the
+    /// local policy decides from its map and onus.yaml.
+    pub trusted: Option<PathBuf>,
     /// Every Onus Cloud call goes through it: a scoped token minted from a login, or
     /// the token or API key the process was given.
     pub cloud: Option<Arc<CloudDoor>>,
@@ -137,6 +140,7 @@ impl AgentActions {
             token: self.door.token(),
             public: self.door.public(),
             key: self.key.as_deref(),
+            trusted: self.trusted.as_deref(),
             cloud: self.cloud.as_deref(),
             repository: self.cloud.as_ref().and_then(|c| c.repository()),
             pull: None,

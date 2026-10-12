@@ -440,8 +440,16 @@ pub fn decide(req: &Request, policy: &Policy) -> Decision {
 
 /// The token for a granted request: the original token's rights plus what
 /// was asked, for the same task and until the same expiry. It names the
-/// request, so it proves this request was granted and no other.
+/// request, so it proves this request was granted and no other. A request
+/// changed after it was filed is refused: its scopes are not what was
+/// decided.
 pub fn grant(req: &Request, original: &Verified, root: &RootKey) -> Result<String> {
+    if req.content_id() != req.id {
+        bail!(
+            "request {} was changed after it was filed, so it is not what was decided: nothing is minted",
+            req.id
+        );
+    }
     if req.task != original.task {
         bail!(
             "the request is for task `{}`, the token for `{}`",
@@ -785,13 +793,15 @@ mod tests {
         // The grant keeps the agent.
         assert_eq!(v.agent.unwrap().tool, "claude-code");
 
-        // A scope edited in the request file.
+        // A scope edited in the request file: nothing verifies, nothing is minted.
         let mut edited = r.clone();
         edited.scopes = vec!["write:path:**".parse().unwrap()];
         assert_eq!(
             verify_granted(&edited, &granted, &root.public()).unwrap_err(),
             "the request file was changed after it was filed"
         );
+        let err = grant(&edited, &original("sms", &root), &root).unwrap_err();
+        assert!(err.to_string().contains("nothing is minted"), "{err}");
         // Another task's token in its place.
         let mut other_req = r.clone();
         other_req.task = "other".into();

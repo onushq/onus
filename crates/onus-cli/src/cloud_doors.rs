@@ -6,20 +6,25 @@
 //! sensitive labels, owners, reproduction) is the binary's, and every token is minted
 //! here, by the door that holds the root key, from the request file it kept: the
 //! original rights plus exactly the request's scopes, never anything the cloud's answer
-//! names. The cloud never sees the task token, only its inspection (task, rights,
-//! expiry).
+//! names. A request file changed after it was filed, or whose scopes are not the ones
+//! Onus Cloud shows as granted, mints nothing. The cloud never sees the task token,
+//! only its inspection (task, rights, expiry).
+//!
+//! The local policy decides only from a trusted checkout (`onus mcp --trusted-repo`):
+//! the agent can edit its own worktree, and with it the map, the sensitive labels and
+//! the test command a decision rests on.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 use onus_cli::cloud::{self, CloudDoor};
 use onus_doors::audit::{AuditLog, Record};
-use onus_doors::escalation::{EscalationKind, Request};
+use onus_doors::escalation::{EscalationKind, Request, verify_granted};
 use onus_doors::gateway::now;
 use onus_doors::token::{self, PublicKey, Verified};
 use serde_json::{Value, json};
 
-use crate::doors;
+use crate::doors::{self, check_intact};
 use crate::ui::{State, api};
 
 /// What `onus_blocked` tells the agent to do once it has reported.
@@ -34,6 +39,9 @@ pub struct EscalationDoor<'a> {
     pub public: Option<PublicKey>,
     /// The root private key this door holds (`onus mcp --key`): grants are minted here.
     pub key: Option<&'a Path>,
+    /// A checkout whose files the agent cannot edit (`onus mcp --trusted-repo`): the local policy
+    /// takes the request's facts and the test command from it.
+    pub trusted: Option<&'a Path>,
     pub cloud: Option<&'a CloudDoor>,
     /// `owner/name` for Onus Cloud.
     pub repository: Option<String>,
@@ -47,16 +55,17 @@ pub enum Route {
     /// Filed in Onus Cloud, which assesses it on the default branch; the local policy
     /// does not run.
     Cloud,
-    /// Decided here by policy (reproducing failing tests), and minted on a grant.
+    /// Decided here by policy from the trusted checkout (reproducing failing tests),
+    /// and minted on a grant.
     Policy,
     /// Kept in the escalations folder, for a person in `onus ui`.
     File,
 }
 
-/// Signed in: Onus Cloud. Else with a root key and a task token: the local policy.
-/// Else: the file only.
-pub fn plan(has_cloud: bool, has_key: bool, has_token: bool) -> Route {
-    match (has_cloud, has_key && has_token) {
+/// Signed in: Onus Cloud. Else with a root key, a task token and a trusted checkout:
+/// the local policy. Else: the file only, for a person.
+pub fn plan(has_cloud: bool, has_key: bool, has_token: bool, has_trusted: bool) -> Route {
+    match (has_cloud, has_key && has_token && has_trusted) {
         (true, _) => Route::Cloud,
         (false, true) => Route::Policy,
         (false, false) => Route::File,
@@ -72,6 +81,43 @@ pub fn check_answer(id: &str, escalation: &Value) -> Result<()> {
             other.unwrap_or("(none)")
         ),
     }
+}
+
+/// The scopes Onus Cloud shows for a request.
+fn shown_scopes(escalation: &Value) -> Result<Vec<&str>> {
+    Ok(escalation["scopes"]
+        .as_array()
+        .or(escalation["input"]["scopes"].as_array())
+        .context("Onus Cloud's grant names no scopes, so nothing is minted")?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect())
+}
+
+/// A grant in Onus Cloud must be of exactly the scopes the request kept here asks for.
+pub fn check_scopes(req: &Request, escalation: &Value) -> Result<()> {
+    doors::same_scopes(req, shown_scopes(escalation)?).map_err(|e| anyhow!("in Onus Cloud, {e}"))
+}
+
+/// Wraps `s` in single quotes for a shell.
+fn quoted(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// Who decided in Onus Cloud: `system:policy` for the policy, whatever name it
+/// carries, so a policy grant is never logged as a person's; else their name, else
+/// their id.
+fn decided_by(escalation: &Value) -> String {
+    let by = &escalation["decision"]["by"];
+    if by["id"] == "system:policy" {
+        return "system:policy".into();
+    }
+    by["name"]
+        .as_str()
+        .filter(|n| !n.trim().is_empty())
+        .or(by["id"].as_str().filter(|n| !n.trim().is_empty()))
+        .unwrap_or("a person")
+        .to_string()
 }
 
 /// What an agent reads for a cloud state.
@@ -114,14 +160,62 @@ fn cloud_file(request: &Path) -> PathBuf {
     request.with_extension("cloud.json")
 }
 
+/// Where request `id` was filed in Onus Cloud (`<id>.cloud.json`), if it was.
+pub fn filed(state: &State, id: &str) -> Option<Value> {
+    let path = api::request_path(state, id).ok()?;
+    serde_json::from_str(&std::fs::read_to_string(cloud_file(&path)).ok()?).ok()
+}
+
+/// Logs a withdrawal made from the command line, so the audit log has it at once
+/// rather than at the next look. Nothing is logged for a request not kept here, or
+/// for an answer that is not this request's withdrawal.
+pub fn log_withdrawn(state: &State, id: &str, escalation: &Value) -> Result<()> {
+    let Ok(path) = api::request_path(state, id) else {
+        return Ok(());
+    };
+    let Ok(req) = doors::load_request(&path) else {
+        return Ok(());
+    };
+    if escalation["state"] != "withdrawn" {
+        return Ok(());
+    }
+    check_answer(&req.id, escalation)?;
+    if let Some(d) = state.audit.parent() {
+        std::fs::create_dir_all(d)?;
+    }
+    AuditLog::new(&state.audit).append(
+        Record {
+            actor: req.task.clone(),
+            action: "escalate".into(),
+            subject: req.id.clone(),
+            decision: "withdrawn".into(),
+            reason: "withdrawn in Onus Cloud".into(),
+            details: json!({ "escalationId": escalation["id"], "webUrl": escalation["webUrl"] }),
+        },
+        now(),
+    )?;
+    Ok(())
+}
+
 /// Files a request: keeps it in the escalations folder, then sends it where
 /// [`plan`] says. Returns what the agent reads.
 pub fn route(door: &EscalationDoor, req: Request) -> Result<Value> {
+    let verified = door.verified()?;
+    let route = plan(
+        door.cloud.is_some(),
+        door.key.is_some(),
+        verified.is_some(),
+        door.trusted.is_some(),
+    );
+    // The policy decides on facts from the trusted checkout, not the agent's worktree.
+    let req = match (route, door.trusted) {
+        (Route::Policy, Some(trusted)) => doors::request_at(trusted, &req)?,
+        _ => req,
+    };
     std::fs::create_dir_all(&door.state.escalations)?;
     let path = api::request_path(door.state, &req.id)?;
     std::fs::write(&path, format!("{}\n", serde_json::to_string_pretty(&req)?))
         .with_context(|| format!("cannot write {}", path.display()))?;
-    let verified = door.verified()?;
     let mut out = json!({
         "id": req.id,
         "task": req.task,
@@ -131,7 +225,7 @@ pub fn route(door: &EscalationDoor, req: Request) -> Result<Value> {
         "owners": req.owners,
         "evidence": req.evidence,
     });
-    match plan(door.cloud.is_some(), door.key.is_some(), verified.is_some()) {
+    match route {
         Route::Cloud => {
             let cloud = door.cloud.context("no cloud door")?;
             let kept = |e: anyhow::Error| {
@@ -202,15 +296,17 @@ pub fn route(door: &EscalationDoor, req: Request) -> Result<Value> {
             };
         }
         Route::Policy => {
-            let (v, key) = (
+            let (v, key, trusted) = (
                 verified.context("no task token")?,
                 door.key.context("no root key")?,
+                door.trusted.context("no trusted checkout")?,
             );
-            let root = &door.state.root;
+            // The agent's commit, run with the trusted checkout's test command; the
+            // commit resolves there when the checkout shares the repository.
             let has_test = req.evidence.iter().any(|e| e.grade == 1);
             let (mut reproduce, mut why_not) = doors::trusted_reproduce(
-                root,
-                cloud::commit_of(root, "HEAD"),
+                trusted,
+                cloud::commit_of(&door.state.root, "HEAD"),
                 None,
                 None,
                 None,
@@ -252,9 +348,7 @@ pub fn route(door: &EscalationDoor, req: Request) -> Result<Value> {
         }
         Route::File => {
             out["state"] = json!("open");
-            out["next"] = json!(
-                "A person, or the policy for low-risk requests with a reproduced failing test, decides. Check with onus_escalation."
-            );
+            out["next"] = json!("A person decides (onus ui). Check with onus_escalation.");
         }
     }
     Ok(out)
@@ -269,13 +363,7 @@ fn mirror(
     e: &Value,
     verified: Option<&Verified>,
 ) -> Result<()> {
-    let by = format!(
-        "{} (Onus Cloud)",
-        e["decision"]["by"]["name"]
-            .as_str()
-            .filter(|n| !n.is_empty())
-            .unwrap_or("a person")
-    );
+    let by = format!("{} (Onus Cloud)", decided_by(e));
     let said = e["decision"]["answer"]
         .as_str()
         .or(e["error"].as_str())
@@ -285,6 +373,7 @@ fn mirror(
     match e["state"].as_str().unwrap_or_default() {
         "granted" => {
             if let (Some(key), Some(v)) = (door.key, verified) {
+                check_scopes(req, e)?;
                 if let Some(d) = door.state.audit.parent() {
                     std::fs::create_dir_all(d)?;
                 }
@@ -331,6 +420,7 @@ fn mirror(
 pub fn follow(door: &EscalationDoor, id: &str, wait: u64) -> Result<Value> {
     let path = api::request_path(door.state, id)?;
     let req = doors::load_request(&path).map_err(|_| anyhow!("no escalation {id}"))?;
+    check_intact(id, &req)?;
     let verified = door.verified()?;
     if let Some(v) = &verified
         && v.task != req.task
@@ -338,11 +428,12 @@ pub fn follow(door: &EscalationDoor, id: &str, wait: u64) -> Result<Value> {
         bail!("escalation {id} belongs to another task");
     }
     // The kept token proves a grant on its own: it is root-signed and names this
-    // request, wherever the grant was logged.
-    let proven = |kept: &Option<String>| match (kept, door.public) {
-        (Some(t), Some(k)) => onus_doors::escalation::verify_granted(&req, t, &k).is_ok(),
-        _ => false,
+    // request, wherever the grant was logged. `None` when there is no key to check it.
+    let proof = |kept: &Option<String>| match (kept, door.public) {
+        (Some(t), Some(k)) => Some(verify_granted(&req, t, &k)),
+        _ => None,
     };
+    let proven = |kept: &Option<String>| matches!(proof(kept), Some(Ok(_)));
     let filed: Option<Value> = std::fs::read_to_string(cloud_file(&path))
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok());
@@ -398,22 +489,39 @@ pub fn follow(door: &EscalationDoor, id: &str, wait: u64) -> Result<Value> {
         out["url"] = f["webUrl"].clone();
     }
     match state {
-        "granted" => match &kept {
-            Some(t) => out["token"] = json!(t),
-            None if verified.is_none() => {
+        // A kept token is handed out only when it proves this grant, or when this door
+        // has no root public key to check it with (and so no task token to widen).
+        "granted" => match (&kept, proof(&kept)) {
+            (Some(t), Some(Ok(_)) | None) => out["token"] = json!(t),
+            (Some(_), Some(Err(why))) => {
+                out["next"] = json!(format!(
+                    "The token kept beside it cannot be used: {why}. The operator mints it again: onus escalation grant {} --token … --key-public … --key …",
+                    path.display()
+                ))
+            }
+            (None, _) if verified.is_none() => {
                 out["next"] = json!(
                     "Granted in Onus Cloud, but this door holds no task token to widen: whoever runs the task mints one."
                 )
             }
-            None => {
-                let by = view["decision"]["by"]["name"]
-                    .as_str()
-                    .unwrap_or("a person");
-                out["next"] = json!(format!(
-                    "granted by {by} in Onus Cloud; the operator mints it: onus escalation grant {} --by \"{by} (Onus Cloud)\" --token … --key-public … --key …",
-                    path.display()
-                ));
-            }
+            // The command names the request and the scopes Onus Cloud granted, so the
+            // operator mints only those, whatever the file holds by then.
+            (None, _) => match check_scopes(&req, &view) {
+                Ok(()) => {
+                    let by = decided_by(&view);
+                    let scopes: String = req
+                        .scopes
+                        .iter()
+                        .map(|r| format!(" --scope {}", quoted(&r.to_string())))
+                        .collect();
+                    out["next"] = json!(format!(
+                        "granted by {by} in Onus Cloud; the operator mints it: onus escalation grant {} --id {id}{scopes} --by {} --token … --key-public … --key …",
+                        path.display(),
+                        quoted(&format!("{by} (Onus Cloud)")),
+                    ));
+                }
+                Err(why) => out["next"] = json!(format!("{why:#}")),
+            },
         },
         "denied" => {
             out["reason"] = decision
@@ -459,13 +567,21 @@ mod tests {
     fn signed_in_requests_go_to_onus_cloud_and_never_to_the_local_policy() {
         for key in [false, true] {
             for token in [false, true] {
-                assert_eq!(plan(true, key, token), Route::Cloud, "{key} {token}");
+                for trusted in [false, true] {
+                    assert_eq!(
+                        plan(true, key, token, trusted),
+                        Route::Cloud,
+                        "{key} {token} {trusted}"
+                    );
+                }
             }
         }
-        assert_eq!(plan(false, true, true), Route::Policy);
-        assert_eq!(plan(false, true, false), Route::File);
-        assert_eq!(plan(false, false, true), Route::File);
-        assert_eq!(plan(false, false, false), Route::File);
+        assert_eq!(plan(false, true, true, true), Route::Policy);
+        // Without a trusted checkout, the agent's worktree would give the facts.
+        assert_eq!(plan(false, true, true, false), Route::File);
+        assert_eq!(plan(false, true, false, true), Route::File);
+        assert_eq!(plan(false, false, true, true), Route::File);
+        assert_eq!(plan(false, false, false, false), Route::File);
     }
 
     #[test]
@@ -474,6 +590,63 @@ mod tests {
         let err = check_answer("a1b2c3", &json!({ "clientRequestId": "ffffff" })).unwrap_err();
         assert!(err.to_string().contains("is refused"), "{err}");
         assert!(check_answer("a1b2c3", &json!({})).is_err());
+    }
+
+    fn request(scope: &str) -> Request {
+        Request::new(
+            "sms",
+            EscalationKind::Permission,
+            vec![scope.parse().unwrap()],
+            vec![],
+            "billing formats the SMS",
+            None,
+            &[],
+            1,
+        )
+    }
+
+    #[test]
+    fn a_changed_request_or_a_grant_of_other_scopes_mints_nothing() {
+        let r = request("write:path:services/billing/**");
+        assert!(check_intact(&r.id, &r).is_ok());
+        // A scope added in the kept file, with or without a new id.
+        let mut wider = r.clone();
+        wider
+            .scopes
+            .push("write:path:services/auth/**".parse().unwrap());
+        assert!(check_intact(&r.id, &wider).is_err());
+        wider.id = wider.content_id();
+        let err = check_intact(&r.id, &wider).unwrap_err();
+        assert!(err.to_string().contains("nothing is minted"), "{err}");
+
+        let shown = |scopes: Value| json!({ "scopes": scopes });
+        assert!(check_scopes(&r, &shown(json!(["write:path:services/billing/**"]))).is_ok());
+        assert!(
+            check_scopes(
+                &r,
+                &json!({ "input": { "scopes": ["write:path:services/billing/**"] } })
+            )
+            .is_ok()
+        );
+        let err = check_scopes(&r, &shown(json!(["write:path:services/**"]))).unwrap_err();
+        assert!(err.to_string().contains("nothing is minted"), "{err}");
+        assert!(check_scopes(&r, &json!({})).is_err());
+    }
+
+    #[test]
+    fn the_policy_in_onus_cloud_is_logged_as_the_policy() {
+        let by = |b: Value| decided_by(&json!({ "decision": { "by": b } }));
+        assert_eq!(by(json!({ "id": "user:1", "name": "Ada" })), "Ada");
+        assert_eq!(by(json!({ "id": "system:policy" })), "system:policy");
+        assert_eq!(
+            by(json!({ "id": "system:policy", "name": "policy" })),
+            "system:policy"
+        );
+        assert_eq!(
+            by(json!({ "id": "system:policy", "name": "" })),
+            "system:policy"
+        );
+        assert_eq!(by(Value::Null), "a person");
     }
 
     #[test]

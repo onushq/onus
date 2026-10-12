@@ -30,6 +30,8 @@ struct Seen {
 struct World {
     seen: Vec<Seen>,
     minted: u32,
+    /// Seconds a minted token lasts (default: until 2099).
+    mint_ttl: Option<u64>,
     /// Escalations by id, as Onus Cloud shows them.
     escalations: BTreeMap<String, Value>,
     /// Map JSON by commit.
@@ -152,6 +154,27 @@ fn serve(stream: TcpStream, world: &Mutex<World>) {
     let _ = stream.flush();
 }
 
+/// `at` (seconds since the epoch) as Onus Cloud writes times.
+fn utc(at: u64) -> String {
+    let (days, secs) = (at / 86_400, at % 86_400);
+    // Civil from days (Howard Hinnant's algorithm).
+    let z = days as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}.000Z",
+        secs / 3600,
+        secs / 60 % 60,
+        secs % 60
+    )
+}
+
 fn ok(v: Value) -> (u16, Vec<(String, String)>, Vec<u8>) {
     (200, vec![], v.to_string().into_bytes())
 }
@@ -160,13 +183,48 @@ fn answer(world: &Mutex<World>, req: &Seen) -> (u16, Vec<(String, String)>, Vec<
     let mut w = world.lock().unwrap();
     let (path, query) = req.path.split_once('?').unwrap_or((&req.path, ""));
     match (req.method.as_str(), path) {
-        ("GET", "/v1/whoami") => ok(json!({
-            "kind": "user", "user": { "name": "Ada", "email": "ada@example.com" },
-            "organisations": [{ "slug": "acme" }],
+        ("GET", "/v1/whoami") => {
+            let mut me = json!({
+                "kind": "user", "user": { "name": "Ada", "email": "ada@example.com" },
+                "organisations": [{ "slug": "acme" }],
+            });
+            if req.auth.starts_with("Bearer onus_tok_") {
+                me["token"] = json!({
+                    "id": "tok-given", "kind": "scoped", "expiresAt": "2099-01-01T00:00:00.000Z",
+                    "organisation": { "slug": "acme" }, "repositories": ["acme/shop"],
+                    "scopes": ["pulls:read"], "label": "sms",
+                });
+            }
+            ok(me)
+        }
+        // A token without env:read is turned away, and taught.
+        ("GET", "/v1/orgs/acme/environments") if req.auth == "Bearer onus_tok_narrow" => (
+            403,
+            vec![],
+            json!({
+                "error": "insufficient_scope", "scope": "env:read",
+                "message": "this token cannot read environments (env:read)",
+            })
+            .to_string()
+            .into_bytes(),
+        ),
+        ("GET", "/v1/orgs/acme/environments") => ok(json!({
+            "environments": [], "allowance": { "running": 0, "limit": 2 },
         })),
         ("POST", "/v1/orgs/acme/tokens") => {
             w.minted += 1;
             let n = w.minted;
+            let expires = match w.mint_ttl {
+                Some(ttl) => {
+                    let at = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs()
+                        + ttl;
+                    utc(at)
+                }
+                None => "2099-01-01T00:00:00.000Z".into(),
+            };
             let b = &req.body;
             (
                 201,
@@ -175,7 +233,7 @@ fn answer(world: &Mutex<World>, req: &Seen) -> (u16, Vec<(String, String)>, Vec<
                     "token": format!("onus_tok_{n}"), "tokenId": format!("tok-{n}"), "kind": "scoped",
                     "organisation": { "id": "o1", "slug": "acme", "name": "Acme" },
                     "repositories": b["repositories"], "scopes": b["scopes"],
-                    "expiresAt": "2099-01-01T00:00:00.000Z", "label": b["label"],
+                    "expiresAt": expires, "label": b["label"],
                 })
                 .to_string()
                 .into_bytes(),
@@ -187,7 +245,7 @@ fn answer(world: &Mutex<World>, req: &Seen) -> (u16, Vec<(String, String)>, Vec<
             let e = json!({
                 "id": id, "state": "waiting", "kind": req.body["kind"],
                 "clientRequestId": req.body["clientRequestId"],
-                "repository": req.body["repository"],
+                "repository": req.body["repository"], "scopes": req.body["scopes"],
                 "webUrl": format!("http://app.test/o/acme/escalations/{id}"),
                 "owners": ["@team-billing"], "decision": null,
                 "next": "A person decides (@team-billing).",
@@ -198,6 +256,18 @@ fn answer(world: &Mutex<World>, req: &Seen) -> (u16, Vec<(String, String)>, Vec<
                 vec![],
                 json!({ "escalation": e }).to_string().into_bytes(),
             )
+        }
+        ("POST", p) if p.starts_with("/v1/orgs/acme/escalations/") && p.ends_with("/withdraw") => {
+            let id = p
+                .trim_start_matches("/v1/orgs/acme/escalations/")
+                .trim_end_matches("/withdraw");
+            match w.escalations.get_mut(id) {
+                Some(e) => {
+                    e["state"] = json!("withdrawn");
+                    ok(json!({ "escalation": e }))
+                }
+                None => (404, vec![], b"{\"message\":\"no escalation\"}".to_vec()),
+            }
         }
         ("GET", p) if p.starts_with("/v1/orgs/acme/escalations/") => {
             let id = p.trim_start_matches("/v1/orgs/acme/escalations/");
@@ -686,15 +756,76 @@ fn without_the_root_key_the_operator_mints_the_grant() {
         "{next}"
     );
     assert!(next.contains("Ada (Onus Cloud)"), "{next}");
+    // It names the request and the scopes Onus Cloud granted.
+    assert!(next.contains(&format!("--id {id}")), "{next}");
+    assert!(
+        next.contains("--scope 'write:path:services/billing/src/**'"),
+        "{next}"
+    );
 
     let request = shop.root.join(format!(".onus/escalations/{id}.json"));
+    let grant = |request: &Path| {
+        onus(
+            &shop.root,
+            &[],
+            &[
+                "escalation",
+                "grant",
+                request.to_str().unwrap(),
+                "--id",
+                &id,
+                "--scope",
+                "write:path:services/billing/src/**",
+                "--token",
+                &keys.token,
+                "--key-public",
+                &keys.public(),
+                "--key",
+                &keys.private(),
+                "--by",
+                "Ada (Onus Cloud)",
+            ],
+        )
+    };
+    // The agent swaps in a wider request of its own making, with a consistent id:
+    // the operator's command mints nothing from it.
+    let kept = std::fs::read(&request).unwrap();
+    let (code, _, err) = onus(
+        &shop.root,
+        &[],
+        &[
+            "escalate",
+            "--task",
+            "sms-alerts",
+            "--scope",
+            "write:path:services/billing/src/**",
+            "--scope",
+            "write:path:services/auth/**",
+            "--evidence",
+            "rationale:billing formats the SMS",
+            "--reason",
+            "the SMS needs the billing format",
+            "--out",
+            request.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    let (code, _, err) = grant(&request);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("nothing is minted"), "{err}");
+    let swapped = shop.root.join(".onus/escalations/swapped.json");
+    std::fs::copy(&request, &swapped).unwrap();
+    std::fs::write(&request, &kept).unwrap();
+    // Under the right id, scopes other than the ones granted mint nothing either.
     let (code, _, err) = onus(
         &shop.root,
         &[],
         &[
             "escalation",
             "grant",
-            request.to_str().unwrap(),
+            swapped.to_str().unwrap(),
+            "--scope",
+            "write:path:services/billing/src/**",
             "--token",
             &keys.token,
             "--key-public",
@@ -705,6 +836,11 @@ fn without_the_root_key_the_operator_mints_the_grant() {
             "Ada (Onus Cloud)",
         ],
     );
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("nothing is minted"), "{err}");
+    std::fs::remove_file(&swapped).unwrap();
+
+    let (code, _, err) = grant(&request);
     assert_eq!(code, 0, "{err}");
     let (_, state) = m.tool("onus_escalation", json!({ "id": id }));
     assert_eq!(state["state"], "granted", "{state}");
@@ -834,8 +970,10 @@ fn the_map_onus_cloud_keeps_answers_as_onus_query_does() {
         &["map", shop.root.to_str().unwrap(), "--json"],
     );
     assert_eq!(code, 0, "{err}");
-    let mut map: Value = serde_json::from_str(&map).unwrap();
-    map["commit"] = json!(shop.head);
+    // The worker maps a checked-out folder, so the map names no commit: Onus Cloud
+    // vouches for it in x-onus-map-commit.
+    let map: Value = serde_json::from_str(&map).unwrap();
+    assert_eq!(map["commit"], "worktree");
     fake.serve_map(&shop.head, serde_json::to_vec(&map).unwrap());
     let (code, local, err) = onus(
         &shop.root,
@@ -866,6 +1004,7 @@ fn the_map_onus_cloud_keeps_answers_as_onus_query_does() {
     // A second question is answered from the cache.
     let (failed, again) = m.tool("onus_cloud_map", ask.clone());
     assert!(!failed, "{again}");
+    assert_eq!(again["map"]["commit"], shop.head.as_str());
     assert_eq!(
         fake.requests("GET", "/v1/orgs/acme/repos/acme%2Fshop/map")
             .len(),
@@ -915,6 +1054,31 @@ fn the_map_onus_cloud_keeps_answers_as_onus_query_does() {
     assert_eq!(code, 0, "{err}");
     let out: Value = serde_json::from_str(&out).unwrap();
     assert_eq!(out["result"], local["result"]);
+    let (code, out, err) = onus(
+        &shop.root,
+        &l.env(),
+        &["cloud", "map", "status", "--commit", &shop.head],
+    );
+    assert_eq!(code, 0, "{err}");
+    let out: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(out["result"]["commit"], shop.head.as_str(), "{out}");
+    let saved = l.cache.path().join("map.json");
+    let (code, _, err) = onus(
+        &shop.root,
+        &l.env(),
+        &[
+            "cloud",
+            "map",
+            "--download",
+            saved.to_str().unwrap(),
+            "--commit",
+            &shop.head,
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(err.contains(&format!("at {}", shop.head)), "{err}");
+    let saved: Value = serde_json::from_slice(&std::fs::read(&saved).unwrap()).unwrap();
+    assert_eq!(saved["commit"], shop.head.as_str());
     let (code, _, err) = onus(&shop.root, &l.env(), &["cloud", "map", "check"]);
     assert_eq!(code, 1);
     assert!(err.contains("needs a worktree"), "{err}");
@@ -929,10 +1093,81 @@ fn the_map_onus_cloud_keeps_answers_as_onus_query_does() {
 }
 
 #[test]
-fn signed_out_with_the_root_key_the_local_policy_decides() {
+fn signed_out_the_local_policy_decides_only_from_a_trusted_checkout() {
     let shop = shop();
     let config = tempfile::tempdir().unwrap();
     let env = vec![("ONUS_CONFIG_DIR", config.path().display().to_string())];
+    let keys = Keys::new("sms-alerts", "services/notifications/**");
+    // The agent weakens its own worktree: billing is no longer labelled payments.
+    let yaml = shop.root.join("onus.yaml");
+    let text = std::fs::read_to_string(&yaml).unwrap();
+    let weakened = text.replace(
+        r#"owners: ["@team-payments"], labels: [payments]"#,
+        r#"owners: ["@team-payments"]"#,
+    );
+    assert_ne!(text, weakened);
+    std::fs::write(&yaml, weakened).unwrap();
+    let door = [
+        "--token",
+        keys.token.as_str(),
+        "--key-public",
+        &keys.public(),
+        "--key",
+        &keys.private(),
+    ]
+    .map(str::to_string);
+    let door: Vec<&str> = door.iter().map(String::as_str).collect();
+
+    // Without a trusted checkout the policy does not run: a person decides.
+    let mut m = mcp(&shop.root, &door, &env);
+    let (_, esc) = escalate(&mut m);
+    assert_eq!(esc["state"], "open", "{esc}");
+    drop(m);
+    let log = shop.root.join(".onus/audit.jsonl");
+    let text = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(!text.contains("\"needs-person\""), "{text}");
+
+    // With one, the facts are the trusted checkout's, not the worktree's.
+    let outside = tempfile::tempdir().unwrap();
+    let trusted = outside.path().join("trusted");
+    git(
+        &shop.root,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            trusted.to_str().unwrap(),
+            "main",
+        ],
+    );
+    let mut with = door.clone();
+    with.extend(["--trusted-repo", trusted.to_str().unwrap()]);
+    let mut m = mcp(&shop.root, &with, &env);
+    let (_, esc) = escalate(&mut m);
+    assert_eq!(esc["state"], "waiting for a person", "{esc}");
+    assert_eq!(esc["sensitive"], json!(["payments"]), "{esc}");
+    // A rationale alone is never granted by policy.
+    assert!(esc["reasons"].to_string().contains("grade 5"), "{esc}");
+    let text = std::fs::read_to_string(&log).unwrap();
+    assert!(text.contains("\"needs-person\""), "{text}");
+    drop(m);
+
+    // A "trusted" checkout the agent can edit is refused at start.
+    let mut inside = door.clone();
+    inside.extend(["--trusted-repo", "services"]);
+    let mut args = vec!["mcp", "--no-server"];
+    args.extend(inside);
+    let (code, _, err) = onus(&shop.root, &env, &args);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("inside the agent's worktree"), "{err}");
+}
+
+#[test]
+fn a_request_changed_after_it_was_filed_mints_nothing() {
+    let fake = Fake::start();
+    let shop = shop();
+    let l = login(&fake);
     let keys = Keys::new("sms-alerts", "services/notifications/**");
     let mut m = mcp(
         &shop.root,
@@ -944,14 +1179,161 @@ fn signed_out_with_the_root_key_the_local_policy_decides() {
             "--key",
             &keys.private(),
         ],
-        &env,
+        &l.env(),
     );
-    let (_, esc) = escalate(&mut m);
-    // A rationale alone is never granted by policy.
-    assert_eq!(esc["state"], "waiting for a person", "{esc}");
-    assert!(esc["reasons"].to_string().contains("grade 5"), "{esc}");
+    let (id, _) = escalate(&mut m);
+    let request = shop.root.join(format!(".onus/escalations/{id}.json"));
+    let token = shop.root.join(format!(".onus/escalations/{id}.token"));
+    let filed = std::fs::read_to_string(&request).unwrap();
+    fake.set(
+        "esc-1",
+        json!({ "state": "granted", "decision": { "by": { "id": "user:ada", "name": "Ada" } } }),
+    );
+
+    // The agent widens the request it kept, after it was filed.
+    let mut wider: Value = serde_json::from_str(&filed).unwrap();
+    wider["scopes"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("write:path:services/auth/**"));
+    std::fs::write(&request, wider.to_string()).unwrap();
+    let (failed, msg) = m.tool("onus_escalation", json!({ "id": id, "wait": 1 }));
+    assert!(failed, "{msg}");
+    assert!(
+        msg.as_str().unwrap().contains("changed after it was filed"),
+        "{msg}"
+    );
+    assert!(!token.exists());
+
+    // As filed, but Onus Cloud shows other scopes as granted.
+    std::fs::write(&request, &filed).unwrap();
+    fake.set("esc-1", json!({ "scopes": ["write:path:services/**"] }));
+    let (failed, msg) = m.tool("onus_escalation", json!({ "id": id, "wait": 1 }));
+    assert!(failed, "{msg}");
+    assert!(msg.as_str().unwrap().contains("nothing is minted"), "{msg}");
+    assert!(!token.exists());
+
+    // As filed and as granted: exactly what was asked for.
+    fake.set(
+        "esc-1",
+        json!({ "scopes": ["write:path:services/billing/src/**"] }),
+    );
+    let (failed, state) = m.tool("onus_escalation", json!({ "id": id, "wait": 1 }));
+    assert!(!failed, "{state}");
+    assert_eq!(state["adopted"], true, "{state}");
+    let granted = state["token"].as_str().unwrap().to_string();
+    let check = |right: &str| {
+        onus(
+            &shop.root,
+            &[],
+            &[
+                "token",
+                "check",
+                "--token",
+                &granted,
+                "--key-public",
+                &keys.public(),
+                right,
+            ],
+        )
+        .0
+    };
+    assert_eq!(check("write:path:services/billing/src/a.ts"), 0);
+    assert_ne!(check("write:path:services/auth/x.ts"), 0);
+
+    // A kept token that does not prove this grant is not handed out.
+    let other = Keys::new("sms-alerts", "services/**");
+    std::fs::write(&token, format!("{}\n", other.token)).unwrap();
+    let (_, state) = m.tool("onus_escalation", json!({ "id": id }));
+    assert!(state.get("token").is_none(), "{state}");
+    assert!(
+        state["next"].as_str().unwrap().contains("cannot be used"),
+        "{state}"
+    );
+}
+
+#[test]
+fn the_policy_in_onus_cloud_is_logged_as_the_policy() {
+    let fake = Fake::start();
+    let shop = shop();
+    let l = login(&fake);
+    let keys = Keys::new("sms-alerts", "services/notifications/**");
+    let mut m = mcp(
+        &shop.root,
+        &[
+            "--token",
+            &keys.token,
+            "--key-public",
+            &keys.public(),
+            "--key",
+            &keys.private(),
+        ],
+        &l.env(),
+    );
+    let (id, _) = escalate(&mut m);
+    fake.set(
+        "esc-1",
+        json!({ "state": "granted", "decision": { "by": { "id": "system:policy", "name": "policy" } } }),
+    );
+    let (failed, state) = m.tool("onus_escalation", json!({ "id": id, "wait": 1 }));
+    assert!(!failed, "{state}");
+    assert_eq!(state["state"], "granted", "{state}");
     let text = std::fs::read_to_string(shop.root.join(".onus/audit.jsonl")).unwrap();
-    assert!(text.contains("\"needs-person\""), "{text}");
+    assert!(
+        text.contains("\"actor\":\"system:policy (Onus Cloud)\""),
+        "{text}"
+    );
+    assert!(!text.contains("a person (Onus Cloud)"), "{text}");
+}
+
+#[test]
+fn a_narrow_token_is_taught_what_it_lacks() {
+    let fake = Fake::start();
+    let shop = shop();
+    let l = login(&fake);
+    let mut env = l.env();
+    env.push(("ONUS_CLOUD_TOKEN", "onus_tok_narrow".into()));
+    env.push(("ONUS_CLOUD_URL", fake.url.clone()));
+    env.push(("ONUS_CLOUD_ORG", "acme".into()));
+    let (code, _, err) = onus(&shop.root, &env, &["cloud", "env", "list"]);
+    assert_eq!(code, 1, "{err}");
+    assert!(
+        err.contains("this token cannot read environments (env:read)"),
+        "{err}"
+    );
+    assert!(
+        err.contains(
+            "mint one with `onus cloud token create --scope env:read`, or ask with onus_escalate"
+        ),
+        "{err}"
+    );
+    // Its status says what it is, and that it cannot see environments.
+    let mut m = mcp(&shop.root, &[], &env);
+    let (failed, status) = m.tool("onus_cloud_status", json!({}));
+    assert!(!failed, "{status}");
+    assert_eq!(status["signedInWith"], "token", "{status}");
+    assert!(status["environments"].is_null(), "{status}");
+    assert_eq!(status["token"]["scopes"], json!(["pulls:read"]), "{status}");
+}
+
+#[test]
+fn a_scoped_token_near_its_end_is_minted_again() {
+    let fake = Fake::start();
+    // Each token ends within the minute.
+    fake.world.lock().unwrap().mint_ttl = Some(30);
+    let shop = shop();
+    let l = login(&fake);
+    let mut m = mcp(&shop.root, &[], &l.env());
+    for _ in 0..2 {
+        let (failed, out) = m.tool("onus_cloud_pulls", json!({}));
+        assert!(!failed, "{out}");
+    }
+    let mints = fake.requests("POST", "/v1/orgs/acme/tokens");
+    assert_eq!(mints.len(), 2, "{:?}", fake.seen());
+    assert!(mints.iter().all(|s| s.auth == "Bearer onus_cli_login"));
+    let pulls = fake.requests("GET", "/v1/orgs/acme/pulls");
+    assert_eq!(pulls[0].auth, "Bearer onus_tok_1");
+    assert_eq!(pulls[1].auth, "Bearer onus_tok_2");
 }
 
 #[test]
@@ -974,7 +1356,7 @@ fn the_command_line_files_reports_and_collects_answers() {
             "rationale:the spec says UTC and local time",
             "--reason",
             "which time zone?",
-            "--worktree",
+            "--repo",
             root,
         ],
     );
@@ -1055,4 +1437,45 @@ fn the_command_line_files_reports_and_collects_answers() {
         ],
     );
     assert_eq!(code, 0, "{err}");
+
+    // Withdrawn from the command line: the audit log has it at once.
+    let (code, _, err) = onus(
+        &shop.root,
+        &l.env(),
+        &[
+            "cloud",
+            "blocked",
+            "--kind",
+            "impossible-task",
+            "--task",
+            "sms-alerts",
+            "--reason",
+            "there is no SMS provider",
+            "--repo",
+            root,
+        ],
+    );
+    assert_eq!(code, 3, "{err}");
+    let id = fake.requests("POST", "/v1/orgs/acme/escalations")[2].body["clientRequestId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let (code, _, err) = onus(
+        elsewhere.path(),
+        &l.env(),
+        &["cloud", "escalation", "withdraw", &id, "--repo", root],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        fake.requests("POST", "/v1/orgs/acme/escalations/esc-3/withdraw")
+            .len(),
+        1
+    );
+    let log = std::fs::read_to_string(shop.root.join(".onus/audit.jsonl")).unwrap();
+    assert!(
+        log.lines()
+            .any(|l| l.contains(&id) && l.contains("\"decision\":\"withdrawn\"")),
+        "{log}"
+    );
 }
