@@ -123,7 +123,7 @@ What the GitHub Action runs to keep outcome records on a branch (`onus help ci`)
     onus ci push --records records --since "$BEFORE"
     onus ci records push --dir records --message "acme/shop#7 closed"
 
-- `ci pr` submits, classifies and (with `--judge`) judges the change, appends to `pulls.jsonl`, writes `submission.json`, `classification.json`, `judgment.json` and the comment section `lane.md` to `--out`, and prints `{lane, verdict, agent, record}`. `--evidence <file>` adds test runs.
+- `ci pr` submits, classifies and (with `--judge`) judges the change, appends to `pulls.jsonl`, writes `submission.json`, `classification.json`, `judgment.json` and the comment section `lane.md` to `--out`, and prints `{lane, verdict, agent, record, review}`. `--evidence <file>` adds test runs; `--reviews <file>` gives the pull request's GitHub reviews, for the human lane's review (`onus help ci`).
 - `ci comment` acts on `/onus approve <row>`, `/onus audit ok|miss [note]` and `/onus incident <note> [involved: a, b]` from OWNER, MEMBER or COLLABORATOR, and prints `{command, ok, reply, rerun}`.
 - `ci closed` turns the pull request's latest record into an outcome; `ci push` records reverts.
 - `ci records` takes `--remote` (default `origin`) and `--branch` (default `onus/records`).

@@ -577,6 +577,16 @@ impl Codeowners {
             .map(|(_, o)| o.clone())
             .unwrap_or_default()
     }
+
+    /// Owners of a file: the last rule matching it.
+    pub fn owners_of_file(&self, path: &str) -> Vec<String> {
+        self.rules
+            .iter()
+            .rev()
+            .find(|(set, _)| set.is_match(path))
+            .map(|(_, o)| o.clone())
+            .unwrap_or_default()
+    }
 }
 
 fn codeowners_globs(pattern: &str) -> Vec<String> {
@@ -890,6 +900,15 @@ mod tests {
         assert_eq!(c.owners_of("services/billing"), ["@team-payments"]);
         assert_eq!(c.owners_of("packages/events"), ["@team-platform"]);
         assert_eq!(c.owners_of("services/orders"), ["@everyone"]);
+        assert_eq!(
+            c.owners_of_file("services/billing/src/charge.ts"),
+            ["@team-payments"]
+        );
+        assert_eq!(
+            c.owners_of_file("services/orders/packages/x.ts"),
+            ["@team-platform"]
+        );
+        assert_eq!(c.owners_of_file("README.md"), ["@everyone"]);
     }
 
     #[test]

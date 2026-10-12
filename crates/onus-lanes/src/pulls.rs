@@ -32,6 +32,13 @@ pub struct PullRecord {
     /// history counts reverts and incidents against.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub components: Vec<String>,
+    /// Everyone asked to review so far (`@login`, `@org/team`), so nobody
+    /// is asked twice.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requested: Vec<String>,
+    /// Who approved the head commit, from the reviews that counted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reviewed_by: Vec<String>,
 }
 
 pub fn load(path: &Path) -> Result<Vec<PullRecord>> {
@@ -204,11 +211,22 @@ mod tests {
             judge: None,
             approvals: vec![],
             components: vec![],
+            requested: vec![],
+            reviewed_by: vec![],
         };
         append(&path, &rec(Lane::Human, 1)).unwrap();
         append(&path, &rec(Lane::Judge, 2)).unwrap();
         let all = load(&path).unwrap();
         assert_eq!(latest(&all, "acme/shop#1").unwrap().lane, Lane::Judge);
         assert!(latest(&all, "acme/shop#2").is_none());
+        // Review fields are left out when empty, so old lines stay the same.
+        let line = serde_json::to_string(&rec(Lane::Human, 1)).unwrap();
+        assert!(!line.contains("requested") && !line.contains("reviewedBy"));
+        let mut reviewed = rec(Lane::Human, 3);
+        reviewed.requested = vec!["@team-growth".into()];
+        reviewed.reviewed_by = vec!["@grace".into()];
+        let line = serde_json::to_string(&reviewed).unwrap();
+        assert!(line.contains(r#""requested":["@team-growth"],"reviewedBy":["@grace"]"#));
+        assert_eq!(serde_json::from_str::<PullRecord>(&line).unwrap(), reviewed);
     }
 }

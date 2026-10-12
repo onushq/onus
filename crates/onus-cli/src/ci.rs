@@ -14,6 +14,7 @@
 //! Records live in a folder that `onus ci records pull|push` syncs with a
 //! branch of the repository.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -21,11 +22,15 @@ use clap::Subcommand;
 use onus_core::{Lane, SemanticReport};
 use onus_lanes::outcomes::{self, Outcome};
 use onus_lanes::pulls::{self, PullRecord};
+use onus_lanes::review::{self, Review, ReviewState};
 use onus_lanes::submission::Approval;
+use onus_map::discover::{CODEOWNERS_PATHS, Codeowners};
 use serde_json::json;
 
 use crate::{lanes, records};
 
+// Parsed once per run, so the size of `Pr` does not matter.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Subcommand)]
 pub enum CiCmd {
     /// A pull request was opened or pushed: submit, classify, judge, record.
@@ -62,6 +67,9 @@ pub enum CiCmd {
         judge: bool,
         #[arg(long, value_name = "FILE")]
         config: Option<PathBuf>,
+        /// GitHub reviews of the pull request (JSON array; see `onus help ci`).
+        #[arg(long, value_name = "FILE")]
+        reviews: Option<PathBuf>,
         /// Where to write the submission, classification, judgment and comment section.
         #[arg(long, value_name = "DIR")]
         out: PathBuf,
@@ -193,6 +201,7 @@ pub fn run(cmd: CiCmd) -> Result<i32> {
             records,
             judge,
             config,
+            reviews,
             out,
             at,
         } => pr(PrArgs {
@@ -208,6 +217,7 @@ pub fn run(cmd: CiCmd) -> Result<i32> {
             records,
             judge,
             config,
+            reviews,
             out,
             at,
         }),
@@ -294,6 +304,7 @@ struct PrArgs {
     records: PathBuf,
     judge: bool,
     config: Option<PathBuf>,
+    reviews: Option<PathBuf>,
     out: PathBuf,
     at: Option<u64>,
 }
@@ -336,10 +347,15 @@ fn pr(a: PrArgs) -> Result<i32> {
                 .with_context(|| format!("{} is not a test run", p.display()))
         })
         .collect::<Result<Vec<_>>>()?;
+    let reviews: Vec<Review> = match &a.reviews {
+        Some(p) => serde_json::from_str(&std::fs::read_to_string(p)?)
+            .with_context(|| format!("{} is not a list of reviews", p.display()))?,
+        None => Vec::new(),
+    };
     let all_pulls = pulls::load(&pulls_file(&a.records))?;
-    let approvals = pulls::latest(&all_pulls, &a.change)
-        .map(|r| r.approvals.clone())
-        .unwrap_or_default();
+    let previous = pulls::latest(&all_pulls, &a.change);
+    let approvals = previous.map(|r| r.approvals.clone()).unwrap_or_default();
+    let asked_before = previous.map(|r| r.requested.clone()).unwrap_or_default();
     let parts = lanes::SubmissionParts {
         intent_markdown: intent.is_some(),
         intent,
@@ -394,6 +410,12 @@ fn pr(a: PrArgs) -> Result<i32> {
         .collect();
     components.sort();
     components.dedup();
+    let owners = review_owners(&a.repo, &head, &sub.report);
+    let review = review::evaluate(lane, &head, &a.author, &reviews, owners, &asked_before);
+    let mut requested = asked_before;
+    requested.extend(review.request.iter().cloned());
+    requested.sort();
+    requested.dedup();
     pulls::append(
         &pulls_file(&a.records),
         &PullRecord {
@@ -410,6 +432,8 @@ fn pr(a: PrArgs) -> Result<i32> {
             judge: judgment.as_ref().map(|j| j.judge.clone()),
             approvals,
             components,
+            requested: requested.clone(),
+            reviewed_by: review.approved_by.clone(),
         },
     )?;
 
@@ -446,6 +470,9 @@ fn pr(a: PrArgs) -> Result<i32> {
             md.push_str(&format!("- {r}\n"));
         }
     }
+    if review.required {
+        md.push_str(&review_markdown(&review, &requested));
+    }
     if !sub.approvals.is_empty() {
         md.push_str("\n**Approved:** ");
         md.push_str(
@@ -480,9 +507,92 @@ fn pr(a: PrArgs) -> Result<i32> {
         "verdict": judgment.as_ref().map(|j| j.verdict),
         "agent": agent.key(),
         "record": { "merged": record.changes, "recentIncidents": record.recent_incidents },
+        // Always present: how a host tells this binary from one without reviews.
+        "review": review,
     });
     println!("{}", serde_json::to_string(&summary)?);
     Ok(0)
+}
+
+/// Whom to ask to review a change: the owners of the rows that need a
+/// person, with CODEOWNERS at `head` for those rows that name none; the
+/// owners of every row when that finds nobody. Sorted.
+fn review_owners(repo: &Path, head: &str, report: &SemanticReport) -> Vec<String> {
+    let needing: Vec<_> = report
+        .changes
+        .iter()
+        .filter(|r| r.hints.needs_person)
+        .collect();
+    let mut owners: BTreeSet<String> = needing
+        .iter()
+        .flat_map(|r| r.hints.owners.iter().cloned())
+        .collect();
+    let unowned: Vec<_> = needing
+        .iter()
+        .filter(|r| r.hints.owners.is_empty())
+        .collect();
+    if !unowned.is_empty() {
+        let codeowners = CODEOWNERS_PATHS
+            .iter()
+            .find_map(|p| lanes::git_lines(repo, &["show", &format!("{head}:{p}")]).ok())
+            .map(|lines| Codeowners::parse(&lines.join("\n")))
+            .unwrap_or_default();
+        for r in unowned {
+            for l in &r.locations {
+                owners.extend(codeowners.owners_of_file(&l.file));
+            }
+        }
+    }
+    if owners.is_empty() {
+        owners = report
+            .changes
+            .iter()
+            .flat_map(|r| r.hints.owners.iter().cloned())
+            .collect();
+    }
+    owners.into_iter().collect()
+}
+
+/// The **Review:** paragraph of the lane section, for the human lane.
+fn review_markdown(review: &ReviewState, asked: &[String]) -> String {
+    if review.satisfied {
+        return format!(
+            "\n**Review:** approved by {}.\n",
+            review.approved_by.join(", ")
+        );
+    }
+    let mut md = String::from(
+        "\n**Review:** waiting for an approving review from a person with write access who did not open this pull request.",
+    );
+    if !asked.is_empty() {
+        md.push_str(&format!(" Asked: {}.", asked.join(", ")));
+    } else if !review.owners.is_empty() {
+        md.push_str(&format!(" Owners: {}.", review.owners.join(", ")));
+    } else {
+        md.push_str(
+            " No owners are declared for what changed; add owners in onus.yaml or CODEOWNERS.",
+        );
+    }
+    if !review.changes_requested_by.is_empty() {
+        md.push_str(&format!(
+            " Changes requested by {}.",
+            review.changes_requested_by.join(", ")
+        ));
+    }
+    if !review.ignored.is_empty() {
+        let names: Vec<String> = review
+            .ignored
+            .iter()
+            // "no write access (CONTRIBUTOR)" reads "(no write access, CONTRIBUTOR)".
+            .map(|i| {
+                let why = i.why.replace(" (", ", ");
+                format!("{} ({})", i.by, why.trim_end_matches(')'))
+            })
+            .collect();
+        md.push_str(&format!(" Not counted: {}.", names.join(", ")));
+    }
+    md.push('\n');
+    md
 }
 
 fn closed(
@@ -525,6 +635,7 @@ fn closed(
             involved: vec![],
             note: None,
             components: last.components.clone(),
+            reviewed_by: last.reviewed_by.clone(),
         },
     )?;
     println!(

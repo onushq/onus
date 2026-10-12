@@ -18,6 +18,16 @@ fn component_name(r: &SemanticChange) -> String {
     r.component.clone().unwrap_or_else(|| "root".into())
 }
 
+/// Every member's owners, sorted.
+pub fn union_owners(members: &[SemanticChange]) -> Vec<String> {
+    members
+        .iter()
+        .flat_map(|m| m.hints.owners.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 fn widespread_candidate(r: &SemanticChange) -> bool {
     match r.kind {
         ChangeKind::Config => true,
@@ -95,6 +105,7 @@ pub fn widespread(rows: Vec<SemanticChange>) -> Vec<SemanticChange> {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
+        row.hints.owners = union_owners(&members);
         row.hints.novelty = vec![];
         row.hints.rules_of_the_game = members.iter().any(|m| m.hints.rules_of_the_game);
         row.hints.needs_person = members.iter().any(|m| m.hints.needs_person);
@@ -137,6 +148,8 @@ pub fn widespread(rows: Vec<SemanticChange>) -> Vec<SemanticChange> {
         row.locations.dedup();
         row.stats = Some(stats);
         row.hints.labels = vec![];
+        // Owners route the review, so the summary keeps them all.
+        row.hints.owners = union_owners(&rest);
         row.hints.blast_radius = 0;
         row.hints.confidence = rest
             .iter()

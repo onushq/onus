@@ -6,7 +6,7 @@ Once Onus has described a change, lanes decide what happens to it: merge it auto
 |---|---|
 | `auto-merge` | It merges when required checks pass (the action can enable GitHub's auto-merge). |
 | `judge` | `onus judge` verifies it; it merges on `approve`. |
-| `human` | A person reviews it. |
+| `human` | A person with write access who did not open it approves its head commit. Its owners are asked to review. |
 | `blocked` | It may not merge as it is. |
 
 ## Submitting a change
@@ -116,5 +116,7 @@ What happens after merging changes the record:
 Reverts are found from commit messages (`This reverts commit …`) and recorded against the change they undo; a reverted change no longer counts toward its agent setup's record. A change turned off by a feature flag or a rolled-back rollout is recorded with `onus outcomes record --result rolled-back` and counts the same way. An agent setup with an incident among its last 20 changes cannot auto-merge. `backlog` lists the components and symbols incidents involved, most often first: where the next held-out tests should go. Onus does not write tests.
 
 ## In CI
+
+In the human lane, `onus ci pr --reviews <file>` decides whether the change has the review it needs: an approval of the head commit from someone with write access who is not a bot and did not open the pull request, and no outstanding request for changes. It also names the owners of the rows that need a person (onus.yaml, else CODEOWNERS) for the host to ask, each once per pull request. Onus Cloud uses this to keep its check waiting until then; see `onus help ci`.
 
 The action classifies every pull request with `lanes: true` and shows the lane in its comment. `apply-lane: true` labels the pull request `onus/lane:<lane>` and fails the job for `blocked`; `auto-merge: true` enables GitHub's auto-merge for the `auto-merge` lane. See `onus help ci`. With `records: true`, the action also keeps the outcome records on an `onus/records` branch: outcomes when pull requests close, reverts when the default branch moves, and approvals, audits and incidents from `/onus` comments.

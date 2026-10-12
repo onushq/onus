@@ -114,6 +114,18 @@ impl<'a> Ctx<'a> {
         }
     }
 
+    /// Owners of a component (onus.yaml, else CODEOWNERS), sorted.
+    pub fn owners(&self, component: &str) -> Vec<String> {
+        let mut owners = self
+            .components
+            .get(component)
+            .map(|c| c.owners.clone())
+            .unwrap_or_default();
+        owners.sort();
+        owners.dedup();
+        owners
+    }
+
     /// Sensitivity labels of a component, sorted.
     pub fn labels(&self, component: &str) -> Vec<String> {
         self.components
@@ -328,6 +340,7 @@ pub fn change(
             needs_person: false,
             dependent_components: 0,
             tested: None,
+            owners: vec![],
         },
         locations,
         stats: None,

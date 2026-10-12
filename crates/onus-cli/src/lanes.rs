@@ -621,6 +621,7 @@ pub fn outcomes_cmd(cmd: OutcomesCmd) -> Result<i32> {
                     involved: vec![],
                     note: None,
                     components,
+                    reviewed_by: vec![],
                 },
             )?;
             Ok(0)

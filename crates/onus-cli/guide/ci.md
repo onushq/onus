@@ -100,6 +100,37 @@ What happens on each event:
 
   `approve` records a person's approval of a row and re-runs the check, so the lane updates. `audit` records a human audit of a merged change, the miss rate that says whether the automatic lanes can be trusted. `incident` marks a merged change as having caused one, with the components and symbols involved: an agent setup with an incident among its last 20 changes cannot auto-merge, and `onus outcomes backlog` lists where incidents happen. The action reacts with 👍 and replies with what it recorded.
 
+### Reviews in the human lane
+
+A change in the human lane needs a person to approve it. `onus ci pr --reviews <file>` decides whether it has one, from the pull request's GitHub reviews as a JSON array:
+
+    [{"by": "grace", "state": "APPROVED", "commit": "<sha>", "association": "MEMBER", "bot": false, "at": 1760000000}]
+
+`by` is the login without `@`; `state` is `APPROVED`, `CHANGES_REQUESTED`, `COMMENTED`, `DISMISSED` or `PENDING`, in any case; `commit` is the commit reviewed; `association` is the reviewer's author association; `bot` and `at` (seconds) are optional. A host gets them with the GitHub CLI:
+
+    gh api repos/OWNER/REPO/pulls/N/reviews --paginate | jq '[.[] | {by: .user.login, state, commit: .commit_id,
+      association: .author_association, bot: (.user.type == "Bot"),
+      at: ((.submitted_at // "1970-01-01T00:00:00Z") | fromdate)}]' > reviews.json
+
+The rules:
+
+- Each reviewer's latest review counts, ordered by `at` and then by position. `COMMENTED` and `PENDING` never replace an earlier verdict; `DISMISSED` clears it.
+- A review is not counted, and is listed in `ignored` with the reason, when the reviewer is a bot (`bot`, or a login ending in `[bot]`), opened the pull request (`--author`), has no write access (an association other than OWNER, MEMBER or COLLABORATOR), or approved a commit other than the head.
+- Changes requested by a counted reviewer stand at any commit, as on GitHub.
+- In the human lane the review is satisfied with at least one counted approval and no outstanding changes requested. Approvals are recorded in every lane.
+
+The owners to ask are those of the rows that need a person (`hints.owners`, from onus.yaml), with CODEOWNERS at the head commit for those rows that name none, or the owners of every row when that finds nobody. Each is asked once per pull request: the pull record keeps everyone asked so far.
+
+The answer is the `review` key of what `onus ci pr` prints, always present:
+
+    {"lane": "human", …, "review": {"required": true, "satisfied": false, "approvedBy": [],
+      "changesRequestedBy": [], "owners": ["@team-growth"], "request": ["@team-growth"],
+      "ignored": [{"by": "@eve", "why": "no write access (CONTRIBUTOR)"}]}}
+
+`required` is true in the human lane only, and `satisfied` is true outside it. `request` lists the owners to ask now: not asked before, never the author, and empty once satisfied. `lane.md` gains a **Review:** paragraph in the human lane: who was asked, or that it was approved and by whom. Without `--reviews` there are no reviews, so a human-lane change waits.
+
+The pull record keeps `requested` (everyone asked) and `reviewedBy` (the counted approvals of its head), and the outcome keeps `reviewedBy`. A human-lane outcome with no `reviewedBy` merged without a counted review: an admin merge, or a check that was not required. The GitHub Action does not pass `--reviews` yet; Onus Cloud does, and turns `satisfied` into its check.
+
 ### Who made the change
 
 Each outcome is kept against an agent setup. Onus reads it from what git and GitHub show, in order:

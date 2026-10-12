@@ -33,7 +33,10 @@ expression: json
         "intentMismatch": false,
         "needsPerson": false,
         "dependentComponents": 3,
-        "tested": "untested"
+        "tested": "untested",
+        "owners": [
+          "@team-platform"
+        ]
       },
       "locations": [
         {

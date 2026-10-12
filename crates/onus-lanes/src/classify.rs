@@ -576,6 +576,7 @@ mod tests {
                 needs_person: false,
                 dependent_components: 0,
                 tested: None,
+                owners: vec![],
             },
             locations: vec![],
             stats: None,

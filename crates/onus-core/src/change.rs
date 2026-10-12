@@ -100,6 +100,10 @@ pub struct Hints {
     /// when the row changes no code (config, dependencies, tests).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tested: Option<TestReach>,
+    /// Owners of the components involved (onus.yaml, else CODEOWNERS), for
+    /// routing a review. Sorted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owners: Vec<String>,
 }
 
 /// Whether tests or traces reach the files a row changes. File granularity:

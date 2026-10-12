@@ -529,3 +529,126 @@ fn a_judged_pull_request_records_the_judge_that_decided() {
     let id = judgment["judge"].as_str().unwrap();
     assert_eq!(s["byJudge"][id]["changes"], 1, "{s}");
 }
+
+#[test]
+fn a_human_lane_change_waits_for_a_persons_review() {
+    let tmp = tempfile::tempdir().unwrap();
+    let t = tmp.path();
+    let r = t.join("shop");
+    copy_dir(&fixture().join("base"), &r);
+    git(&r, &["init", "-q", "-b", "main"]);
+    git(&r, &["add", "-A"]);
+    git(&r, &["commit", "-q", "-m", "base"]);
+    git(&r, &["checkout", "-q", "-b", "codex/sms"]);
+    apply_overlay(&fixture().join("scenarios/s1-sms-alerts"), &r);
+    git(&r, &["add", "-A"]);
+    git(&r, &["commit", "-q", "-m", "Text customers"]);
+    let head = git(&r, &["rev-parse", "HEAD"]);
+    let rec = t.join("records");
+    let rs = rec.to_str().unwrap();
+    let out = t.join("out");
+    let change = "acme/shop#8";
+    let pr = |reviews: Option<serde_json::Value>| -> serde_json::Value {
+        let mut args = vec![
+            "ci",
+            "pr",
+            "--base",
+            "main",
+            "--head",
+            "codex/sms",
+            "--change",
+            change,
+            "--branch",
+            "codex/sms",
+            "--author",
+            "mike",
+            "--records",
+            rs,
+            "--out",
+            out.to_str().unwrap(),
+        ];
+        let file = t.join("reviews.json");
+        if let Some(list) = reviews {
+            std::fs::write(&file, list.to_string()).unwrap();
+            args.extend(["--reviews", file.to_str().unwrap()]);
+        }
+        serde_json::from_str(&onus(&r, &args)).unwrap()
+    };
+    let md = || std::fs::read_to_string(out.join("lane.md")).unwrap();
+    let last_pull = || lines(&rec.join("pulls.jsonl")).pop().unwrap();
+
+    // No reviews yet: the owners of what needs a person are asked.
+    let s = pr(None);
+    assert_eq!(s["lane"], "human", "{s}");
+    assert_eq!(s["review"]["required"], true, "{s}");
+    assert_eq!(s["review"]["satisfied"], false, "{s}");
+    assert_eq!(s["review"]["owners"], serde_json::json!(["@team-growth"]));
+    assert_eq!(s["review"]["request"], serde_json::json!(["@team-growth"]));
+    assert_eq!(
+        last_pull()["requested"],
+        serde_json::json!(["@team-growth"])
+    );
+    assert!(md().contains("waiting for an approving review"), "{}", md());
+    assert!(md().contains("Asked: @team-growth."), "{}", md());
+
+    // Pushed again: nobody is asked twice.
+    let s = pr(None);
+    assert_eq!(s["review"]["request"], serde_json::json!([]), "{s}");
+    assert_eq!(
+        last_pull()["requested"],
+        serde_json::json!(["@team-growth"])
+    );
+
+    // The author, someone without write access and an approval of an
+    // earlier commit do not count.
+    let review = |by: &str, association: &str, commit: &str| serde_json::json!({ "by": by, "state": "APPROVED", "commit": commit, "association": association, "at": 1 });
+    let s = pr(Some(serde_json::json!([
+        review("mike", "OWNER", &head),
+        review("eve", "CONTRIBUTOR", &head),
+        review("grace", "MEMBER", &"0".repeat(40)),
+    ])));
+    assert_eq!(s["review"]["satisfied"], false, "{s}");
+    assert_eq!(
+        s["review"]["ignored"],
+        serde_json::json!([
+            { "by": "@eve", "why": "no write access (CONTRIBUTOR)" },
+            { "by": "@grace", "why": "approved an earlier commit" },
+            { "by": "@mike", "why": "opened it" },
+        ])
+    );
+    assert!(
+        md().contains("Not counted: @eve (no write access, CONTRIBUTOR)"),
+        "{}",
+        md()
+    );
+
+    // A member approves the head: the lane is satisfied.
+    let s = pr(Some(serde_json::json!([review("grace", "MEMBER", &head)])));
+    assert_eq!(s["review"]["satisfied"], true, "{s}");
+    assert_eq!(s["review"]["approvedBy"], serde_json::json!(["@grace"]));
+    assert!(md().contains("**Review:** approved by @grace."), "{}", md());
+    assert_eq!(last_pull()["reviewedBy"], serde_json::json!(["@grace"]));
+    assert_eq!(
+        last_pull()["requested"],
+        serde_json::json!(["@team-growth"])
+    );
+
+    // Merged: the outcome says who approved it.
+    onus(
+        &r,
+        &[
+            "ci",
+            "closed",
+            "--change",
+            change,
+            "--merged",
+            "--records",
+            rs,
+        ],
+    );
+    let outcomes = lines(&rec.join("outcomes.jsonl"));
+    assert_eq!(
+        outcomes.last().unwrap()["reviewedBy"],
+        serde_json::json!(["@grace"])
+    );
+}

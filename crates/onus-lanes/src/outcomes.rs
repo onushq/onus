@@ -51,6 +51,10 @@ pub struct Outcome {
     /// history counts reverts and incidents against.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub components: Vec<String>,
+    /// Who approved it on review (`@login`). Empty in the human lane means
+    /// it merged without a counted review.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reviewed_by: Vec<String>,
 }
 
 /// The latest outcome of each change, in the order changes first appeared:
@@ -399,6 +403,7 @@ mod tests {
             involved: vec![],
             note: None,
             components: vec![],
+            reviewed_by: vec![],
         }
     }
 

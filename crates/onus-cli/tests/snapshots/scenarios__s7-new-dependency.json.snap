@@ -34,7 +34,10 @@ expression: json
         "rulesOfTheGame": false,
         "intentMismatch": false,
         "needsPerson": false,
-        "dependentComponents": 0
+        "dependentComponents": 0,
+        "owners": [
+          "@team-orders"
+        ]
       },
       "locations": [
         {
@@ -74,7 +77,10 @@ expression: json
         "intentMismatch": false,
         "needsPerson": false,
         "dependentComponents": 0,
-        "tested": "tested"
+        "tested": "tested",
+        "owners": [
+          "@team-orders"
+        ]
       },
       "locations": [
         {

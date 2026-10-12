@@ -38,7 +38,10 @@ expression: json
         "intentMismatch": false,
         "needsPerson": true,
         "dependentComponents": 0,
-        "tested": "tested"
+        "tested": "tested",
+        "owners": [
+          "@team-growth"
+        ]
       },
       "locations": [
         {
@@ -96,7 +99,10 @@ expression: json
         "intentMismatch": false,
         "needsPerson": true,
         "dependentComponents": 1,
-        "tested": "tested"
+        "tested": "tested",
+        "owners": [
+          "@team-growth"
+        ]
       },
       "locations": [
         {
@@ -128,7 +134,10 @@ expression: json
         "intentMismatch": false,
         "needsPerson": false,
         "dependentComponents": 1,
-        "tested": "untested"
+        "tested": "untested",
+        "owners": [
+          "@team-growth"
+        ]
       },
       "locations": [
         {
@@ -160,7 +169,10 @@ expression: json
         "intentMismatch": false,
         "needsPerson": false,
         "dependentComponents": 0,
-        "tested": "untested"
+        "tested": "untested",
+        "owners": [
+          "@team-growth"
+        ]
       },
       "locations": [
         {

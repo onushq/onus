@@ -192,5 +192,6 @@ Grouped rows keep every file and line in their evidence.
 - `rulesOfTheGame`, `intentMismatch`, `needsPerson`.
 - `dependentComponents`: other components (not the row's own) that depend on the subject. 0 for rows about a whole component, such as the per-component internal row.
 - `tested`: for rows that change code, whether tests reach the files it changes: `tested` (a test exercises every changed file), `traced` (each changed file is tested or seen in a runtime trace) or `untested`. Absent for rows that change no code. It is per file, not line coverage.
+- `owners`: the owners of the row's component, from onus.yaml or else CODEOWNERS; a row merged from several components has all of theirs. Absent when nobody owns it. Used to route a review (`onus help ci`), not to rank.
 
 The lane classifier reads these hints (`onus help lanes`).

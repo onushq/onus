@@ -34,8 +34,8 @@ use std::path::Path;
 
 use onus_core::rank;
 use onus_core::{
-    ChangeKind, CodebaseMap, Confidence, OnusConfig, ReportSummary, SCHEMA_VERSION, SemanticReport,
-    Side, TextStats,
+    ChangeKind, CodebaseMap, Confidence, OnusConfig, ReportSummary, SCHEMA_VERSION, SemanticChange,
+    SemanticReport, Side, TextStats,
 };
 use onus_map::walk;
 
@@ -93,9 +93,13 @@ pub fn diff(input: &DiffInput) -> SemanticReport {
     rows.extend(secrets_scan::rows(&ctx));
     rows.extend(apis::rows(&ctx));
     rows.extend(violations);
+    // Owners before the collapses, so merged rows keep everyone's.
+    fill_owners(&ctx, &mut rows);
     let mut rows = generated::collapse(&ctx, rows);
     let (internal_rows, structure) = internal::rows(&ctx, &rows, &tests);
     rows.extend(internal_rows);
+    // And for the rows those two made.
+    fill_owners(&ctx, &mut rows);
     let mut rows = collapse::widespread(rows);
     declared::mark(&ctx, &mut rows);
     reach::fill(&ctx, &mut rows);
@@ -187,5 +191,16 @@ pub fn diff(input: &DiffInput) -> SemanticReport {
             lines_removed: text.lines_removed(),
         },
         map_diagnostics,
+    }
+}
+
+/// Adds the owners of each row's component to the row, for routing.
+fn fill_owners(ctx: &ctx::Ctx, rows: &mut [SemanticChange]) {
+    for r in rows {
+        if let Some(c) = &r.component {
+            r.hints.owners.extend(ctx.owners(c));
+            r.hints.owners.sort();
+            r.hints.owners.dedup();
+        }
     }
 }

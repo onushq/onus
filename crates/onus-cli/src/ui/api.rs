@@ -1019,6 +1019,7 @@ fn outcomes_record(state: &State, body: Value) -> Answer {
             involved: vec![],
             note: None,
             components: q.components,
+            reviewed_by: vec![],
         },
     )?;
     outcomes(state)

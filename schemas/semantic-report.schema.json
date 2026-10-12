@@ -163,6 +163,13 @@
             "type": "string"
           }
         },
+        "owners": {
+          "description": "Owners of the components involved (onus.yaml, else CODEOWNERS), for\nrouting a review. Sorted.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "rulesOfTheGame": {
           "description": "Tests, CI, policies, labels or declared contracts were touched.",
           "type": "boolean"
