@@ -689,16 +689,40 @@ fn lanes_submit(state: &State, body: Value) -> Answer {
             envs::test_run_of(&store, full, &m)
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
-    let scope = match q.token.as_deref().filter(|t| !t.trim().is_empty()) {
-        Some(t) => Some(lanes::scope_used(t, &state.public_key)?),
-        None => None,
+    let (scope, claim) = match q.token.as_deref().filter(|t| !t.trim().is_empty()) {
+        Some(t) => {
+            let (scope, claim) = lanes::scope_and_agent(t, &state.public_key)?;
+            (Some(scope), claim)
+        }
+        None => (None, None),
+    };
+    // Only escalations granted to this task get into the submission.
+    let escalations = if q.escalations.is_empty() {
+        Vec::new()
+    } else {
+        doors::verify_escalations_with(
+            &state.escalations,
+            Some(&state.audit),
+            &q.escalations,
+            &state.public_key,
+            scope.as_ref().map(|s| s.task.as_str()),
+        )?
     };
     let approvals = q
         .approvals
         .iter()
         .map(|a| lanes::parse_approval(a))
         .collect::<anyhow::Result<Vec<_>>>()?;
-    let mut agent = q.agent;
+    // The token's agent, when it names one, over what was declared.
+    let mut agent = match claim {
+        Some(a) => onus_lanes::submission::AgentSetup {
+            tool: a.tool,
+            model: a.model,
+            config: a.config,
+            team: a.team,
+        },
+        None => q.agent,
+    };
     if agent.tool.is_empty() {
         agent.tool = "unknown".into();
     }
@@ -715,7 +739,7 @@ fn lanes_submit(state: &State, body: Value) -> Answer {
             intent_markdown,
             evidence,
             scope,
-            escalations: q.escalations,
+            escalations,
             approvals,
             agent,
         },
@@ -1310,13 +1334,7 @@ fn scope_suggest(state: &State, body: Value) -> Answer {
 // Escalations and the audit log
 
 pub fn request_path(state: &State, id: &str) -> anyhow::Result<PathBuf> {
-    if id.is_empty()
-        || !id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
-    {
-        bail!("`{id}` is not a request id");
-    }
+    doors::check_request_id(id)?;
     Ok(state.escalations.join(format!("{id}.json")))
 }
 

@@ -273,8 +273,8 @@ Examples:
         /// code and can run containers: only allow hosts on a network you trust.
         #[arg(long, value_name = "HOST", requires = "http")]
         allow_host: Vec<String>,
-        /// A task token (default: $ONUS_TOKEN): answers leave out everything the task may
-        /// not read. Needs --key-public.
+        /// A task token (default: $ONUS_TOKEN): every tool is checked against it, and answers
+        /// leave out everything the task may not read. Needs --key-public.
         #[arg(
             long,
             env = "ONUS_TOKEN",
@@ -290,6 +290,10 @@ Examples:
         /// escalations).
         #[arg(long)]
         no_actions: bool,
+        /// The audit log every call is written to (default: .onus/audit.jsonl in the
+        /// worktree). Put it where the agent cannot write.
+        #[arg(long, value_name = "FILE")]
+        audit: Option<PathBuf>,
     },
     /// Ask the codebase map a question; the same answers as the MCP tools.
     #[command(after_long_help = "\
@@ -788,39 +792,44 @@ fn run(cli: Cli) -> Result<i32> {
             token,
             key_public,
             no_actions,
+            audit,
         } => {
             let root = onus_cli::daemon::worktree_root(&repo);
+            let canonical = onus_cli::daemon::canonical(&root).unwrap_or_else(|_| root.clone());
+            // One log for the door and for `onus ui`'s audit page.
+            let audit = audit.unwrap_or_else(|| canonical.join(".onus").join("audit.jsonl"));
+            let public = match &key_public {
+                Some(k) => Some(onus_doors::token::public_key(&doors::read_key(k)?)?),
+                None => None,
+            };
+            let door = std::sync::Arc::new(onus_cli::door::Door::new(
+                canonical.clone(),
+                audit.clone(),
+                public,
+                token,
+            )?);
             let actions: Option<std::sync::Arc<dyn onus_cli::mcp::Actions>> = if no_actions {
                 None
             } else {
                 Some(std::sync::Arc::new(agent::AgentActions {
                     state: ui::State::new(
-                        onus_cli::daemon::canonical(&root).unwrap_or_else(|_| root.clone()),
+                        canonical,
                         String::new(),
                         0,
                         ui::Places {
+                            audit: Some(audit),
                             public_key: key_public.clone(),
                             ..Default::default()
                         },
                     ),
-                    token: token.clone(),
+                    door: door.clone(),
                 }))
-            };
-            let read_scope = match (token, key_public) {
-                (Some(t), Some(k)) => {
-                    let key = std::fs::read_to_string(&k)
-                        .with_context(|| format!("cannot read {}", k.display()))?;
-                    let verified =
-                        onus_doors::token::verify(&t, &onus_doors::token::public_key(&key)?)?;
-                    Some(std::sync::Arc::new(onus_cli::mcp::ReadScope::new(verified)))
-                }
-                _ => None,
             };
             // The Onus Cloud tools, when this process is signed in (and may act).
             let cloud =
                 actions.is_some() && matches!(onus_cli::cloud::Client::discover(), Ok(Some(_)));
             let tools = onus_cli::mcp::Tools {
-                read_scope,
+                door: Some(door),
                 actions,
                 cloud,
             };

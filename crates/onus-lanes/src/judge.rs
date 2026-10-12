@@ -531,6 +531,7 @@ mod tests {
                 seed: None,
                 hosts: vec![],
                 secrets: vec![],
+                task: None,
             },
             artifacts: vec![],
             tests: None,

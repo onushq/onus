@@ -17,6 +17,7 @@ use hyper::{Request, Response, StatusCode};
 
 use super::{Gateway, now};
 use crate::audit::{AuditLog, Record};
+use crate::token::token_id;
 
 /// What the server needs besides the gateway's settings.
 #[derive(Debug, Clone)]
@@ -124,21 +125,40 @@ impl Server {
                 "onus gateway: clone /<task>.git\n",
             ));
         };
+        // Git asks without a password first; that challenge is not logged.
         let Some(raw) = basic_password(&req) else {
             return Ok(unauthorized("use your task token as the password"));
         };
+        let refused = |actor: &str, why: &str| -> Result<()> {
+            self.log(Record {
+                actor: actor.to_string(),
+                action: "auth".into(),
+                subject: format!("{task}.git"),
+                decision: "refused".into(),
+                reason: why.to_string(),
+                details: serde_json::json!({ "door": "gateway", "tokenId": token_id(&raw) }),
+            })
+        };
         let token = match self.gateway.verify(&raw) {
             Ok(t) => t,
-            Err(_) => return Ok(unauthorized("the token is not valid")),
+            Err(_) => {
+                let why = "the token is not valid";
+                refused("unknown", why)?;
+                return Ok(unauthorized(why));
+            }
         };
         if token.task != task {
+            let why = format!("this token is for task `{}`", token.task);
+            refused(&token.task, &why)?;
             return Ok(text(
                 StatusCode::FORBIDDEN,
-                format!("onus gateway: this token is for task `{}`\n", token.task),
+                format!("onus gateway: {why}\n"),
             ));
         }
         if now() > token.expires {
-            return Ok(unauthorized("the token has expired"));
+            let why = "the token has expired";
+            refused(&token.task, why)?;
+            return Ok(unauthorized(why));
         }
         let gateway = self.gateway.clone();
         let onus = self.onus.clone();
@@ -147,19 +167,33 @@ impl Server {
         tokio::task::spawn_blocking(move || gateway.ensure_mirror(&token, &raw_token, &onus))
             .await??;
         if fresh {
-            AuditLog::new(self.gateway.audit_path()).append(
-                Record {
-                    actor: task.clone(),
-                    action: "mirror".into(),
-                    subject: format!("{task}.git"),
-                    decision: "created".into(),
-                    reason: "first request with this task's token".into(),
-                    details: serde_json::Value::Null,
-                },
-                now(),
-            )?;
+            self.log(Record {
+                actor: task.clone(),
+                action: "mirror".into(),
+                subject: format!("{task}.git"),
+                decision: "created".into(),
+                reason: "first request with this task's token".into(),
+                details: serde_json::Value::Null,
+            })?;
+        }
+        // Pushes are logged by the pre-receive hook, with what they change.
+        if req.method() == hyper::Method::POST && rest.ends_with("/git-upload-pack") {
+            self.log(Record {
+                actor: task.clone(),
+                action: "fetch".into(),
+                subject: format!("{task}.git"),
+                decision: "allowed".into(),
+                reason: "the token is valid for this task".into(),
+                details: serde_json::json!({ "door": "gateway", "tokenId": token_id(&raw) }),
+            })?;
         }
         self.cgi(req, &task, &rest).await
+    }
+
+    /// Appends to the audit log; a failure fails the request (closed).
+    fn log(&self, record: Record) -> Result<()> {
+        AuditLog::new(self.gateway.audit_path()).append(record, now())?;
+        Ok(())
     }
 
     /// Runs `git http-backend` for the request.

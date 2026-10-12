@@ -5,21 +5,32 @@
 //! carry their evidence (file and line). The work happens in the
 //! repository's map server (see [`crate::daemon`]), shared with every other
 //! agent; this process only relays.
+//!
+//! Every call goes through the door ([`crate::door`]): checked against the
+//! task token the server holds, then logged.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use onus_index::Query;
 use rmcp::{
-    ErrorData, ServerHandler, ServiceExt,
-    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerConfig},
-    schemars, tool, tool_handler, tool_router,
+    ErrorData, RoleServer, ServerHandler, ServiceExt,
+    handler::server::{router::tool::ToolRouter, tool::ToolCallContext, wrapper::Parameters},
+    model::{
+        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
+        ServerCapabilities, ServerConfig,
+    },
+    schemars,
+    service::RequestContext,
+    tool, tool_handler, tool_router,
 };
 use serde::Deserialize;
+use serde_json::{Value, json};
 
 use crate::daemon::{Op, Request, Response};
+use crate::door::{self, Denial, Door};
 
 /// What agents can do besides asking the map: submit a change, run
 /// environments, read evidence, ask for more access. The binary implements
@@ -53,40 +64,34 @@ pub struct OnusMcp {
     root: PathBuf,
     backend: Arc<dyn Backend>,
     tool_router: ToolRouter<Self>,
-    /// With a task token: answers leave out what the task may not read.
-    read_scope: Option<Arc<ReadScope>>,
+    /// Checks every call against the task token and logs it. With a token,
+    /// answers leave out what the task may not read.
+    door: Option<Arc<Door>>,
+    /// Component folders, which turn map ids into repository paths.
+    dirs: Arc<Mutex<Option<BTreeMap<String, String>>>>,
     actions: Option<Arc<dyn Actions>>,
 }
 
-/// A task token's read scope and the component folders that turn map ids
-/// into repository paths.
-pub struct ReadScope {
-    pub token: onus_doors::token::Verified,
-    dirs: std::sync::Mutex<Option<std::collections::BTreeMap<String, String>>>,
+/// What a tool call learned that its log entry needs: what the read filter
+/// left out or refused, and an action's answer.
+#[derive(Debug, Default)]
+struct Note {
+    hidden: usize,
+    denial: Option<Denial>,
+    answer: Option<Value>,
 }
 
-impl ReadScope {
-    pub fn new(token: onus_doors::token::Verified) -> ReadScope {
-        ReadScope {
-            token,
-            dirs: std::sync::Mutex::new(None),
+tokio::task_local! {
+    static NOTE: Arc<Mutex<Note>>;
+}
+
+/// Adds to the note of the call being served, if any.
+fn note(f: impl FnOnce(&mut Note)) {
+    let _ = NOTE.try_with(|n| {
+        if let Ok(mut n) = n.lock() {
+            f(&mut n);
         }
-    }
-
-    fn readable(&self, path: &str) -> bool {
-        let now = onus_doors::gateway::now();
-        self.token
-            .authorize(onus_doors::scope::Kind::Read, path, now)
-            .is_ok()
-    }
-}
-
-impl std::fmt::Debug for ReadScope {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ReadScope")
-            .field("task", &self.token.task)
-            .finish_non_exhaustive()
-    }
+    });
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -185,6 +190,10 @@ pub struct SubmitParams {
     /// Runs from `onus_env_run` (their ids) that prove the change works.
     #[serde(default)]
     pub evidence: Vec<String>,
+    /// Ids of escalations granted during the task (from onus_escalate). Each
+    /// is checked: it must be granted, for your task.
+    #[serde(default)]
+    pub escalations: Vec<String>,
     /// Your harness, such as `claude-code` or `codex`.
     #[serde(default)]
     pub agent_tool: Option<String>,
@@ -372,7 +381,8 @@ impl OnusMcp {
             root,
             backend,
             tool_router: Self::tool_router(),
-            read_scope: None,
+            door: None,
+            dirs: Arc::new(Mutex::new(None)),
             actions: None,
         }
     }
@@ -397,9 +407,11 @@ impl OnusMcp {
             .await
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
         Ok(match answer {
-            Ok(v) => CallToolResult::success(vec![ContentBlock::text(
-                serde_json::to_string_pretty(&v).unwrap_or_default(),
-            )]),
+            Ok(v) => {
+                let text = serde_json::to_string_pretty(&v).unwrap_or_default();
+                note(|n| n.answer = Some(v));
+                CallToolResult::success(vec![ContentBlock::text(text)])
+            }
             Err(e) => CallToolResult::error(vec![ContentBlock::text(format!("{e:#}"))]),
         })
     }
@@ -422,18 +434,16 @@ impl OnusMcp {
         self
     }
 
-    /// Limits every answer to what `scope`'s token may read.
-    pub fn with_read_scope(mut self, scope: Option<Arc<ReadScope>>) -> OnusMcp {
-        self.read_scope = scope;
+    /// Checks and logs every call at `door`, and limits answers to what its
+    /// token may read.
+    pub fn with_door(mut self, door: Option<Arc<Door>>) -> OnusMcp {
+        self.door = door;
         self
     }
 
     /// Component folders, asked once from the map.
-    async fn component_dirs(
-        &self,
-        scope: &ReadScope,
-    ) -> std::collections::BTreeMap<String, String> {
-        if let Ok(guard) = scope.dirs.lock()
+    async fn component_dirs(&self) -> BTreeMap<String, String> {
+        if let Ok(guard) = self.dirs.lock()
             && let Some(d) = guard.as_ref()
         {
             return d.clone();
@@ -445,7 +455,7 @@ impl OnusMcp {
             },
         };
         let backend = self.backend.clone();
-        let dirs: std::collections::BTreeMap<String, String> =
+        let dirs: BTreeMap<String, String> =
             tokio::task::spawn_blocking(move || backend.call(&req))
                 .await
                 .ok()
@@ -453,25 +463,22 @@ impl OnusMcp {
                 .and_then(|r| r.ok)
                 .and_then(|v| serde_json::from_value(v["componentDirs"].clone()).ok())
                 .unwrap_or_default();
-        if let Ok(mut guard) = scope.dirs.lock() {
+        if let Ok(mut guard) = self.dirs.lock() {
             *guard = Some(dirs.clone());
         }
         dirs
     }
 
-    /// Removes what the token may not read; `Err` when the whole answer is
-    /// about an unreadable file.
-    async fn limit(&self, mut ok: serde_json::Value) -> Result<(serde_json::Value, usize), String> {
-        let Some(scope) = self.read_scope.clone() else {
+    /// Removes what the token may not read; a denial when the whole answer
+    /// is about an unreadable file.
+    async fn limit(&self, mut ok: Value) -> Result<(Value, usize), Denial> {
+        let Some(door) = self.door.clone().filter(|d| d.task().is_some()) else {
             return Ok((ok, 0));
         };
-        let dirs = self.component_dirs(&scope).await;
-        let readable = |p: &str| scope.readable(p);
-        if onus_doors::filter::about_unreadable(&ok, &readable) {
-            return Err(format!(
-                "outside the read scope of task `{}`",
-                scope.token.task
-            ));
+        let dirs = self.component_dirs().await;
+        let readable = |p: &str| door.readable(p);
+        if let Some(path) = onus_doors::filter::unreadable_subject(&ok, &readable) {
+            return Err(door.read_denial(&path));
         }
         let id_path = |s: &str| -> Option<String> {
             let (comp, rest) = s.split_once(':')?;
@@ -501,6 +508,7 @@ impl OnusMcp {
                 ok: Some(ok), map, ..
             }) => match self.limit(ok).await {
                 Ok((ok, hidden)) => {
+                    note(|n| n.hidden = hidden);
                     let mut body = serde_json::json!({ "result": ok, "map": map });
                     if hidden > 0 {
                         body["hidden"] = serde_json::json!(format!(
@@ -511,7 +519,11 @@ impl OnusMcp {
                         serde_json::to_string_pretty(&body).unwrap_or_default(),
                     )])
                 }
-                Err(why) => CallToolResult::error(vec![ContentBlock::text(why)]),
+                Err(denial) => {
+                    let text = denial.text();
+                    note(|n| n.denial = Some(denial));
+                    CallToolResult::error(vec![ContentBlock::text(text)])
+                }
             },
             Ok(Response { error, .. }) => CallToolResult::error(vec![ContentBlock::text(
                 error.unwrap_or_else(|| "no answer".into()),
@@ -686,7 +698,7 @@ impl OnusMcp {
 
     #[tool(
         name = "onus_submit",
-        description = "Submit a committed change for review: Onus reports it, attaches your evidence (runs from onus_env_run) and your task's scope, and classifies it into a lane (auto-merge, judge, human or blocked) with every reason. Returns a submission id for onus_judge. Submit when you are done, with an intent and evidence; a change without them is rejected by the judge."
+        description = "Submit a committed change for review: Onus reports it, attaches your evidence (runs from onus_env_run), your task's scope and the escalations granted to you (ids from onus_escalate, checked), and classifies it into a lane (auto-merge, judge, human or blocked) with every reason. Returns a submission id for onus_judge. Submit when you are done, with an intent and evidence; a change without them is rejected by the judge."
     )]
     async fn submit(
         &self,
@@ -699,6 +711,7 @@ impl OnusMcp {
                 "head": p.head.unwrap_or_else(|| "HEAD".into()),
                 "intent": p.intent,
                 "evidence": p.evidence,
+                "escalations": p.escalations,
                 "agent": { "tool": p.agent_tool.unwrap_or_default(), "model": p.agent_model.unwrap_or_default(), "config": p.agent_config.unwrap_or_default(), "team": "" },
             }),
         )
@@ -953,8 +966,193 @@ impl OnusMcp {
     }
 }
 
+/// Text content of a tool result.
+fn text_of(r: &CallToolResult) -> String {
+    r.content
+        .iter()
+        .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The call refused because the audit log could not be written.
+fn unlogged(e: anyhow::Error) -> CallToolResponse {
+    CallToolResult::error(vec![ContentBlock::text(format!("{e:#}; nothing was done"))]).into()
+}
+
+/// An action that ran, but whose outcome the audit log could not record.
+fn ran_unlogged(e: anyhow::Error) -> CallToolResponse {
+    CallToolResult::error(vec![ContentBlock::text(format!(
+        "{e:#}; the call itself ran (check what it did), but its answer is not given because it is not logged"
+    ))])
+    .into()
+}
+
+/// At most `n` characters of `s`.
+fn clip(s: &str, n: usize) -> String {
+    match s.char_indices().nth(n) {
+        Some((at, _)) => format!("{}…", &s[..at]),
+        None => s.to_string(),
+    }
+}
+
+impl OnusMcp {
+    /// Writes one decision on a call to the door's log.
+    #[allow(clippy::too_many_arguments)]
+    async fn log(
+        &self,
+        door: &Arc<Door>,
+        tool: &str,
+        args: &Value,
+        subject: &str,
+        decision: &str,
+        reason: &str,
+        extra: Value,
+    ) -> Result<()> {
+        let door = door.clone();
+        let (tool, args, subject, decision, reason) = (
+            tool.to_string(),
+            args.clone(),
+            subject.to_string(),
+            decision.to_string(),
+            reason.to_string(),
+        );
+        tokio::task::spawn_blocking(move || {
+            door.record(&tool, &args, &subject, &decision, &reason, extra)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?
+    }
+
+    /// Runs the tool, with a note for what its log entry needs.
+    async fn routed(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> (Result<CallToolResponse, ErrorData>, Note) {
+        let cell = Arc::new(Mutex::new(Note::default()));
+        let response = NOTE
+            .scope(
+                cell.clone(),
+                self.tool_router
+                    .call(ToolCallContext::new(self, request, context)),
+            )
+            .await;
+        let note = cell.lock().map(|mut n| std::mem::take(&mut *n));
+        (response, note.unwrap_or_default())
+    }
+}
+
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for OnusMcp {
+    /// Every call: checked at the door, then run, then logged. A call the
+    /// log cannot record is refused.
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, ErrorData> {
+        let Some(door) = self.door.clone() else {
+            return self.routed(request, context).await.0;
+        };
+        let tool = request.name.to_string();
+        let args = Value::Object(request.arguments.clone().unwrap_or_default());
+        let subject = door.subject(&tool, &args);
+        let checked = {
+            let (door, tool, args) = (door.clone(), tool.clone(), args.clone());
+            tokio::task::spawn_blocking(move || door.authorize(&tool, &args, &door.facts()))
+                .await
+                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?
+        };
+        if let Err(denial) = checked {
+            let missing: Vec<String> = denial.missing.iter().map(|r| r.to_string()).collect();
+            let logged = self
+                .log(
+                    &door,
+                    &tool,
+                    &args,
+                    &subject,
+                    "denied",
+                    &denial.reason,
+                    json!({ "missing": missing }),
+                )
+                .await;
+            return Ok(match logged {
+                Ok(()) => CallToolResult::error(vec![ContentBlock::text(denial.text())]).into(),
+                Err(e) => unlogged(e),
+            });
+        }
+        let allowed = match door.task() {
+            Some(t) => format!("the token of task `{t}` allows it"),
+            None => "no task token: a local server".to_string(),
+        };
+
+        if door::is_query(&tool) {
+            let (response, note) = self.routed(request, context).await;
+            let (decision, reason, extra) = match note.denial {
+                Some(d) => {
+                    let missing: Vec<String> = d.missing.iter().map(|r| r.to_string()).collect();
+                    ("denied", d.reason, json!({ "missing": missing }))
+                }
+                None if note.hidden > 0 => ("allowed", allowed, json!({ "hidden": note.hidden })),
+                None => ("allowed", allowed, json!({})),
+            };
+            if let Err(e) = self
+                .log(&door, &tool, &args, &subject, decision, &reason, extra)
+                .await
+            {
+                return Ok(unlogged(e));
+            }
+            return response;
+        }
+
+        // An action: allowed, then done or failed.
+        if let Err(e) = self
+            .log(
+                &door,
+                &tool,
+                &args,
+                &subject,
+                "allowed",
+                &allowed,
+                json!({}),
+            )
+            .await
+        {
+            return Ok(unlogged(e));
+        }
+        let (response, note) = self.routed(request, context).await;
+        let (decision, reason, extra) = match &response {
+            Ok(CallToolResponse::Complete(r)) if r.is_error == Some(true) => {
+                let why = clip(&text_of(r), 500);
+                ("failed", why.clone(), json!({ "error": why }))
+            }
+            Ok(CallToolResponse::Complete(r)) => {
+                let answer = note
+                    .answer
+                    .or_else(|| serde_json::from_str(&text_of(r)).ok())
+                    .unwrap_or(Value::Null);
+                (
+                    "done",
+                    "answered".to_string(),
+                    json!({ "result": door::result_fields(&tool, &args, &subject, &answer) }),
+                )
+            }
+            Ok(_) => ("done", "answered".to_string(), json!({ "result": {} })),
+            Err(e) => {
+                let why = clip(&e.message, 500);
+                ("failed", why.clone(), json!({ "error": why }))
+            }
+        };
+        if let Err(e) = self
+            .log(&door, &tool, &args, &subject, decision, &reason, extra)
+            .await
+        {
+            return Ok(ran_unlogged(e));
+        }
+        response
+    }
+
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("onus", env!("CARGO_PKG_VERSION")))
@@ -968,19 +1166,21 @@ impl ServerHandler for OnusMcp {
                  change in: commit it, run its tests with onus_env_create and onus_env_run, then \
                  onus_submit with an intent and those runs as evidence, and onus_judge to see the \
                  verdict. If your token does not allow what the task needs, onus_escalate with \
-                 evidence instead of working around it. When the onus_cloud_ tools are listed, this \
-                 CLI is signed in to Onus Cloud: onus_cloud_env_create and onus_cloud_env_run build \
-                 and run a pushed commit on Onus Cloud's machines and record the runs, which \
-                 onus_cloud_attach_evidence attaches to the pull request for the judge.",
+                 evidence instead of working around it. Every call is checked against your task's \
+                 token and logged; a denial says which right is missing and how to ask for it. When \
+                 the onus_cloud_ tools are listed, this CLI is signed in to Onus Cloud: \
+                 onus_cloud_env_create and onus_cloud_env_run build and run a pushed commit on Onus \
+                 Cloud's machines and record the runs, which onus_cloud_attach_evidence attaches to \
+                 the pull request for the judge.",
             )
     }
 }
 
-/// What a server offers besides the map: a task token's read scope, the tools that act,
-/// and whether the Onus Cloud tools are listed.
+/// What a server offers besides the map: the door every call goes through (with the task
+/// token, if any), the tools that act, and whether the Onus Cloud tools are listed.
 #[derive(Clone, Default)]
 pub struct Tools {
-    pub read_scope: Option<Arc<ReadScope>>,
+    pub door: Option<Arc<Door>>,
     pub actions: Option<Arc<dyn Actions>>,
     pub cloud: bool,
 }
@@ -988,7 +1188,7 @@ pub struct Tools {
 impl std::fmt::Debug for Tools {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Tools")
-            .field("read_scope", &self.read_scope)
+            .field("door", &self.door)
             .field("actions", &self.actions.is_some())
             .field("cloud", &self.cloud)
             .finish()
@@ -997,7 +1197,7 @@ impl std::fmt::Debug for Tools {
 
 impl OnusMcp {
     fn with_tools(self, tools: &Tools) -> OnusMcp {
-        self.with_read_scope(tools.read_scope.clone())
+        self.with_door(tools.door.clone())
             .with_cloud(tools.cloud)
             .with_actions(tools.actions.clone())
     }

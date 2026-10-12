@@ -164,7 +164,7 @@ Secret-shaped values added in test data are not counted as committed secrets: `f
 
 ## Files Onus never reads
 
-Folders named .git, node_modules, dist, build, out, .next, .turbo, .cache, coverage, target or vendor; anything ignored by a .gitignore inside the tree; files over 2 MB; and *.min.js files.
+Folders named .git, .onus (where Onus keeps its records), node_modules, dist, build, out, .next, .turbo, .cache, coverage, target or vendor; anything ignored by a .gitignore inside the tree; files over 2 MB; and *.min.js files.
 
 ## lanes
 

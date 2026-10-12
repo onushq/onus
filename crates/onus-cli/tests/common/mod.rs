@@ -1,8 +1,10 @@
-//! Helpers shared by the integration tests: the shop fixture and its
-//! scenario overlays.
+//! Helpers shared by the integration tests: the shop fixture, its
+//! scenario overlays and an MCP client.
 #![allow(dead_code)]
 
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 pub fn repo_root() -> PathBuf {
     // Not canonicalized: on Windows that yields a `\\?\` path.
@@ -114,5 +116,84 @@ impl Scenario {
             },
         )
         .unwrap()
+    }
+}
+
+/// `onus mcp` over stdio, driven as a client would.
+pub struct Mcp {
+    child: std::process::Child,
+    out: BufReader<std::process::ChildStdout>,
+    next: u64,
+}
+
+impl Mcp {
+    pub fn start(repo: &Path) -> Mcp {
+        Mcp::start_with(repo, &[])
+    }
+
+    pub fn start_with(repo: &Path, extra: &[&str]) -> Mcp {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_onus"))
+            .args(["mcp", "--no-server", "--repo"])
+            .arg(repo)
+            .args(extra)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let out = BufReader::new(child.stdout.take().unwrap());
+        let mut mcp = Mcp {
+            child,
+            out,
+            next: 1,
+        };
+        let init = mcp.call(
+            "initialize",
+            serde_json::json!({
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": { "name": "onus-test", "version": "0" }
+            }),
+        );
+        assert_eq!(init["result"]["serverInfo"]["name"], "onus");
+        mcp.send(serde_json::json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }));
+        mcp
+    }
+
+    pub fn send(&mut self, msg: serde_json::Value) {
+        let stdin = self.child.stdin.as_mut().unwrap();
+        writeln!(stdin, "{msg}").unwrap();
+        stdin.flush().unwrap();
+    }
+
+    pub fn call(&mut self, method: &str, params: serde_json::Value) -> serde_json::Value {
+        let id = self.next;
+        self.next += 1;
+        self.send(
+            serde_json::json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }),
+        );
+        let mut line = String::new();
+        self.out.read_line(&mut line).unwrap();
+        serde_json::from_str(&line).unwrap()
+    }
+
+    /// Calls a tool; returns whether it failed and its JSON (or message).
+    pub fn tool(&mut self, name: &str, args: serde_json::Value) -> (bool, serde_json::Value) {
+        let r = self.call(
+            "tools/call",
+            serde_json::json!({ "name": name, "arguments": args }),
+        );
+        let result = &r["result"];
+        let text = result["content"][0]["text"].as_str().unwrap().to_string();
+        let failed = result["isError"].as_bool().unwrap_or(false);
+        let body = serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text));
+        (failed, body)
+    }
+}
+
+impl Drop for Mcp {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }

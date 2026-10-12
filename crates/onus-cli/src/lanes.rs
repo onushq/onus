@@ -47,9 +47,13 @@ pub struct SubmitArgs {
     /// The root public key that verifies --token.
     #[arg(long, value_name = "FILE")]
     key_public: Option<PathBuf>,
-    /// An escalation granted during the task (repeatable).
+    /// An escalation granted during the task (repeatable). Each is verified: it must be
+    /// granted, for the token's task. Needs --key-public.
     #[arg(long = "escalation", value_name = "ID")]
     escalations: Vec<String>,
+    /// Where escalation requests are kept (default: .onus/escalations in --repo).
+    #[arg(long, value_name = "DIR")]
+    escalations_dir: Option<PathBuf>,
     /// A person's approval of a report row, as `<row id>=<who>` (repeatable).
     #[arg(long = "approve", value_name = "ROW=WHO")]
     approvals: Vec<String>,
@@ -201,17 +205,24 @@ pub struct SubmissionParts {
     pub agent: AgentSetup,
 }
 
-/// The scope a verified token grants, as a submission records it.
-pub fn scope_used(token: &str, key_public: &Path) -> Result<ScopeUsed> {
+/// The scope a verified token grants, as a submission records it, and the
+/// agent it names, if any.
+pub fn scope_and_agent(
+    token: &str,
+    key_public: &Path,
+) -> Result<(ScopeUsed, Option<onus_doors::token::AgentClaim>)> {
     let v = onus_doors::token::verify(
         token,
         &onus_doors::token::public_key(&std::fs::read_to_string(key_public)?)?,
     )?;
-    Ok(ScopeUsed {
-        task: v.task.clone(),
-        rights: v.rights.iter().map(|r| r.to_string()).collect(),
-        attenuations: v.attenuations.clone(),
-    })
+    Ok((
+        ScopeUsed {
+            task: v.task.clone(),
+            rights: v.rights.iter().map(|r| r.to_string()).collect(),
+            attenuations: v.attenuations.clone(),
+        },
+        v.agent,
+    ))
 }
 
 /// Bundles the change from `base` to `head` of `repo` for review.
@@ -296,9 +307,45 @@ pub fn submit(args: SubmitArgs) -> Result<i32> {
                 .with_context(|| format!("{} is not a test run from `onus run-test`", p.display()))
         })
         .collect::<Result<Vec<_>>>()?;
-    let scope = match (&args.token, &args.key_public) {
-        (Some(t), Some(k)) => Some(scope_used(t, k)?),
-        _ => None,
+    let (scope, claim) = match (&args.token, &args.key_public) {
+        (Some(t), Some(k)) => {
+            let (scope, claim) = scope_and_agent(t, k)?;
+            (Some(scope), claim)
+        }
+        _ => (None, None),
+    };
+    let escalations = if args.escalations.is_empty() {
+        Vec::new()
+    } else {
+        let key = args
+            .key_public
+            .as_deref()
+            .context("escalation ids are verified with the root public key: pass --key-public")?;
+        let dir = args
+            .escalations_dir
+            .clone()
+            .unwrap_or_else(|| args.repo.join(".onus").join("escalations"));
+        crate::doors::verify_escalations(
+            &dir,
+            &args.escalations,
+            key,
+            scope.as_ref().map(|s| s.task.as_str()),
+        )?
+    };
+    // The token's agent, when it names one, over the flags.
+    let agent = match claim {
+        Some(a) => AgentSetup {
+            tool: a.tool,
+            model: a.model,
+            config: a.config,
+            team: a.team,
+        },
+        None => AgentSetup {
+            tool: args.agent.agent_tool,
+            model: args.agent.agent_model,
+            config: args.agent.agent_config,
+            team: args.agent.agent_team,
+        },
     };
     let approvals = args
         .approvals
@@ -314,14 +361,9 @@ pub fn submit(args: SubmitArgs) -> Result<i32> {
             intent_markdown,
             evidence,
             scope,
-            escalations: args.escalations,
+            escalations,
             approvals,
-            agent: AgentSetup {
-                tool: args.agent.agent_tool,
-                model: args.agent.agent_model,
-                config: args.agent.agent_config,
-                team: args.agent.agent_team,
-            },
+            agent,
         },
     )?;
     let json = serde_json::to_string_pretty(&sub)?;

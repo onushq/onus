@@ -42,9 +42,9 @@ Handing work in (leave these out with `onus mcp --no-actions`):
 - `onus_env_create`, `onus_env_run`, `onus_envs`, `onus_env_destroy`: an environment built from a commit, and commands run in it. Each run is recorded as evidence (output, JUnit results, traces) under a run id. See `onus help environments`.
 - `onus_evidence`: recorded runs, a run's manifest, or one of its artifacts.
 - `onus_run_test`: a test command once in a throwaway container, to reproduce a failure; nothing is recorded.
-- `onus_submit`: hands in a committed change with an intent and run ids as evidence. Onus reports it, attaches the scope of the server's task token, classifies it, and keeps it in `.onus/submissions/` where people see it in `onus ui`. Returns the lane, every reason, and a submission id.
+- `onus_submit`: hands in a committed change with an intent, run ids as evidence and the ids of escalations granted during the task. Onus reports it, attaches the scope of the server's task token, classifies it, and keeps it in `.onus/submissions/` where people see it in `onus ui`. Returns the lane, every reason, and a submission id.
 - `onus_judge`: the verifying judge on a submission: evidence re-run in fresh containers, intent, contracts, tests, held-out checks. The verdict is kept beside the submission.
-- `onus_escalate`, `onus_escalation`: ask for rights the token lacks, with evidence, and check the answer. A granted request returns the new token: the old rights plus exactly what was asked.
+- `onus_escalate`, `onus_escalation`: ask for rights the token lacks, with evidence, and check the answer. A granted request returns the new token, the old rights plus exactly what was asked, and the server uses it from then on. The granted token names its request, so it proves the grant wherever the person's decision was logged.
 - `onus_outcomes`: track records and the held-out backlog, read-only.
 
 Onus Cloud (listed only when the CLI is signed in with `onus login`, or `ONUS_API_KEY` is set; see `onus help cloud`):
@@ -56,6 +56,22 @@ Onus Cloud (listed only when the CLI is signed in with `onus login`, or `ONUS_AP
 The order an agent should follow is in the server's instructions: commit, run the tests with `onus_env_create` and `onus_env_run`, `onus_submit` with an intent and those runs, then `onus_judge`.
 
 What agents cannot do through MCP: record outcomes, grant or deny escalations, mint or widen tokens, or choose the scope a submission is checked against. With `--token`, submissions, environments (their hosts and secrets) and escalations use the server's task token, whatever the agent asks for.
+
+Every call is checked at the door and logged. With `--token`, each tool first checks the token: its signature when the server starts, its expiry on every call, then the tool's own rule. A refused call says which right is missing and how to ask for it:
+
+    denied: `net:host:evil.example` is not in the token of task `sms-alerts`.
+    Your net rights: `net:host:sms.test.example`.
+    To get it: onus_escalate with scopes ["net:host:evil.example"] and evidence (a failing test is strongest).
+
+- Environments belong to the task that made them. Another task cannot run commands in one, destroy it, read its runs or see it in `onus_envs`; a run used as evidence must come from the task's own environments. An environment whose hosts or secrets the token no longer allows must be made again.
+- `onus_run_test` takes no `setup` under a token: setup runs with open network, and the token decides the network. Use `onus_env_create`.
+- `onus_submit` takes `escalations`: ids from `onus_escalate`. Each must be granted, for the task, with a token signed by the root key, minted for that request, that holds exactly what was asked; otherwise the submission is refused with the reason. `onus submit --escalation` and `onus ui` check the same.
+- A grant is minted from the first block of a token, so it drops any narrowing (`onus token attenuate`). A server whose token was narrowed for a sub-agent does not take up such a grant, and does not hand it out; the person narrows the granted token the same way and restarts the server with it.
+- A task plan can name the agent (`agent: {tool: claude-code, model: opus}`). The token then carries it, and submissions and log entries made under the token use it; what the agent declares (`agent_tool`, …) is ignored, and the answer says so.
+- Hosted environments and runs (`onus_cloud_*`) are checked the same way, from the log of what the task made. A pull request or a list of them is this worktree's repository: `onus_cloud_pulls` without `repository` lists only its pull requests. An environment made without `hosts` has no network.
+- A tool with no rule is closed to a token.
+
+Every call, with or without a token, is written to the audit log: the tool, a digest and a shortened copy of its arguments, the token's task and id (never the token), the agent and where its identity came from, the decision (`allowed` or `denied`, then `done` or `failed` for tools that act) and the reason. The log is `.onus/audit.jsonl` in the worktree, which `onus ui` shows; the server adds it to the repository's own `.git/info/exclude`, so `git add -A` does not commit it. `onus mcp --audit <file>` puts it where the agent cannot write. When the log cannot be written, the call is refused. Without a token nothing is refused, and calls are logged as `local`. See `onus help scopes`.
 
 Targets can be a symbol id (`billing:src/payments.ts#chargeCard`), a bare symbol name, a file path, a module id or a component id. Answers are JSON, sorted, and limited (default 50 items, `limit` up to 500); `truncated` says when there is more. Each answer also says which version of the map it came from and whether the map was rebuilt for it.
 

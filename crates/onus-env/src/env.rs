@@ -37,6 +37,8 @@ pub struct Grants {
     pub hosts: Vec<String>,
     /// Secret names, from `secret:…` rights.
     pub secrets: Vec<String>,
+    /// The task whose token made the environment.
+    pub task: Option<String>,
 }
 
 /// A created environment, as recorded on its container.
@@ -58,6 +60,9 @@ pub struct Env {
     pub evidence: Vec<String>,
     pub traces: Vec<String>,
     pub created_at: u64,
+    /// The task whose token made it; none when it was made without a token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
 }
 
 /// An environment and its container's state (`running`, `exited`, …).
@@ -275,6 +280,7 @@ pub fn create(
         evidence: spec.evidence.clone(),
         traces: spec.traces.clone(),
         created_at: onus_doors::gateway::now(),
+        task: grants.task.clone(),
     };
     let made = start(&engine, &env, spec, &secrets, tree.path());
     if let Err(e) = made {
@@ -563,6 +569,7 @@ pub fn run(name: &str, command: &str, store: &Store) -> Result<(String, Manifest
             seed: env.seed.clone(),
             hosts: env.hosts.clone(),
             secrets: env.secrets.clone(),
+            task: env.task.clone(),
         },
         artifacts,
         tests,

@@ -17,7 +17,7 @@ An agent (or a person) bundles a change with what a reviewer needs and nothing o
       --token "$TOKEN" --key-public root.pub \
       --agent-tool claude-code --agent-model sonnet --agent-config default --out submission.json
 
-The submission holds the stated intent, Onus's report, every changed path, the test runs from `onus run-test` (to be re-run), the token's verified scope, granted escalations, approvals (`--approve <row id>=<who>`), and the agent setup.
+The submission holds the stated intent, Onus's report, every changed path, the test runs from `onus run-test` (to be re-run), the token's verified scope, granted escalations (`--escalation <id>`, each verified with `--key-public`: granted, for the token's task, unchanged since it was filed; requests are read from `.onus/escalations`, or `--escalations-dir`), approvals (`--approve <row id>=<who>`), and the agent setup. When the token names an agent, that is the agent setup, whatever the flags say.
 
 ## Classifying
 

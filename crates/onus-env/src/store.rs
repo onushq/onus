@@ -65,6 +65,9 @@ pub struct EnvironmentInfo {
     pub hosts: Vec<String>,
     /// The names (never the values) of the secrets it was given.
     pub secrets: Vec<String>,
+    /// The task whose token made the environment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
 }
 
 /// One run of one command in an environment.
@@ -256,6 +259,7 @@ mod tests {
                 seed: None,
                 hosts: vec![],
                 secrets: vec![],
+                task: None,
             },
             artifacts: vec![],
             tests: None,

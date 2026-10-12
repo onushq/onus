@@ -4,6 +4,8 @@
 //! the egress proxy check also needs ONUS_TEST_NETWORK=1.
 #![cfg(unix)]
 
+mod common;
+
 use std::path::Path;
 use std::process::Command;
 
@@ -323,4 +325,96 @@ fn environments_record_evidence_the_judge_can_check() {
     let (code, _, err) = onus(&r, &["env", "destroy", &first], &[]);
     assert_ne!(code, 0);
     assert!(err.contains("no environment"), "{err}");
+}
+
+#[test]
+fn environments_and_runs_belong_to_the_task_that_made_them() {
+    if onus_doors::runner::engine().is_err() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let r = dir.path().join("repo");
+    std::fs::create_dir_all(&r).unwrap();
+    std::fs::write(r.join("onus.yaml"), ONUS_YAML).unwrap();
+    std::fs::write(r.join("package-lock.json"), "{\"lockfileVersion\": 3}\n").unwrap();
+    std::fs::write(r.join("test.sh"), TEST_SH).unwrap();
+    git(&r, &["init", "-q", "-b", "main"]);
+    git(&r, &["add", "-A"]);
+    git(&r, &["commit", "-q", "-m", "base"]);
+
+    // Two tasks, two tokens from one root key.
+    let keys = dir.path().join("keys");
+    let (code, _, err) = onus(
+        &r,
+        &["token", "keygen", "--out", keys.to_str().unwrap()],
+        &[],
+    );
+    assert_eq!(code, 0, "{err}");
+    let id = std::process::id();
+    let (a, b) = (format!("t{id}-task-a"), format!("t{id}-task-b"));
+    let env_a = format!("t{id}-env-a");
+    let _cleanup = Cleanup(vec![env_a.clone()]);
+    let token = |task: &str| {
+        let plan = dir.path().join(format!("{task}.yaml"));
+        std::fs::write(&plan, format!("task: {task}\nwrites: [\"src/**\"]\n")).unwrap();
+        let (code, token, err) = onus(
+            &r,
+            &[
+                "token",
+                "mint",
+                "--plan",
+                plan.to_str().unwrap(),
+                "--key",
+                keys.join("root.key").to_str().unwrap(),
+            ],
+            &[],
+        );
+        assert_eq!(code, 0, "{err}");
+        token
+    };
+    let public = keys.join("root.pub");
+    let mcp = |token: &str| {
+        common::Mcp::start_with(
+            &r,
+            &["--token", token, "--key-public", public.to_str().unwrap()],
+        )
+    };
+    let (mut ma, mut mb) = (mcp(&token(&a)), mcp(&token(&b)));
+
+    let (failed, env) = ma.tool("onus_env_create", serde_json::json!({ "name": env_a }));
+    assert!(!failed, "{env}");
+    assert_eq!(env["task"], a.as_str(), "{env}");
+
+    // Another task cannot run in it, read its runs or see it.
+    let (failed, msg) = mb.tool(
+        "onus_env_run",
+        serde_json::json!({ "name": env_a, "command": "true" }),
+    );
+    assert!(failed, "{msg}");
+    let msg = msg.as_str().unwrap();
+    assert!(
+        msg.contains(&format!("was made for task `{a}`, not `{b}`")),
+        "{msg}"
+    );
+    let (failed, run) = ma.tool(
+        "onus_env_run",
+        serde_json::json!({ "name": env_a, "command": "sh test.sh" }),
+    );
+    assert!(!failed, "{run}");
+    assert_eq!(run["manifest"]["environment"]["task"], a.as_str(), "{run}");
+    let run_id = run["id"].as_str().unwrap();
+    let (failed, msg) = mb.tool("onus_evidence", serde_json::json!({ "id": run_id }));
+    assert!(failed, "{msg}");
+    assert!(
+        msg.as_str().unwrap().contains("another task's environment"),
+        "{msg}"
+    );
+    let (failed, shown) = ma.tool("onus_evidence", serde_json::json!({ "id": run_id }));
+    assert!(!failed, "{shown}");
+    let (_, theirs) = mb.tool("onus_envs", serde_json::json!({}));
+    assert!(!theirs.to_string().contains(&env_a), "{theirs}");
+    let (_, ours) = ma.tool("onus_envs", serde_json::json!({}));
+    assert!(ours.to_string().contains(&env_a), "{ours}");
+    let (_, runs) = mb.tool("onus_evidence", serde_json::json!({}));
+    assert!(!runs.to_string().contains(run_id), "{runs}");
 }

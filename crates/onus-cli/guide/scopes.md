@@ -17,12 +17,13 @@ Describe a task in a plan:
     secrets: ["SMS_TEST_KEY"]                   # optional
     refs: ["refs/heads/onus/sms-alerts/*"]      # default: refs/heads/onus/<task>/*
     ttl: 8h                                     # default 8h
+    agent: {tool: claude-code, model: opus}     # optional: who does the task
 
 `onus scope suggest --plan plan.yaml` proposes reads from the map: the components the task writes, what they use and what uses them. It leaves out components labeled sensitive (they must be asked for), and it never widens writes.
 
     onus token mint --plan plan.yaml --key ~/.onus-keys/root.key --audit audit.jsonl
 
-A token is a [Biscuit](https://www.biscuitsec.org/): signed rights (`write:path:<glob>`, `read:path:<glob>`, `push:ref:<glob>`, `net:host:<host>`, `secret:<NAME>`), the task id and an expiry. Writing implies reading. Anyone holding a token can narrow it for a sub-agent, but nobody can widen it without the root key:
+A token is a [Biscuit](https://www.biscuitsec.org/): signed rights (`write:path:<glob>`, `read:path:<glob>`, `push:ref:<glob>`, `net:host:<host>`, `secret:<NAME>`), the task id, the agent when the plan names one (`tool`, `model`, `config`, `team`) and an expiry. Submissions and log entries made under a token that names an agent use that agent, whatever the agent says it is. Writing implies reading. Anyone holding a token can narrow it for a sub-agent, but nobody can widen it without the root key:
 
     onus token attenuate --token "$TOKEN" --key-public root.pub --only write:path:services/notifications/src/sms/**
     onus token inspect --token "$TOKEN" --key-public root.pub
@@ -67,7 +68,7 @@ The gateway needs `git http-backend`, which ships with git. It answers on the ad
 
 ## Read scope for the map
 
-`onus mcp --token "$TOKEN" --key-public root.pub` answers only about files the task may read: a question about an unreadable symbol or file is refused, and lists leave out unreadable items (the answer says how many).
+`onus mcp --token "$TOKEN" --key-public root.pub` answers only about files the task may read: a question about an unreadable symbol or file is refused, and lists leave out unreadable items (the answer says how many). Every other tool is checked against the token too, and every call is logged (`onus help agents`).
 
 ## Escalation
 
@@ -90,7 +91,7 @@ A request is granted automatically only when all of these hold:
 - the blast radius is small (20 files by default, `--max-blast-radius`);
 - a failing test was reproduced by the test runner.
 
-Then the command prints a new token: the original rights plus exactly what was asked, for the rest of the task. Otherwise it exits with code 3 and the reasons, and a person decides:
+Then the command prints a new token: the original rights plus exactly what was asked, for the rest of the task. The token names the request it grants, so it proves that grant and no other. It is minted from the first block of `--token`, so grant from the token the task was given, not from a narrowed one. Otherwise it exits with code 3 and the reasons, and a person decides:
 
     onus escalation grant request.json --token "$TOKEN" --key-public root.pub --key root.key --by @team-orders
     onus escalation deny request.json --by @team-orders --reason "use the events API instead"
@@ -101,6 +102,42 @@ Then the command prints a new token: the original rights plus exactly what was a
 
 ## The audit log
 
-Every decision is one JSON line: mints, mirrors, pushes accepted and refused, replays, escalations, grants and denials. Each line carries the hash of the line before it, so a removed or edited line breaks the chain:
+Every decision is one JSON line: mints, mirrors, pushes accepted and refused, replays, escalations, grants and denials, and every call through a door. Each line carries the hash of the line before it, so a removed or edited line breaks the chain:
 
     onus audit /srv/gateway/state/audit.jsonl     # "N entries, chain intact", or where it breaks
+
+What the doors log:
+
+| Action | Door | Decisions |
+|---|---|---|
+| `mcp:<tool>` | `onus mcp`, every tool call | `allowed` or `denied`; then `done` or `failed` for tools that act |
+| `adopt-token` | `onus mcp`, when it takes up a granted escalation's token (only one that keeps every right and narrowing of the token it holds) | `allowed` |
+| `auth` | the gateway, a refused password (bad token, another task's, expired) | `refused` |
+| `fetch` | the gateway, every clone and fetch | `allowed` |
+| `push`, `mirror`, `replay` | the gateway | as before |
+
+An `onus mcp` entry looks like this:
+
+    {
+      "seq": 42, "at": 1791500000,
+      "actor": "sms-alerts",                        // the token's task, or "local" without one
+      "action": "mcp:onus_env_run",
+      "subject": "sms-1",                           // an environment, run, submission, target, path or pull request
+      "decision": "allowed",
+      "reason": "the token of task `sms-alerts` allows it",
+      "details": {
+        "door": "mcp",
+        "argsDigest": "sha256:…",                   // of the arguments, keys sorted
+        "args": { "name": "sms-1", "command": "npm test" },   // long strings and lists shortened
+        "token": { "task": "sms-alerts", "id": "3f9a…", "expires": 1791528800, "attenuations": 0 },
+        "agent": { "tool": "claude-code", "model": "opus", "config": "", "team": "", "from": "token" },
+        "missing": ["net:host:evil.example"],       // denials
+        "hidden": 3,                                // questions whose answer left items out
+        "result": { "runId": "…", "exitCode": 0 }   // done
+      },
+      "prev": "…", "hash": "…"
+    }
+
+The token itself is never logged, only its id (the first 16 hex characters of its sha256). `details.result` keeps what later checks need: the hosted environments and runs a task made, which `onus_cloud_env_run`, `onus_cloud_env_destroy` and `onus_cloud_attach_evidence` are checked against. A broken chain refuses those calls until a person checks the log.
+
+The chain is plain sha256: someone who can write the file can rewrite it consistently. Keep the log where agents cannot write (`onus mcp --audit`, the gateway's state folder).

@@ -521,6 +521,98 @@ pub fn escalate(args: EscalateArgs) -> Result<i32> {
     Ok(0)
 }
 
+/// Checks an escalation id: letters, digits, `-`, `_` and `.`, so it names
+/// a file in the escalations folder and nowhere else.
+pub fn check_request_id(id: &str) -> Result<()> {
+    if id.is_empty()
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
+    {
+        bail!("`{id}` is not a request id");
+    }
+    Ok(())
+}
+
+/// Verifies the escalation ids a submission lists: each request exists, is
+/// unchanged since it was filed, is for `task` (when the submission has a
+/// token) and was granted with a root-signed token that holds exactly what
+/// it asked for. Requests are in `dir`; decisions on those not granted are
+/// read from the audit log beside it. Returns the ids, each once.
+pub fn verify_escalations(
+    dir: &Path,
+    ids: &[String],
+    public_key: &Path,
+    task: Option<&str>,
+) -> Result<Vec<String>> {
+    let audit = dir.parent().map(|d| d.join("audit.jsonl"));
+    verify_escalations_with(dir, audit.as_deref(), ids, public_key, task)
+}
+
+/// [`verify_escalations`] with the audit log that holds the decisions.
+pub fn verify_escalations_with(
+    dir: &Path,
+    audit: Option<&Path>,
+    ids: &[String],
+    public_key: &Path,
+    task: Option<&str>,
+) -> Result<Vec<String>> {
+    let root = token::public_key(&read_key(public_key)?)?;
+    let mut out: Vec<String> = Vec::new();
+    for id in ids {
+        if out.contains(id) {
+            continue;
+        }
+        let refuse = |what: String| -> anyhow::Error {
+            anyhow::anyhow!(
+                "{what}; check it with onus_escalation (or onus ui), and submit without it until it is granted"
+            )
+        };
+        if check_request_id(id).is_err() {
+            return Err(refuse(format!("`{id}` is not an escalation id")));
+        }
+        let path = dir.join(format!("{id}.json"));
+        if !path.exists() {
+            return Err(refuse(format!(
+                "there is no escalation `{id}` in {}",
+                dir.display()
+            )));
+        }
+        let req = load_request(&path).map_err(|e| refuse(format!("escalation `{id}`: {e:#}")))?;
+        if let Some(t) = task
+            && req.task != t
+        {
+            return Err(refuse(format!(
+                "escalation `{id}` belongs to task `{}`, not `{t}`",
+                req.task
+            )));
+        }
+        let Ok(granted) = std::fs::read_to_string(path.with_extension("token")) else {
+            let decision = audit
+                .and_then(|log| AuditLog::new(log).verify().ok())
+                .and_then(|entries| {
+                    entries.into_iter().rev().find(|e| {
+                        e.subject == req.id
+                            && matches!(e.action.as_str(), "escalate" | "grant" | "deny")
+                    })
+                });
+            let state = match decision {
+                Some(e) if e.action == "deny" => format!("was denied: {}", e.reason),
+                Some(e) if e.decision == "needs-person" => "is waiting for a person".into(),
+                Some(e) if e.decision == "granted" => {
+                    "was granted, but its token is not kept beside the request".into()
+                }
+                _ => "is still open".into(),
+            };
+            return Err(refuse(format!("escalation `{id}` {state}")));
+        };
+        onus_doors::escalation::verify_granted(&req, granted.trim(), &root)
+            .map_err(|why| refuse(format!("escalation `{id}` cannot be used: {why}")))?;
+        out.push(id.clone());
+    }
+    Ok(out)
+}
+
 pub fn load_request(path: &Path) -> Result<onus_doors::escalation::Request> {
     serde_json::from_str(
         &std::fs::read_to_string(path)
@@ -756,4 +848,157 @@ pub fn run_test(args: RunTestArgs) -> Result<i32> {
     )?;
     println!("{}", serde_json::to_string_pretty(&run)?);
     Ok(if run.failed() { 1 } else { 0 })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use onus_doors::escalation::{EscalationKind, Evidence, Request};
+    use onus_doors::token::Grant;
+
+    struct Setup {
+        _dir: tempfile::TempDir,
+        escalations: PathBuf,
+        audit: PathBuf,
+        public: PathBuf,
+        key: PathBuf,
+        token: token::Verified,
+    }
+
+    fn setup() -> Setup {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = dir.path().join("keys");
+        let public = keygen(&keys).unwrap();
+        let key = keys.join("root.key");
+        let root = RootKey::from_hex(&read_key(&key).unwrap()).unwrap();
+        let raw = token::mint(
+            &root,
+            &Grant {
+                task: "sms".into(),
+                rights: rights(&["write:path:services/notifications/**".into()]).unwrap(),
+                expires: now() + 3600,
+                agent: None,
+            },
+        )
+        .unwrap();
+        let token = token::verify(&raw, &root.public()).unwrap();
+        let escalations = dir.path().join(".onus/escalations");
+        std::fs::create_dir_all(&escalations).unwrap();
+        Setup {
+            audit: dir.path().join(".onus/audit.jsonl"),
+            escalations,
+            public,
+            key,
+            token,
+            _dir: dir,
+        }
+    }
+
+    fn file(s: &Setup, task: &str, scope: &str) -> Request {
+        let req = Request::new(
+            task,
+            EscalationKind::Permission,
+            vec![scope.parse().unwrap()],
+            vec![Evidence::parse("rationale:needed").unwrap()],
+            "needed",
+            None,
+            &[],
+            now(),
+        );
+        std::fs::write(
+            s.escalations.join(format!("{}.json", req.id)),
+            serde_json::to_string_pretty(&req).unwrap(),
+        )
+        .unwrap();
+        req
+    }
+
+    fn verify(s: &Setup, id: &str) -> Result<Vec<String>> {
+        verify_escalations(&s.escalations, &[id.to_string()], &s.public, Some("sms"))
+    }
+
+    #[test]
+    fn only_granted_escalations_of_the_task_verify() {
+        let s = setup();
+        let audit = Some(s.audit.as_path());
+
+        // Granted by a person: it verifies, once however often it is listed.
+        let granted = file(&s, "sms", "write:path:services/orders/src/**");
+        let t = grant_request(&granted, &s.token, &s.key, "@lead", audit).unwrap();
+        keep_token(&s.escalations.join(format!("{}.json", granted.id)), &t).unwrap();
+        let ids = vec![granted.id.clone(), granted.id.clone()];
+        assert_eq!(
+            verify_escalations(&s.escalations, &ids, &s.public, Some("sms")).unwrap(),
+            std::slice::from_ref(&granted.id)
+        );
+        // Without a token, the task is not compared.
+        assert!(verify_escalations(&s.escalations, &ids, &s.public, None).is_ok());
+
+        // Waiting for a person (the policy said so), and still open.
+        let pending = file(&s, "sms", "write:path:services/billing/**");
+        decide_request(pending.clone(), &s.token, &s.key, None, 20, audit).unwrap();
+        let err = verify(&s, &pending.id).unwrap_err().to_string();
+        assert!(err.contains("is waiting for a person"), "{err}");
+        assert!(
+            err.contains("submit without it until it is granted"),
+            "{err}"
+        );
+        let open = file(&s, "sms", "write:path:services/users/**");
+        assert!(
+            verify(&s, &open.id)
+                .unwrap_err()
+                .to_string()
+                .contains("is still open")
+        );
+
+        // Denied, with the reason.
+        let denied = file(&s, "sms", "write:path:services/auth/**");
+        deny_request(&denied, "@lead", "auth is out of scope", audit).unwrap();
+        let err = verify(&s, &denied.id).unwrap_err().to_string();
+        assert!(err.contains("was denied: auth is out of scope"), "{err}");
+
+        // Another task's request.
+        let other = file(&s, "other", "write:path:services/orders/src/**");
+        let err = verify(&s, &other.id).unwrap_err().to_string();
+        assert!(err.contains("belongs to task `other`, not `sms`"), "{err}");
+
+        // A request the task filed itself, with its own token copied beside
+        // it: root-signed, but nobody granted it.
+        let forged = file(&s, "sms", "write:path:services/notifications/src/**");
+        let root = RootKey::from_hex(&read_key(&s.key).unwrap()).unwrap();
+        let own = token::mint(
+            &root,
+            &Grant {
+                task: "sms".into(),
+                rights: s.token.rights.clone(),
+                expires: s.token.expires,
+                agent: None,
+            },
+        )
+        .unwrap();
+        keep_token(&s.escalations.join(format!("{}.json", forged.id)), &own).unwrap();
+        let err = verify(&s, &forged.id).unwrap_err().to_string();
+        assert!(err.contains("was not minted to grant it"), "{err}");
+
+        // A request edited after the grant.
+        let path = s.escalations.join(format!("{}.json", granted.id));
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, text.replace("services/orders/src/**", "**")).unwrap();
+        let err = verify(&s, &granted.id).unwrap_err().to_string();
+        assert!(err.contains("was changed after it was filed"), "{err}");
+
+        // Ids that name nothing, or outside the folder.
+        assert!(
+            verify(&s, "deadbeef0000")
+                .unwrap_err()
+                .to_string()
+                .contains("no escalation")
+        );
+        assert!(
+            verify(&s, "../x")
+                .unwrap_err()
+                .to_string()
+                .contains("not an escalation id")
+        );
+    }
 }

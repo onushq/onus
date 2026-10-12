@@ -8,6 +8,7 @@
 //! secrets: ["SMS_TEST_KEY"]                 # optional
 //! refs: ["refs/heads/onus/sms-alerts/*"]    # default: refs/heads/onus/<task>/*
 //! ttl: 8h                                   # default 8h
+//! agent: {tool: claude-code, model: opus}   # optional: who does the task
 //! ```
 //!
 //! The map suggests reads ([`suggest_reads`]): generous in code the task
@@ -21,7 +22,7 @@ use onus_core::{CodebaseMap, ids};
 use serde::{Deserialize, Serialize};
 
 use crate::scope::{Kind, Right, glob_regex};
-use crate::token::Grant;
+use crate::token::{AgentClaim, Grant};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -50,6 +51,11 @@ pub struct Plan {
     /// escalation before they change, even when writable.
     #[serde(default, rename = "escalateBefore")]
     pub escalate_before: Vec<String>,
+    /// The agent the task is for (`{tool, model, config, team}`). The token
+    /// carries it, and submissions and the audit log made under the token
+    /// use it instead of what the agent says it is.
+    #[serde(default)]
+    pub agent: Option<AgentClaim>,
 }
 
 impl Plan {
@@ -62,6 +68,13 @@ impl Plan {
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
         {
             bail!("the task id must be letters, digits, `-`, `_` or `.`");
+        }
+        if plan
+            .agent
+            .as_ref()
+            .is_some_and(|a| a.tool.trim().is_empty())
+        {
+            bail!("a plan's agent names its tool (`agent: {{tool: claude-code}}`)");
         }
         if plan.writes.is_empty() && plan.write_components.is_empty() {
             bail!(
@@ -125,6 +138,7 @@ impl Plan {
             task: self.task.clone(),
             rights: self.rights()?,
             expires: now + self.ttl_seconds()?,
+            agent: self.agent.clone(),
         })
     }
 
@@ -196,6 +210,7 @@ impl Plan {
             task: self.task.clone(),
             rights,
             expires: now + self.ttl_seconds()?,
+            agent: self.agent.clone(),
         })
     }
 }
@@ -309,5 +324,29 @@ mod tests {
         assert_eq!(p.ttl_seconds().unwrap(), 1800);
         p.ttl = Some("soon".into());
         assert!(p.ttl_seconds().is_err());
+    }
+
+    #[test]
+    fn a_plan_may_name_its_agent() {
+        let plan =
+            Plan::parse("task: sms\nwrites: [\"a/**\"]\nagent: {tool: claude-code, model: opus}\n")
+                .unwrap();
+        let g = plan.grant(100).unwrap();
+        let a = g.agent.unwrap();
+        assert_eq!((a.tool.as_str(), a.model.as_str()), ("claude-code", "opus"));
+        assert_eq!(a.config, "");
+        assert!(
+            Plan::parse("task: sms\nwrites: [a]\n")
+                .unwrap()
+                .agent
+                .is_none()
+        );
+        let err =
+            Plan::parse("task: sms\nwrites: [a]\nagent: {tool: \"\", model: opus}\n").unwrap_err();
+        assert!(err.to_string().contains("tool"), "{err}");
+        // A misspelt field is an error, not a token that names no model.
+        let err = Plan::parse("task: sms\nwrites: [a]\nagent: {tool: claude-code, modle: opus}\n")
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("modle"), "{err:#}");
     }
 }

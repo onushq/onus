@@ -277,3 +277,109 @@ fn reverts_and_incidents_flow_back_into_the_record() {
     let (_, backlog, _) = onus(r, &["outcomes", "backlog", "--file", &file]);
     assert_eq!(backlog, "1\tbilling");
 }
+
+#[test]
+fn submissions_list_only_granted_escalations() {
+    let dir = repo();
+    let r = dir.path();
+    change(
+        r,
+        "sms",
+        &[(
+            "services/notifications/src/sms.ts",
+            "export const SMS = 1;\n",
+        )],
+    );
+    // Keys, a token, and a request filed outside the repository.
+    let keys = out(r, "keys");
+    let (code, _, err) = onus(r, &["token", "keygen", "--out", &keys]);
+    assert_eq!(code, 0, "{err}");
+    let plan = out(r, "plan.yaml");
+    std::fs::write(
+        &plan,
+        "task: sms\nwrites: [\"services/notifications/**\"]\nagent: {tool: claude-code, model: opus}\n",
+    )
+    .unwrap();
+    let key = format!("{keys}/root.key");
+    let public = format!("{keys}/root.pub");
+    let (code, token, err) = onus(r, &["token", "mint", "--plan", &plan, "--key", &key]);
+    assert_eq!(code, 0, "{err}");
+    let (code, request, err) = onus(
+        r,
+        &[
+            "escalate",
+            "--task",
+            "sms",
+            "--scope",
+            "write:path:services/orders/src/**",
+            "--evidence",
+            "rationale:the event needs the phone",
+            "--reason",
+            "the event needs the phone",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    let id = serde_json::from_str::<serde_json::Value>(&request).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let escalations = out(r, "escalations");
+    std::fs::create_dir_all(&escalations).unwrap();
+    let file = format!("{escalations}/{id}.json");
+    std::fs::write(&file, &request).unwrap();
+
+    let sub = out(r, "sub.json");
+    let submit = |extra: &[&str]| {
+        let mut args = vec![
+            "submit",
+            "--base",
+            "main",
+            "--head",
+            "sms",
+            "--token",
+            &token,
+            "--escalation",
+            &id,
+            "--escalations-dir",
+            &escalations,
+            "--out",
+            &sub,
+        ];
+        args.extend_from_slice(extra);
+        onus(r, &args)
+    };
+    // Ids are verified with the root public key.
+    let (code, _, err) = submit(&[]);
+    assert_ne!(code, 0);
+    assert!(err.contains("pass --key-public"), "{err}");
+    // Not granted yet.
+    let (code, _, err) = submit(&["--key-public", &public]);
+    assert_ne!(code, 0);
+    assert!(err.contains("is still open"), "{err}");
+
+    let (code, _, err) = onus(
+        r,
+        &[
+            "escalation",
+            "grant",
+            &file,
+            "--token",
+            &token,
+            "--key-public",
+            &public,
+            "--key",
+            &key,
+            "--by",
+            "@lead",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    let (code, _, err) = submit(&["--key-public", &public, "--agent-tool", "codex"]);
+    assert_eq!(code, 0, "{err}");
+    let s: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&sub).unwrap()).unwrap();
+    assert_eq!(s["escalations"], serde_json::json!([id]));
+    // The token names the agent; the flag does not change it.
+    assert_eq!(s["agent"]["tool"], "claude-code");
+    assert_eq!(s["agent"]["model"], "opus");
+}

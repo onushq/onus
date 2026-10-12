@@ -2,6 +2,7 @@
 
 pub mod cloud;
 pub mod daemon;
+pub mod door;
 pub mod guide;
 pub mod mcp;
 pub mod session;

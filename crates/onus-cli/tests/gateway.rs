@@ -361,6 +361,41 @@ fn the_gateway_enforces_read_and_write_scopes() {
     let text = std::fs::read_to_string(&log).unwrap();
     assert!(text.contains("\"decision\":\"refused\""));
     assert!(text.contains("\"action\":\"replay\""));
+    // Refused passwords and every fetch are logged, by token id, never the token.
+    let entries: Vec<serde_json::Value> = text
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let auth = |actor: &str| {
+        entries.iter().any(|e| {
+            e["action"] == "auth"
+                && e["decision"] == "refused"
+                && e["actor"] == actor
+                && e["subject"] == "sms.git"
+                && e["details"]["door"] == "gateway"
+        })
+    };
+    assert!(auth("other"), "the foreign token's attempt: {text}");
+    assert!(auth("unknown"), "the forged token's attempt: {text}");
+    assert!(
+        entries.iter().any(|e| e["action"] == "auth"
+            && e["reason"]
+                .as_str()
+                .unwrap()
+                .contains("this token is for task `other`")),
+        "{text}"
+    );
+    let fetches = entries
+        .iter()
+        .filter(|e| e["action"] == "fetch" && e["decision"] == "allowed" && e["actor"] == "sms")
+        .count();
+    assert!(fetches >= 2, "both clones fetched: {text}");
+    assert!(entries.iter().filter(|e| e["action"] == "fetch").all(|e| {
+        e["details"]["tokenId"]
+            .as_str()
+            .is_some_and(|i| i.len() == 16)
+    }));
+    assert!(!text.contains(&token), "the raw token reached the log");
 }
 
 #[test]
