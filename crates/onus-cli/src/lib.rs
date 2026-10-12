@@ -555,7 +555,6 @@ pub fn read_intent(path: &Path) -> Result<Option<Intent>> {
     }
 }
 
-/// Whether any `--fail-on` condition is met.
 /// An index over a map JSON file (`onus map --json`, `onus report
 /// --head-map-out`, or a map downloaded from Onus Cloud); `-` reads stdin.
 /// A map of another schema version is refused.
@@ -591,6 +590,7 @@ pub fn index_from_map_json(bytes: &[u8]) -> Result<onus_index::MapIndex> {
     Ok(onus_index::MapIndex::new(map))
 }
 
+/// Whether any `--fail-on` condition is met.
 pub fn should_fail(report: &SemanticReport, fail_on: &[FailOn]) -> bool {
     fail_on.iter().any(|f| match f {
         FailOn::RuleViolation => report.summary.new_rule_violations > 0,
