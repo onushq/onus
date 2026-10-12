@@ -1289,7 +1289,12 @@ fn escalations_list(state: &State) -> Answer {
             if path.extension().and_then(|x| x.to_str()) != Some("json") {
                 continue;
             }
-            if let Ok(req) = doors::load_request(&path) {
+            if let Ok(mut req) = doors::load_request(&path) {
+                // What the file says a run saw is not believed, so not shown.
+                for e in &mut req.evidence {
+                    e.reproduced = None;
+                    e.run = None;
+                }
                 let decision = decided.get(&req.id).cloned();
                 // Where it was filed in Onus Cloud, if it was.
                 let cloud = std::fs::read_to_string(path.with_extension("cloud.json"))

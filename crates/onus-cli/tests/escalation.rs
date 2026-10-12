@@ -386,11 +386,39 @@ fn assess_routes_a_sensitive_request_to_a_person_with_its_owners() {
     );
     let reasons = assessed["reasons"].to_string();
     assert!(reasons.contains("labeled payments"), "{reasons}");
+    assert!(reasons.contains("grade 5"), "{reasons}");
     assert!(
-        reasons.contains("no test command is configured") || reasons.contains("grade 5"),
+        reasons.contains("no test command is configured"),
         "{reasons}"
     );
     assert!(assessed.get("token").is_none());
+
+    // Evidence in another component does not add its owners as deciders:
+    // an agent cannot pick who may grant it.
+    let (code, _, err) = onus(
+        &repo,
+        &[
+            "escalate",
+            "--task",
+            "sms",
+            "--scope",
+            "write:path:services/billing/src/**",
+            "--evidence",
+            "trace:services/orders/src/shipping/eta.test.ts",
+            "--reason",
+            "refunds should notify",
+            "--out",
+            "../traced.json",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    let (code, out, _) = onus(&repo, &["escalation", "assess", "../traced.json"]);
+    assert_eq!(code, 3, "{out}");
+    let assessed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(
+        assessed["request"]["owners"],
+        serde_json::json!(["@team-payments"])
+    );
 
     // A broken test with no scopes goes to the owners of the test, and a
     // failing test is not reproduced without a test command.
@@ -436,4 +464,78 @@ fn assess_routes_a_sensitive_request_to_a_person_with_its_owners() {
         reasons.contains("no test command is configured"),
         "{reasons}"
     );
+}
+
+#[test]
+fn a_run_that_does_not_finish_in_time_is_stopped_and_leaves_nothing_behind() {
+    let Ok(engine) = onus_doors::runner::engine() else {
+        return;
+    };
+    // Pulled first, so the limit is spent in the step under test, not the
+    // pull.
+    let pulled = Command::new(&engine)
+        .args(["pull", "-q", "node:22-alpine"])
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !pulled {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.test.sh"), "sleep 600\n").unwrap();
+    git(dir.path(), &["init", "-q", "-b", "main"]);
+    git(dir.path(), &["add", "-A"]);
+    git(dir.path(), &["commit", "-q", "-m", "a"]);
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap();
+    let commit = String::from_utf8_lossy(&out.stdout).trim()[..12].to_string();
+    let left = |args: &[&str]| -> String {
+        let out = Command::new(&engine).args(args).output().unwrap();
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|l| l.contains(&commit))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let limit = std::time::Duration::from_secs(5);
+    // What comes before the test or the setup fits in the limit, so below
+    // they are stopped in the test, and then in the setup step.
+    let quick = onus_doors::runner::run_within(
+        dir.path(),
+        "HEAD",
+        "node:22-alpine",
+        None,
+        "true",
+        Some(limit),
+    )
+    .unwrap();
+    assert!(matches!(quick, onus_doors::runner::Ran::Done(_)));
+    for (setup, command) in [(None, "sh a.test.sh"), (Some("sleep 600"), "true")] {
+        let started = std::time::Instant::now();
+        let ran = onus_doors::runner::run_within(
+            dir.path(),
+            "HEAD",
+            "node:22-alpine",
+            setup,
+            command,
+            Some(limit),
+        )
+        .unwrap();
+        assert_eq!(ran, onus_doors::runner::Ran::TimedOut, "{setup:?}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(120));
+        // Its containers and the setup's image are removed.
+        assert_eq!(
+            left(&["ps", "-a", "--format", "{{.Names}}"]),
+            "",
+            "{setup:?}"
+        );
+        assert_eq!(
+            left(&["images", "--format", "{{.Repository}}:{{.Tag}}"]),
+            "",
+            "{setup:?}"
+        );
+    }
 }

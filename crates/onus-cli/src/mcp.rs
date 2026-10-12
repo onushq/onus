@@ -936,7 +936,7 @@ impl OnusMcp {
 
     #[tool(
         name = "onus_escalate",
-        description = "Ask for more than your task's token allows, with evidence. Onus files the request with its blast radius and sensitive labels; low-risk requests with a reproduced failing test are granted by policy, others by a person. Check the answer with onus_escalation."
+        description = "Ask for more than your task's token allows, with evidence. Onus files the request with its blast radius and sensitive labels; low-risk requests with a reproduced failing test are granted by policy, others by a person. When the policy decides here, running the failing tests can take up to 15 minutes in all before this answers. Check the answer with onus_escalation."
     )]
     async fn escalate(
         &self,

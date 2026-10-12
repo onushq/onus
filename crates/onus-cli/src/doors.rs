@@ -689,16 +689,36 @@ pub struct Reproduce {
     pub test_command: String,
 }
 
+/// How long reproducing a request's failing tests may take in all, image
+/// pulls and setup included. A test still running then is stopped, and one
+/// not started is not run; both count as not reproduced.
+pub const REPRODUCE_LIMIT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
 /// Applies the policy to a request without minting anything: reproduces its
 /// failing tests first (when `reproduce` is given), then decides. Whether a
 /// test reproduced is only ever what this run saw, never what the request
 /// says. A failing test is run only when its reference is a plain path to a
-/// test file that exists at the commit; otherwise it counts as not
+/// test file that exists at the commit, with a test command that names it
+/// (`{test}`), and only within [`REPRODUCE_LIMIT`]; otherwise it counts as not
 /// reproduced, and a person decides with the reasons saying why.
 pub fn assess_request(
+    req: onus_doors::escalation::Request,
+    reproduce: Option<&Reproduce>,
+    max_blast_radius: u32,
+) -> Result<(
+    onus_doors::escalation::Request,
+    onus_doors::escalation::Decision,
+)> {
+    assess_within(req, reproduce, max_blast_radius, REPRODUCE_LIMIT)
+}
+
+/// [`assess_request`], with its failing tests stopped once `limit` has
+/// passed.
+fn assess_within(
     mut req: onus_doors::escalation::Request,
     reproduce: Option<&Reproduce>,
     max_blast_radius: u32,
+    limit: std::time::Duration,
 ) -> Result<(
     onus_doors::escalation::Request,
     onus_doors::escalation::Decision,
@@ -710,10 +730,12 @@ pub fn assess_request(
             req.id
         );
     }
-    for e in req.evidence.iter_mut().filter(|e| e.grade == 1) {
+    // What the file says a run saw is not believed, on any evidence.
+    for e in &mut req.evidence {
         e.reproduced = None;
         e.run = None;
     }
+    let deadline = std::time::Instant::now() + limit;
     let mut refused = Vec::new();
     if let Some(r) = reproduce
         && req.evidence.iter().any(|e| e.grade == 1)
@@ -723,17 +745,57 @@ pub fn assess_request(
         }
         let config = onus_map::config::load_from_tree(&r.repo)?;
         let tests = onus_map::build::test_globs(config.as_ref().map(|c| &c.config));
+        // Without `{test}` the command runs every test, so any failure would
+        // count as this one's.
+        let names_test = r.test_command.contains("{test}");
+        if !names_test {
+            refused.push(format!(
+                "the test command `{}` has no {{test}}, so it would not run the failing test alone: failing tests are not reproduced",
+                r.test_command
+            ));
+        }
         for e in req.evidence.iter_mut().filter(|e| e.grade == 1) {
+            if !names_test {
+                e.reproduced = Some(false);
+                continue;
+            }
             if let Some(why) = refuse_test(&r.repo, &r.at, &e.reference, |p| tests.is_match(p)) {
                 e.reproduced = Some(false);
                 refused.push(why);
                 continue;
             }
             let command = r.test_command.replace("{test}", &e.reference);
-            let run =
-                onus_doors::runner::run(&r.repo, &r.at, &r.image, r.setup.as_deref(), &command)?;
-            e.reproduced = Some(run.failed());
-            e.run = Some(run);
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                e.reproduced = Some(false);
+                refused.push(format!(
+                    "`{}` was not run: the {} the failing tests may take had passed",
+                    e.reference,
+                    minutes(limit)
+                ));
+                continue;
+            }
+            match onus_doors::runner::run_within(
+                &r.repo,
+                &r.at,
+                &r.image,
+                r.setup.as_deref(),
+                &command,
+                Some(left),
+            )? {
+                onus_doors::runner::Ran::Done(run) => {
+                    e.reproduced = Some(run.failed());
+                    e.run = Some(run);
+                }
+                onus_doors::runner::Ran::TimedOut => {
+                    e.reproduced = Some(false);
+                    refused.push(format!(
+                        "`{}` did not finish within the {} the failing tests may take, so it was stopped",
+                        e.reference,
+                        minutes(limit)
+                    ));
+                }
+            }
         }
     }
     let decision = decide(&req, &Policy { max_blast_radius });
@@ -748,6 +810,16 @@ pub fn assess_request(
     };
     reasons.extend(refused);
     Ok((req, Decision::NeedsPerson { reasons }))
+}
+
+/// `limit` in words: whole minutes, else seconds.
+fn minutes(limit: std::time::Duration) -> String {
+    let secs = limit.as_secs();
+    if secs >= 60 && secs.is_multiple_of(60) {
+        format!("{} minutes", secs / 60)
+    } else {
+        format!("{secs} seconds")
+    }
 }
 
 /// Why failing-test evidence `reference` is not run at `at` of `repo`: it
@@ -907,7 +979,7 @@ pub fn trusted_reproduce(
         }
         _ => None,
     };
-    if has_test && test_command.is_none() {
+    if test_command.is_none() {
         why_not_run = Some(
             "no test command is configured (onus.yaml tests.command): failing tests are not reproduced"
                 .into(),
@@ -1260,6 +1332,31 @@ mod tests {
             reasons.contains(&"`src/a.ts` is not a test file".to_string()),
             "{reasons:?}"
         );
+        // A command that does not name the test would run every test.
+        let whole = Reproduce {
+            test_command: "npm test".into(),
+            ..reproduce.clone()
+        };
+        let req = Request::new(
+            "sms",
+            EscalationKind::Permission,
+            vec!["write:path:src/**".parse().unwrap()],
+            vec![Evidence::parse("failing-test:src/b.test.d/x.ts").unwrap()],
+            "needed",
+            None,
+            &[],
+            now(),
+        );
+        let (req, decision) = assess_request(req, Some(&whole), 20).unwrap();
+        assert_eq!(req.evidence[0].reproduced, Some(false));
+        assert!(req.evidence[0].run.is_none());
+        let reasons = needs_person(&decision);
+        assert!(
+            reasons
+                .iter()
+                .any(|r| r.contains("`npm test` has no {test}")),
+            "{reasons:?}"
+        );
         // A commit that reads as an option is refused.
         let reproduce = Reproduce {
             at: "--output=x".into(),
@@ -1301,6 +1398,29 @@ mod tests {
             "{reasons:?}"
         );
 
+        // An assessed request keeps its id, so it can be assessed again.
+        let mut again = assessed;
+        again.evidence[0].reproduced = Some(true);
+        assert_eq!(again.content_id(), again.id);
+        let (again, _) = assess_request(again, None, 20).unwrap();
+        assert_eq!(again.evidence[0].reproduced, None);
+
+        // Nor on evidence of any other grade.
+        let mut trace = Evidence::parse("trace:logs/run.txt").unwrap();
+        trace.reproduced = Some(true);
+        let traced = Request::new(
+            "sms",
+            EscalationKind::Permission,
+            vec!["write:path:src/**".parse().unwrap()],
+            vec![trace],
+            "needed",
+            None,
+            &[],
+            now(),
+        );
+        let (traced, _) = assess_request(traced, None, 20).unwrap();
+        assert_eq!(traced.evidence[0].reproduced, None);
+
         // Changed after it was filed: refused.
         let mut changed = req;
         changed.scopes.push("write:path:lib/**".parse().unwrap());
@@ -1309,6 +1429,95 @@ mod tests {
             err.to_string().contains("was changed after it was filed"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn failing_tests_that_run_too_long_are_stopped_and_not_reproduced() {
+        let Ok(engine) = onus_doors::runner::engine() else {
+            return;
+        };
+        // Pulled first, so the limit is spent in the test, not the pull.
+        let pulled = std::process::Command::new(&engine)
+            .args(["pull", "-q", "node:22-alpine"])
+            .output()
+            .is_ok_and(|o| o.status.success());
+        if !pulled {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        std::fs::write(repo.join("slow.test.sh"), "sleep 600\n").unwrap();
+        std::fs::write(repo.join("later.test.sh"), "exit 1\n").unwrap();
+        std::fs::write(repo.join("fails.test.sh"), "exit 1\n").unwrap();
+        for args in [
+            &["init", "-q", "-b", "main"][..],
+            &["add", "-A"],
+            &["commit", "-q", "-m", "a"],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(repo)
+                    .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+                    .args(["-c", "commit.gpgsign=false"])
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let reproduce = Reproduce {
+            repo: repo.to_path_buf(),
+            at: "HEAD".into(),
+            image: "node:22-alpine".into(),
+            setup: None,
+            test_command: "sh {test}".into(),
+        };
+        let req = Request::new(
+            "sms",
+            EscalationKind::Permission,
+            vec!["write:path:src/**".parse().unwrap()],
+            vec![
+                Evidence::parse("failing-test:slow.test.sh").unwrap(),
+                Evidence::parse("failing-test:later.test.sh").unwrap(),
+            ],
+            "needed",
+            None,
+            &[],
+            now(),
+        );
+        let limit = std::time::Duration::from_secs(5);
+        // Within the limit, a failing test is run to the end, so the slow
+        // one below is stopped in the test itself.
+        let control = Request::new(
+            "sms",
+            EscalationKind::Permission,
+            vec!["write:path:src/**".parse().unwrap()],
+            vec![Evidence::parse("failing-test:fails.test.sh").unwrap()],
+            "needed",
+            None,
+            &[],
+            now(),
+        );
+        let (control, _) = assess_within(control, Some(&reproduce), 20, limit).unwrap();
+        assert_eq!(control.evidence[0].reproduced, Some(true));
+
+        // The limit is for all of a request's tests, so the second one is
+        // not run once the first has used it up.
+        let started = std::time::Instant::now();
+        let (req, decision) = assess_within(req, Some(&reproduce), 20, limit).unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(60));
+        for e in &req.evidence {
+            assert_eq!(e.reproduced, Some(false), "{}", e.reference);
+            assert!(e.run.is_none(), "{}", e.reference);
+        }
+        let reasons = needs_person(&decision);
+        for reason in [
+            "`slow.test.sh` did not finish within the 5 seconds the failing tests may take, so it was stopped",
+            "`later.test.sh` was not run: the 5 seconds the failing tests may take had passed",
+        ] {
+            assert!(reasons.contains(&reason.to_string()), "{reasons:?}");
+        }
     }
 
     #[test]

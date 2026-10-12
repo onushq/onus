@@ -17,7 +17,7 @@
 use std::collections::BTreeSet;
 
 use anyhow::{Context, Result, bail};
-use onus_core::CodebaseMap;
+use onus_core::{CodebaseMap, Component};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -98,9 +98,11 @@ pub struct Request {
     /// Sensitivity labels of the components the asked paths (and the files
     /// the evidence names) are in.
     pub sensitive: Vec<String>,
-    /// Owners of the components the asked paths (and the files the evidence
-    /// names) are in, from onus.yaml or CODEOWNERS: who a person-decision is
-    /// routed to. Left out when empty, so older requests keep their ids.
+    /// Who may decide the request besides an admin, from onus.yaml or
+    /// CODEOWNERS: the owners of every component the asked paths are in
+    /// (for a request that asks for no rights, the owners of the files the
+    /// evidence names). Left out when empty, so older requests keep their
+    /// ids.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub owners: Vec<String>,
     /// Seconds since the Unix epoch.
@@ -141,10 +143,16 @@ impl Request {
 
     /// The id the request's contents give it: the first 6 bytes of the
     /// sha256 of its JSON with the id left empty. A request changed after it
-    /// was filed no longer matches its id.
+    /// was filed no longer matches its id. Whether a failing test reproduced
+    /// is left out: an assessment adds it, so an assessed request keeps its
+    /// id. The id therefore does not protect it; see [`decide`].
     pub fn content_id(&self) -> String {
         let mut copy = self.clone();
         copy.id = String::new();
+        for e in &mut copy.evidence {
+            e.reproduced = None;
+            e.run = None;
+        }
         let json = serde_json::to_string(&copy).unwrap_or_default();
         let mut h = Sha256::new();
         h.update(json.as_bytes());
@@ -159,10 +167,20 @@ impl Request {
     }
 }
 
-/// Files outside the asked paths that depend on code inside them, and the
-/// sensitive labels and owners of the components the asked paths and the
-/// repository files the evidence names are in (so a broken-test report with
-/// no scopes goes to the owners of the test).
+/// Files outside the asked paths that depend on code inside them, the
+/// sensitive labels of the components the asked paths and the repository
+/// files the evidence names are in, and who owns the asked area.
+///
+/// Owners decide, so the agent must not be able to pick one. They are the
+/// people who own every component the asked paths reach, so asking for one
+/// more path never adds anyone. There are none (an admin decides) when no
+/// one owns them all, when part of an asked path is in no component (such
+/// as onus.yaml or CI workflows), or when a right is not a path. A path
+/// reaches components by their roots, not only by the files there now, so a
+/// file that does not exist yet counts too. The evidence adds no owner,
+/// except in a request that asks for nothing, which grants nothing: a
+/// broken-test report with no scopes goes to the owners of the test. Labels
+/// only make a decision stricter, so the evidence's count.
 fn impact(
     map: &CodebaseMap,
     scopes: &[Right],
@@ -207,18 +225,46 @@ fn impact(
         .filter(|e| matches!(e.kind.as_str(), "failing-test" | "trace" | "draft-diff"))
         .map(|e| e.reference.trim().trim_start_matches("./"))
         .collect();
-    let comps: BTreeSet<&str> = map
+    let component_of = |keep: &dyn Fn(&str) -> bool| -> BTreeSet<&str> {
+        map.files
+            .iter()
+            .filter(|f| keep(&f.path))
+            .filter_map(|f| f.component_id.as_deref())
+            .collect()
+    };
+    let paths: Vec<&Right> = scopes
+        .iter()
+        .filter(|r| {
+            matches!(
+                r.kind,
+                Kind::Read | Kind::Write | Kind::Guard | Kind::Unlock
+            )
+        })
+        .collect();
+    let path_res: Vec<regex::Regex> = paths
+        .iter()
+        .filter_map(|r| regex::Regex::new(&glob_regex(&r.pattern)).ok())
+        .collect();
+    let asked_file = |p: &str| path_res.iter().any(|re| re.is_match(p));
+    let mut asked = component_of(&asked_file);
+    // Every right is a path, and each is all inside some component.
+    let mut held = paths.len() == scopes.len();
+    for r in &paths {
+        let (reach, whole) = reached(map, &r.pattern);
+        asked.extend(reach);
+        held &= whole;
+    }
+    // An asked file in no component has no owner, so no one owns it all.
+    held &= !map
         .files
         .iter()
-        .filter(|f| files.contains(f.path.as_str()) || named.contains(f.path.as_str()))
-        .filter_map(|f| f.component_id.as_deref())
-        .collect();
+        .any(|f| asked_file(&f.path) && f.component_id.is_none());
+    let evidenced = component_of(&|p| named.contains(p));
     let mut labels: BTreeSet<String> = BTreeSet::new();
-    let mut owners: BTreeSet<String> = BTreeSet::new();
     for c in map
         .components
         .iter()
-        .filter(|c| comps.contains(c.id.as_str()))
+        .filter(|c| asked.contains(c.id.as_str()) || evidenced.contains(c.id.as_str()))
     {
         labels.extend(
             c.labels
@@ -226,13 +272,86 @@ fn impact(
                 .filter(|l| sensitive_labels.contains(l))
                 .cloned(),
         );
-        owners.extend(c.owners.iter().cloned());
     }
+    let owners_of = |ids: &BTreeSet<&str>| -> Vec<BTreeSet<String>> {
+        map.components
+            .iter()
+            .filter(|c| ids.contains(c.id.as_str()))
+            .map(|c| c.owners.iter().cloned().collect())
+            .collect()
+    };
+    let owners: BTreeSet<String> = if scopes.is_empty() {
+        owners_of(&evidenced).into_iter().flatten().collect()
+    } else if !held {
+        BTreeSet::new()
+    } else {
+        owners_of(&asked)
+            .into_iter()
+            .reduce(|all, these| all.intersection(&these).cloned().collect())
+            .unwrap_or_default()
+    };
     (
         dependents.len() as u32,
         labels.into_iter().collect(),
         owners.into_iter().collect(),
     )
+}
+
+/// The components a path glob reaches, from their roots: the most specific
+/// one whose roots match all of it, with those nested inside that one, or
+/// every one it may meet when none matches all of it. The flag says whether
+/// one does.
+fn reached<'m>(map: &'m CodebaseMap, glob: &str) -> (BTreeSet<&'m str>, bool) {
+    // The length of the fixed start of the deepest root that `keep` accepts.
+    let depth = |c: &Component, keep: &dyn Fn(&str) -> bool| {
+        c.roots
+            .iter()
+            .filter(|r| keep(r))
+            .map(|r| fixed(r).len())
+            .max()
+    };
+    let holder = map
+        .components
+        .iter()
+        .filter_map(|c| Some((depth(c, &|r| holds(r, glob))?, c)))
+        .max_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.id.cmp(&a.1.id)));
+    let reach = map
+        .components
+        .iter()
+        .filter(|c| match (holder, depth(c, &|r| meets(r, glob))) {
+            (_, None) => false,
+            (None, Some(_)) => true,
+            (Some((_, k)), _) if k.id == c.id => true,
+            (Some((d, _)), Some(m)) => m > d,
+        })
+        .map(|c| c.id.as_str())
+        .collect();
+    (reach, holder.is_some())
+}
+
+/// The start of a glob before its first wildcard.
+fn fixed(glob: &str) -> &str {
+    glob.find(['*', '?', '[', '{']).map_or(glob, |i| &glob[..i])
+}
+
+/// Whether the component root `root` matches every path `glob` matches.
+fn holds(root: &str, glob: &str) -> bool {
+    if root == "**" {
+        return true;
+    }
+    // `services/orders/**`, the usual root, also matches the folder itself.
+    if let Some(dir) = root.strip_suffix("/**").filter(|d| fixed(d) == *d) {
+        return glob == dir || glob.starts_with(&format!("{dir}/"));
+    }
+    // Otherwise only a single path is known to be inside.
+    fixed(glob) == glob && regex::Regex::new(&glob_regex(root)).is_ok_and(|re| re.is_match(glob))
+}
+
+/// Whether `glob` may match a path the component root `root` matches: the
+/// fixed start of one begins the other's.
+fn meets(root: &str, glob: &str) -> bool {
+    let (a, b) = (fixed(root), fixed(glob));
+    a.starts_with(b) || b.starts_with(a)
 }
 
 /// When a request is granted without a person.
@@ -262,7 +381,10 @@ pub enum Decision {
 
 /// Applies the policy. Only path rights of a permission request with
 /// reproduced failing-test evidence, outside sensitive components and with
-/// a small blast radius, are granted automatically.
+/// a small blast radius, are granted automatically. It believes
+/// `reproduced`, which the request's id does not cover: a caller sets it
+/// from its own run (as `onus escalation assess` does) or clears it, and
+/// never passes on what a request file says.
 pub fn decide(req: &Request, policy: &Policy) -> Decision {
     let mut why_not = Vec::new();
     if req.kind != EscalationKind::Permission {
@@ -477,7 +599,7 @@ mod tests {
     }
 
     #[test]
-    fn owners_come_from_the_components_of_the_asked_paths_and_the_evidence() {
+    fn owners_come_from_the_asked_paths_and_from_the_evidence_only_when_nothing_is_asked() {
         let map = two_component_map();
         let r = Request::new(
             "sms",
@@ -489,7 +611,8 @@ mod tests {
             &["payments".into()],
             100,
         );
-        assert_eq!(r.owners, ["@a", "@b"]);
+        // The evidence cannot add a person who may grant the request.
+        assert_eq!(r.owners, ["@a"]);
         // The test is in payments code, so a person decides.
         assert_eq!(r.sensitive, ["payments"]);
         assert_eq!(r.content_id(), r.id);
@@ -509,6 +632,72 @@ mod tests {
             100,
         );
         assert_eq!(blocked.owners, ["@b"]);
+
+        // Asking for more never adds an owner: only someone who owns all of
+        // it may decide, and here no one does, so an admin decides.
+        let both = Request::new(
+            "sms",
+            EscalationKind::Permission,
+            vec![
+                "write:path:services/orders/**".parse().unwrap(),
+                "write:path:services/billing/**".parse().unwrap(),
+            ],
+            vec![Evidence::parse("rationale:needed").unwrap()],
+            "needed",
+            Some(&map),
+            &["payments".into()],
+            100,
+        );
+        assert!(both.owners.is_empty(), "{:?}", both.owners);
+        assert_eq!(both.sensitive, ["payments"]);
+    }
+
+    #[test]
+    fn a_path_reaches_its_component_before_any_file_is_there() {
+        let map = two_component_map();
+        let ask = |scopes: &[&str]| {
+            Request::new(
+                "sms",
+                EscalationKind::Permission,
+                scopes.iter().map(|s| s.parse().unwrap()).collect(),
+                vec![Evidence::parse("rationale:needed").unwrap()],
+                "needed",
+                Some(&map),
+                &["payments".into()],
+                100,
+            )
+        };
+        // A new file in billing is billing's: its owner and its label.
+        let new = ask(&["write:path:services/billing/src/new-fx.ts"]);
+        assert_eq!(new.owners, ["@b"]);
+        assert_eq!(new.sensitive, ["payments"]);
+        let empty = ask(&["write:path:services/billing/later/**"]);
+        assert_eq!(empty.owners, ["@b"]);
+        assert_eq!(empty.sensitive, ["payments"]);
+
+        // So it cannot be slipped in beside orders' paths.
+        let slipped = ask(&[
+            "write:path:services/billing/src/new-fx.ts",
+            "write:path:services/orders/**",
+        ]);
+        assert!(slipped.owners.is_empty(), "{:?}", slipped.owners);
+        assert_eq!(slipped.sensitive, ["payments"]);
+
+        // Paths outside every component, a path that reaches past one, and
+        // rights that are not paths have no owner: an admin decides.
+        for other in [
+            "write:path:onus.yaml",
+            "write:path:.github/workflows/**",
+            "write:path:services/**",
+            "write:path:services/orders*/**",
+            "net:host:example.com",
+        ] {
+            let r = ask(&["write:path:services/orders/**", other]);
+            assert!(r.owners.is_empty(), "{other}: {:?}", r.owners);
+        }
+        // One that reaches billing among others carries its label.
+        assert_eq!(ask(&["write:path:services/**"]).sensitive, ["payments"]);
+        assert_eq!(ask(&["write:path:services/orders/**"]).owners, ["@a"]);
     }
 
     #[test]

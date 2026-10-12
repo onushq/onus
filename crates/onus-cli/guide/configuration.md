@@ -151,7 +151,7 @@ Packs are read from the base version of a change, like this file.
 
     **/*.test.*  **/*.spec.*  **/__tests__/**  **/test/**  **/tests/**  **/e2e/**
 
-`command`: how to run one test file, with `{test}` replaced by its path, such as `npx vitest run {test}`. `onus escalation assess` uses it to reproduce the failing test an escalation names, in a container built from `environment:` (`onus help scopes`). Without it, failing tests are not reproduced, so no escalation is granted by policy.
+`command`: how to run one test file, with `{test}` replaced by its path, such as `npx vitest run {test}`. `onus escalation assess` uses it to reproduce the failing test an escalation names, in a container built from `environment:` (`onus help scopes`). Without it, failing tests are not reproduced, so no escalation is granted by policy. A command without `{test}` would run every test, so it reproduces nothing either.
 
 ## testData
 
