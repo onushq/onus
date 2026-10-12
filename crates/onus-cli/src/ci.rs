@@ -434,6 +434,8 @@ fn pr(a: PrArgs) -> Result<i32> {
             components,
             requested: requested.clone(),
             reviewed_by: review.approved_by.clone(),
+            // Recorded for `ci closed`; nothing shows it before the merge.
+            audit_after_merge: Some(config.audit_after_merge),
         },
     )?;
 
@@ -619,6 +621,15 @@ fn closed(
         println!("{change} is already on record as {result}");
         return Ok(0);
     }
+    // Sampled for a person to audit by a hash of the merge commit, which
+    // nobody knew before the merge. Records from before `auditAfterMerge`
+    // are not sampled. The printed line says nothing: CI logs can be public.
+    let sampled = merged
+        && outcomes::approved_without_person(last.lane, last.verdict.as_deref())
+        && onus_lanes::classify::audited_after_merge(
+            commit.as_deref().unwrap_or(&last.head),
+            last.audit_after_merge.unwrap_or(0.0),
+        );
     lanes::record_outcome(
         &outcomes_file(records),
         &Outcome {
@@ -636,6 +647,8 @@ fn closed(
             note: None,
             components: last.components.clone(),
             reviewed_by: last.reviewed_by.clone(),
+            sampled,
+            audit: None,
         },
     )?;
     println!(
@@ -707,20 +720,11 @@ pub fn comment(
                 _ => return Ok(reply(false, "Write `/onus audit ok`, or `/onus audit miss <what was missed>`.".into(), false)),
             };
             let all = load_outcomes(records)?;
-            let Some(last) = outcomes::latest(&all).into_iter().find(|o| o.change == change).cloned() else {
+            let note = args[1..].join(" ");
+            let Ok(audit) = outcomes::audit_record(&all, change, &by, missed, (!note.is_empty()).then_some(note.as_str()), now()) else {
                 return Ok(reply(false, "This pull request has no outcome yet; audit it after it merges.".into(), false));
             };
-            let note = args[1..].join(" ");
-            lanes::record_outcome(
-                &outcomes_file(records),
-                &Outcome {
-                    at: now(),
-                    audited: true,
-                    missed,
-                    note: Some(format!("audited by {by}{}", if note.is_empty() { String::new() } else { format!(": {note}") })),
-                    ..last
-                },
-            )?;
+            lanes::record_outcome(&outcomes_file(records), &audit)?;
             Ok(reply(true, format!("Audit recorded{} for {by}.", if missed { " as a miss" } else { "" }), false))
         }
         "incident" => {

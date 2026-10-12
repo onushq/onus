@@ -539,12 +539,24 @@ fn untested_file(r: &SemanticChange) -> Option<&str> {
 /// Whether the change at `head` is in the audited share: a hash of the
 /// head, so the choice is reproducible but not known in advance.
 pub fn audited(head: &str, rate: f64) -> bool {
+    chosen("onus audit ", head, rate)
+}
+
+/// Whether a change approved without a person is sampled for an audit after
+/// it merges: a hash of the merge commit, which no one knows before the merge.
+pub fn audited_after_merge(commit: &str, rate: f64) -> bool {
+    chosen("onus audit after merge ", commit, rate)
+}
+
+/// Whether `key` falls in the `rate` share, by a hash salted with `salt`, so
+/// draws with different salts are independent.
+fn chosen(salt: &str, key: &str, rate: f64) -> bool {
     if rate <= 0.0 {
         return false;
     }
     let mut h = Sha256::new();
-    h.update(b"onus audit ");
-    h.update(head.as_bytes());
+    h.update(salt.as_bytes());
+    h.update(key.as_bytes());
     let bytes = h.finalize();
     let n = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
     (n as f64 / u32::MAX as f64) < rate
@@ -859,5 +871,21 @@ mod tests {
         assert!((400..600).contains(&n), "{n}");
         assert_eq!(audited("abc", 0.05), audited("abc", 0.05));
         assert!(!audited("abc", 0.0));
+        // Pinned before `audited` shared its hash: lane decisions stay put.
+        let one = format!("{:040}", 1);
+        assert!(!audited("aaaa", 0.5));
+        assert!(!audited("bbbb", 0.5));
+        assert!(audited(&one, 0.5));
+    }
+
+    #[test]
+    fn audits_after_merge_are_their_own_draw() {
+        assert!(!audited_after_merge("aaaa", 0.0));
+        assert!(audited_after_merge("aaaa", 1.0));
+        let differ = (0..100)
+            .map(|i| format!("{i:040}"))
+            .any(|k| audited(&k, 0.5) != audited_after_merge(&k, 0.5));
+        assert!(differ);
+        assert!(audited_after_merge("aaaa", 0.5) && !audited("aaaa", 0.5));
     }
 }

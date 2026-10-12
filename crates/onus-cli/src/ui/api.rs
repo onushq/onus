@@ -1020,6 +1020,8 @@ fn outcomes_record(state: &State, body: Value) -> Answer {
             note: None,
             components: q.components,
             reviewed_by: vec![],
+            sampled: false,
+            audit: None,
         },
     )?;
     outcomes(state)

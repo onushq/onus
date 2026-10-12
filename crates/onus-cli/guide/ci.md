@@ -98,7 +98,7 @@ What happens on each event:
       /onus audit miss the opt-out was ignored
       /onus incident SMS sent twice involved: notifications, notifications:src/sms.ts#sendSms
 
-  `approve` records a person's approval of a row and re-runs the check, so the lane updates. `audit` records a human audit of a merged change, the miss rate that says whether the automatic lanes can be trusted. `incident` marks a merged change as having caused one, with the components and symbols involved: an agent setup with an incident among its last 20 changes cannot auto-merge, and `onus outcomes backlog` lists where incidents happen. The action reacts with 👍 and replies with what it recorded.
+  `approve` records a person's approval of a row and re-runs the check, so the lane updates. `audit` records a human audit of a merged change, the miss rate that says whether the automatic lanes can be trusted, and clears the change from the audit queue (`onus outcomes audits`, `onus help lanes`). `incident` marks a merged change as having caused one, with the components and symbols involved: an agent setup with an incident among its last 20 changes cannot auto-merge, and `onus outcomes backlog` lists where incidents happen. The action reacts with 👍 and replies with what it recorded.
 
 ### Reviews in the human lane
 

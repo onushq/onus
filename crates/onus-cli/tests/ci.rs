@@ -287,6 +287,8 @@ fn a_pull_request_is_recorded_from_open_to_revert() {
     assert_eq!(outcomes[0]["agent"], "codex//");
     assert_eq!(outcomes[0]["lane"], "human");
     assert!(outcomes[0]["judge"].is_null(), "{:?}", outcomes[0]);
+    // A person reviewed it, so it is never sampled for an audit.
+    assert!(outcomes[0].get("sampled").is_none(), "{:?}", outcomes[0]);
     assert_eq!(
         outcomes[0]["components"],
         serde_json::json!(["notifications", "user-preferences"])
@@ -326,6 +328,8 @@ fn a_pull_request_is_recorded_from_open_to_revert() {
     // The incident still counts after the revert.
     assert_eq!(codex["incidents"], 1, "{summary}");
     assert_eq!(summary["total"]["audited"], 1);
+    assert_eq!(summary["awaitingAudit"], 0);
+    assert!(summary["sampledMissRate"].is_null(), "{summary}");
     let outcomes = lines(&rec.join("outcomes.jsonl"));
     let reverted = outcomes.last().unwrap();
     assert_eq!(reverted["result"], "reverted");
@@ -651,4 +655,212 @@ fn a_human_lane_change_waits_for_a_persons_review() {
         outcomes.last().unwrap()["reviewedBy"],
         serde_json::json!(["@grace"])
     );
+}
+
+#[test]
+fn an_automatic_merge_is_sampled_and_audited() {
+    let tmp = tempfile::tempdir().unwrap();
+    let t = tmp.path();
+    let r = t.join("shop");
+    copy_dir(&fixture().join("base"), &r);
+    let base = std::fs::read_to_string(r.join("onus.yaml")).unwrap();
+    let policy = |share: u32| {
+        format!(
+            "{base}\nlanes:\n  minRecord: 0\n  auditRate: 0\n  auditAfterMerge: {share}\n  rules:\n    - {{ lane: auto-merge, match: every, kinds: [internal], components: [root] }}\n"
+        )
+    };
+    std::fs::write(r.join("onus.yaml"), policy(1)).unwrap();
+    let never = t.join("never.yaml");
+    std::fs::write(&never, policy(0)).unwrap();
+    git(&r, &["init", "-q", "-b", "main"]);
+    git(&r, &["add", "-A"]);
+    git(&r, &["commit", "-q", "-m", "base"]);
+    let rec = t.join("records");
+    let rs = rec.to_str().unwrap();
+    let out = t.join("out");
+    let file = rec.join("outcomes.jsonl");
+    let fs = file.to_str().unwrap();
+    // A docs-only change, opened, classified and merged.
+    let merge = |change: &str, branch: &str, text: &str, config: Option<&Path>| -> String {
+        git(&r, &["checkout", "-q", "-b", branch, "main"]);
+        std::fs::create_dir_all(r.join("docs")).unwrap();
+        std::fs::write(r.join("docs/ON_CALL.md"), text).unwrap();
+        git(&r, &["add", "-A"]);
+        git(&r, &["commit", "-q", "-m", "On-call notes"]);
+        let mut args = vec![
+            "ci",
+            "pr",
+            "--base",
+            "main",
+            "--head",
+            branch,
+            "--change",
+            change,
+            "--branch",
+            branch,
+            "--author",
+            "mike",
+            "--records",
+            rs,
+            "--out",
+        ];
+        args.push(out.to_str().unwrap());
+        if let Some(c) = config {
+            args.extend(["--config", c.to_str().unwrap()]);
+        }
+        let s: serde_json::Value = serde_json::from_str(&onus(&r, &args)).unwrap();
+        assert_eq!(s["lane"], "auto-merge", "{s}");
+        git(&r, &["checkout", "-q", "main"]);
+        git(&r, &["merge", "-q", "--squash", branch]);
+        git(
+            &r,
+            &["commit", "-q", "-m", &format!("On-call notes ({change})")],
+        );
+        let commit = git(&r, &["rev-parse", "HEAD"]);
+        onus(
+            &r,
+            &[
+                "ci",
+                "closed",
+                "--change",
+                change,
+                "--merged",
+                "--commit",
+                &commit,
+                "--records",
+                rs,
+            ],
+        )
+    };
+    let json =
+        |args: &[&str]| -> serde_json::Value { serde_json::from_str(&onus(&r, args)).unwrap() };
+    let audits = || json(&["outcomes", "audits", "--file", fs]);
+    let summary = || json(&["outcomes", "summary", "--file", fs]);
+
+    // Nothing before the merge says whether it will be audited.
+    let printed = merge("acme/shop#12", "codex/on-call", "# On call\n", None);
+    let pull = lines(&rec.join("pulls.jsonl")).pop().unwrap();
+    assert_eq!(pull["auditAfterMerge"], 1.0, "{pull}");
+    let md = std::fs::read_to_string(out.join("lane.md")).unwrap();
+    assert!(!md.contains("sampl") && !md.contains("after merg"), "{md}");
+    assert_eq!(
+        printed,
+        "acme/shop#12: merged in the auto-merge lane, by codex//"
+    );
+    let outcome = lines(&file).pop().unwrap();
+    assert_eq!(outcome["sampled"], true, "{outcome}");
+    assert!(outcome.get("audit").is_none(), "{outcome}");
+
+    // It waits for a person.
+    let q = audits();
+    assert_eq!(q["awaiting"].as_array().unwrap().len(), 1, "{q}");
+    assert_eq!(q["awaiting"][0]["change"], "acme/shop#12");
+    assert_eq!(q["audited"], serde_json::json!([]));
+    assert_eq!(summary()["awaitingAudit"], 1);
+
+    // A person audits it.
+    let reply = json(&[
+        "outcomes",
+        "audit",
+        "--file",
+        fs,
+        "--change",
+        "acme/shop#12",
+        "--by",
+        "@alice",
+        "--result",
+        "miss",
+        "--note",
+        "names a person who left",
+    ]);
+    assert_eq!(
+        reply,
+        serde_json::json!({
+            "change": "acme/shop#12",
+            "missed": true,
+            "sampled": true,
+            "reply": "Audit recorded as a miss for @alice.",
+        })
+    );
+    let q = audits();
+    assert_eq!(q["awaiting"], serde_json::json!([]), "{q}");
+    let audit = &q["audited"][0]["audit"];
+    assert_eq!(audit["by"], "@alice", "{q}");
+    assert_eq!(audit["missed"], true);
+    assert_eq!(audit["note"], "names a person who left");
+    assert_eq!(
+        q["audited"][0]["note"],
+        "audited by @alice: names a person who left"
+    );
+    let s = summary();
+    assert_eq!(s["sampledMissRate"], 1.0, "{s}");
+    assert_eq!(s["total"]["sampled"], 1, "{s}");
+    assert_eq!(s["awaitingAudit"], 0, "{s}");
+
+    // With no share after merge, nothing is sampled.
+    merge(
+        "acme/shop#13",
+        "codex/on-call-2",
+        "# On call\n\nPage twice.\n",
+        Some(&never),
+    );
+    let outcome = lines(&file).pop().unwrap();
+    assert_eq!(outcome["change"], "acme/shop#13");
+    assert!(outcome.get("sampled").is_none(), "{outcome}");
+    assert_eq!(
+        lines(&rec.join("pulls.jsonl")).pop().unwrap()["auditAfterMerge"],
+        0.0
+    );
+
+    // `/onus audit` writes the same record and clears the queue.
+    merge(
+        "acme/shop#14",
+        "codex/on-call-3",
+        "# On call\n\nPage once.\n",
+        None,
+    );
+    assert_eq!(audits()["awaiting"][0]["change"], "acme/shop#14");
+    let body = t.join("comment.md");
+    std::fs::write(&body, "/onus audit ok").unwrap();
+    let said = json(&[
+        "ci",
+        "comment",
+        "--change",
+        "acme/shop#14",
+        "--body-file",
+        body.to_str().unwrap(),
+        "--author",
+        "lead",
+        "--association",
+        "MEMBER",
+        "--records",
+        rs,
+    ]);
+    assert_eq!(said["reply"], "Audit recorded for @lead.", "{said}");
+    let q = audits();
+    assert_eq!(q["awaiting"], serde_json::json!([]), "{q}");
+    assert_eq!(q["audited"][0]["change"], "acme/shop#14", "{q}");
+    assert_eq!(q["audited"][0]["audit"]["by"], "@lead");
+    assert_eq!(q["audited"][0]["audit"]["missed"], false);
+
+    // A change with no outcome cannot be audited.
+    let out = Command::new(env!("CARGO_BIN_EXE_onus"))
+        .current_dir(&r)
+        .args([
+            "outcomes",
+            "audit",
+            "--file",
+            fs,
+            "--change",
+            "acme/shop#99",
+            "--by",
+            "@alice",
+            "--result",
+            "ok",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("has no outcome yet"), "{err}");
 }

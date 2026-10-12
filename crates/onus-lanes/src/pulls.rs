@@ -39,6 +39,10 @@ pub struct PullRecord {
     /// Who approved the head commit, from the reviews that counted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reviewed_by: Vec<String>,
+    /// `lanes.auditAfterMerge` when this change was classified; `ci closed`
+    /// samples with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit_after_merge: Option<f64>,
 }
 
 pub fn load(path: &Path) -> Result<Vec<PullRecord>> {
@@ -213,6 +217,7 @@ mod tests {
             components: vec![],
             requested: vec![],
             reviewed_by: vec![],
+            audit_after_merge: None,
         };
         append(&path, &rec(Lane::Human, 1)).unwrap();
         append(&path, &rec(Lane::Judge, 2)).unwrap();
@@ -228,5 +233,14 @@ mod tests {
         let line = serde_json::to_string(&reviewed).unwrap();
         assert!(line.contains(r#""requested":["@team-growth"],"reviewedBy":["@grace"]"#));
         assert_eq!(serde_json::from_str::<PullRecord>(&line).unwrap(), reviewed);
+        // The audit share is left out of older lines and round-trips.
+        assert!(!line.contains("auditAfterMerge"));
+        let old: PullRecord = serde_json::from_str(&line).unwrap();
+        assert_eq!(old.audit_after_merge, None);
+        let mut sampled = rec(Lane::AutoMerge, 4);
+        sampled.audit_after_merge = Some(0.05);
+        let line = serde_json::to_string(&sampled).unwrap();
+        assert!(line.contains(r#""auditAfterMerge":0.05"#));
+        assert_eq!(serde_json::from_str::<PullRecord>(&line).unwrap(), sampled);
     }
 }

@@ -442,8 +442,14 @@
     "LanesConfig": {
       "type": "object",
       "properties": {
+        "auditAfterMerge": {
+          "description": "The share of changes approved without a person (`auto-merge`, or the\njudge's `approve`) that wait for a person to audit after they merge,\nchosen by a hash of the merge commit (0 to 1). Default 0.05.",
+          "type": "number",
+          "format": "double",
+          "default": 0.05
+        },
         "auditRate": {
-          "description": "The share of `auto-merge` changes sent to a person anyway, chosen by\na hash of the head commit (0 to 1). Default 0.05.",
+          "description": "The share of would-be `auto-merge` changes sent to a person before\nmerging, chosen by a hash of the head commit (0 to 1). Default 0.05.",
           "type": "number",
           "format": "double",
           "default": 0.05

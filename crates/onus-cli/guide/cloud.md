@@ -1,6 +1,6 @@
 # Onus Cloud from the CLI
 
-Onus Cloud is the hosted Onus: it analyses every pull request of the repositories you install it on, keeps the outcome records, runs the judge, and builds environments on its own machines. The CLI signs in to it as you, so you and your agents can use it from the terminal and through `onus mcp`.
+Onus Cloud is the hosted Onus: it analyses every pull request of the repositories you install it on, keeps the outcome records, runs the judge, and builds environments on its own machines. Its Audits page lists the merged changes Onus sampled for a person to audit (`onus help lanes`); marking one ok or a miss records it with `onus outcomes audit`. The CLI signs in to it as you, so you and your agents can use it from the terminal and through `onus mcp`.
 
 ## Signing in
 

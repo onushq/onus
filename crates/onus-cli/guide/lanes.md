@@ -34,7 +34,7 @@ The answer is the lane and every rule that applied, in order. Each entry has a `
    - **Blocked:** a committed secret, a write outside the token's scope, or weakened tests without a person's approval.
    - **Human:** rows in sensitive code (`auth`, `payments`, `pii`, or any label of medium or high sensitivity), security-sensitive rows, rules of the game (tests, CI, policies, `onus.yaml`, and edits to the code of a declared contract), rows outside the stated intent, and third-party code new to the repository (an npm package no component used before).
    - **Judge:** a new dependency never auto-merges: a package new to a component, or a new dependency between components.
-5. An agent setup with fewer than `minRecord` merged changes on record cannot auto-merge. A share (`auditRate`) of the remaining auto-merges is sent to a person as a random audit, chosen by a hash of the head commit.
+5. An agent setup with fewer than `minRecord` merged changes on record cannot auto-merge. A share (`auditRate`) of the remaining auto-merges is sent to a person before merging, chosen by a hash of the head commit.
 
 ## Risk inputs
 
@@ -64,6 +64,7 @@ Test reach is per file: a file counts as tested when a test in the map exercises
     lanes:
       default: judge
       auditRate: 0.05
+      auditAfterMerge: 0.05
       minRecord: 10
       rules:
         - { lane: auto-merge, match: every, kinds: [internal], components: [docs] }
@@ -103,6 +104,20 @@ The GitHub Action keeps these records for you with `records: true`: outcomes whe
 Pass `--component <id>` (repeatable) to name the components the change touched, for the history input. `onus ci pr` records them from the report, and `onus ci closed`, reverts and incidents keep them.
 
 The summary gives each agent setup its record, and each judge configuration its record of the changes it decided (a verdict on record): merged, reverted, incidents, audited, missed. It also gives the share of changes in the human lane (the review budget), and the miss rate of human audits of automatic approvals, the number that says whether the automatic lanes can be trusted. A judge configuration id is a hash of the lane policy and the Onus version, so changing either starts a new record: that is how configurations are rotated and compared.
+
+## Audits after merge
+
+Some changes merge with no person looking: the `auto-merge` lane, and the `judge` lane when the judge approves. A share of them (`auditAfterMerge`, default 0.05) is sampled for a person to audit after they merge. `onus ci closed` makes the choice from a hash of the merge commit, which does not exist until the merge, so an agent cannot know beforehand whether its change will be audited. The choice is written into the outcome as `"sampled": true` and nowhere else: not in the comment, the check or the CI log.
+
+`auditRate` is a different draw: it sends would-be auto-merges to a person before they merge. Set either to 0 to turn it off.
+
+    onus outcomes audits --file outcomes.jsonl          # what waits for a person, and the audit log
+    onus outcomes audit --file outcomes.jsonl --change acme/shop#42 --by @alice \
+      --result miss --note "the opt-out was ignored"
+
+`audits` prints `{awaiting, audited}`: the sampled changes no one audited yet, oldest first, and every audited change, most recent first. A sampled change that was later reverted or caused an incident still waits; leaving out the ones that went badly would bias the sample. `audit` records who audited, when, ok or a miss, and a note. `/onus audit ok|miss` on a merged pull request writes the same record (`onus help ci`).
+
+The summary's `sampledMissRate` is the number to watch: misses among the sampled changes a person audited. Because the sample is random, it estimates how many risky changes slip through without a person. `auditMissRate` counts every audit, including the ones people chose to make, and `awaitingAudit` counts what is still waiting.
 
 ## The production loop
 

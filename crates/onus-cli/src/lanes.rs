@@ -159,6 +159,40 @@ pub enum OutcomesCmd {
         #[arg(long, value_name = "FILE")]
         file: PathBuf,
     },
+    /// Record a person's audit of a merged change (what `/onus audit` does).
+    Audit {
+        #[arg(long, value_name = "FILE")]
+        file: PathBuf,
+        /// The change, as recorded (owner/repo#123 or a commit).
+        #[arg(long)]
+        change: String,
+        /// Who audited: `@login`, or a name.
+        #[arg(long)]
+        by: String,
+        /// ok, or miss when the automatic path missed a problem.
+        #[arg(long, value_enum)]
+        result: AuditResultArg,
+        /// What the automatic path missed, or anything worth keeping.
+        #[arg(long)]
+        note: Option<String>,
+        /// When, in seconds since 1970; now when left out.
+        #[arg(long, value_name = "SECONDS")]
+        at: Option<u64>,
+    },
+    /// What waits for a person to audit, and the audit log, as JSON.
+    Audits {
+        #[arg(long, value_name = "FILE")]
+        file: PathBuf,
+        /// The most changes in each list.
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum AuditResultArg {
+    Ok,
+    Miss,
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -622,6 +656,8 @@ pub fn outcomes_cmd(cmd: OutcomesCmd) -> Result<i32> {
                     note: None,
                     components,
                     reviewed_by: vec![],
+                    sampled: false,
+                    audit: None,
                 },
             )?;
             Ok(0)
@@ -649,6 +685,36 @@ pub fn outcomes_cmd(cmd: OutcomesCmd) -> Result<i32> {
         OutcomesCmd::Summary { file } => {
             let s = outcomes::summarize(&outcomes::load(&file)?);
             println!("{}", serde_json::to_string_pretty(&s)?);
+            Ok(0)
+        }
+        OutcomesCmd::Audit {
+            file,
+            change,
+            by,
+            result,
+            note,
+            at,
+        } => {
+            let missed = result == AuditResultArg::Miss;
+            let note = note.as_deref().map(str::trim).filter(|n| !n.is_empty());
+            let at = at.unwrap_or_else(onus_doors::gateway::now);
+            let audit =
+                outcomes::audit_record(&outcomes::load(&file)?, &change, &by, missed, note, at)?;
+            record_outcome(&file, &audit)?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "change": change,
+                    "missed": missed,
+                    "sampled": audit.sampled,
+                    "reply": format!("Audit recorded{} for {by}.", if missed { " as a miss" } else { "" }),
+                })
+            );
+            Ok(0)
+        }
+        OutcomesCmd::Audits { file, limit } => {
+            let q = outcomes::audits(&outcomes::load(&file)?, limit);
+            println!("{}", serde_json::to_string_pretty(&q)?);
             Ok(0)
         }
     }

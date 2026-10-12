@@ -171,11 +171,12 @@ Folders named .git, .onus (where Onus keeps its records), node_modules, dist, bu
 
 ## lanes
 
-What happens to a change after it is reported: the default lane, rules that set or raise it, the built-in risk inputs, the share of automatic merges audited by a person, the record an agent setup needs before it may auto-merge, held-out checks and an optional taste reviewer for the judge. See `onus help lanes`.
+What happens to a change after it is reported: the default lane, rules that set or raise it, the built-in risk inputs, the shares of automatic merges a person audits before and after merging, the record an agent setup needs before it may auto-merge, held-out checks and an optional taste reviewer for the judge. See `onus help lanes`.
 
     lanes:
       default: judge          # auto-merge, judge, human or blocked
-      auditRate: 0.05
+      auditRate: 0.05         # would-be auto-merges sent to a person before merging
+      auditAfterMerge: 0.05   # changes approved without a person, audited after they merge
       minRecord: 10
       rules:
         - { lane: auto-merge, match: every, kinds: [internal], components: [docs] }

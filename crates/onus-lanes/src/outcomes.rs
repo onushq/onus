@@ -55,6 +55,95 @@ pub struct Outcome {
     /// it merged without a counted review.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reviewed_by: Vec<String>,
+    /// Chosen when it merged for a person to audit (`lanes.auditAfterMerge`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sampled: bool,
+    /// The latest audit by a person: who, when and what they found.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit: Option<AuditMark>,
+}
+
+/// A person's audit of a merged change.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditMark {
+    /// `@login`, or a name for people without one.
+    pub by: String,
+    /// Unix seconds.
+    pub at: u64,
+    /// The audit found a problem the automatic path missed.
+    pub missed: bool,
+    /// What the automatic path missed, or anything worth keeping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// Approved without a person: auto-merge, or the judge approved.
+pub fn approved_without_person(lane: Lane, verdict: Option<&str>) -> bool {
+    lane == Lane::AutoMerge || (lane == Lane::Judge && verdict == Some("approve"))
+}
+
+/// The record of a person's audit of `change`, built from its latest
+/// outcome. A change with no outcome yet cannot be audited.
+pub fn audit_record(
+    all: &[Outcome],
+    change: &str,
+    by: &str,
+    missed: bool,
+    note: Option<&str>,
+    at: u64,
+) -> Result<Outcome> {
+    let Some(last) = all.iter().rev().find(|o| o.change == change) else {
+        anyhow::bail!("{change} has no outcome yet; audit it after it merges");
+    };
+    Ok(Outcome {
+        at,
+        audited: true,
+        missed,
+        note: Some(format!(
+            "audited by {by}{}",
+            note.map(|n| format!(": {n}")).unwrap_or_default()
+        )),
+        audit: Some(AuditMark {
+            by: by.to_string(),
+            at,
+            missed,
+            note: note.map(str::to_string),
+        }),
+        ..last.clone()
+    })
+}
+
+/// What waits for a person to audit, and the audit log.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Audits {
+    /// Sampled and not audited yet, in the order the changes were first
+    /// recorded (oldest first).
+    pub awaiting: Vec<Outcome>,
+    /// Every change a person audited (sampled or not), most recent audit
+    /// first (`audit.at`, falling back to `at` for audits recorded without
+    /// a mark).
+    pub audited: Vec<Outcome>,
+}
+
+/// Both lists from the latest outcome of each change, each cut to `limit`.
+/// A sampled change that was later reverted or caused an incident still
+/// waits: leaving out the changes that went badly would bias the sample.
+pub fn audits(all: &[Outcome], limit: usize) -> Audits {
+    let last = latest(all);
+    let awaiting = last
+        .iter()
+        .filter(|o| o.sampled && !o.audited)
+        .take(limit)
+        .map(|o| (*o).clone())
+        .collect();
+    let mut audited: Vec<&Outcome> = last.into_iter().filter(|o| o.audited).collect();
+    audited.sort_by_key(|o| std::cmp::Reverse(o.audit.as_ref().map_or(o.at, |a| a.at)));
+    Audits {
+        awaiting,
+        audited: audited.into_iter().take(limit).cloned().collect(),
+    }
 }
 
 /// The latest outcome of each change, in the order changes first appeared:
@@ -320,6 +409,9 @@ pub struct Tally {
     pub auto_merged: u32,
     pub audited: u32,
     pub missed: u32,
+    /// Sampled for a person to audit when they merged.
+    #[serde(default)]
+    pub sampled: u32,
 }
 
 impl Tally {
@@ -343,6 +435,9 @@ impl Tally {
         if o.missed {
             self.missed += 1;
         }
+        if o.sampled {
+            self.sampled += 1;
+        }
     }
 }
 
@@ -357,12 +452,27 @@ pub struct Summary {
     pub human_share: Option<f64>,
     /// Misses found by human audits of automatic approvals, per audit.
     pub audit_miss_rate: Option<f64>,
+    /// Sampled changes not audited yet.
+    #[serde(default)]
+    pub awaiting_audit: u32,
+    /// Misses among sampled changes a person audited: the unbiased estimate
+    /// of how many risky changes slip through without a person.
+    #[serde(default)]
+    pub sampled_miss_rate: Option<f64>,
 }
 
 pub fn summarize(outcomes: &[Outcome]) -> Summary {
     let mut s = Summary::default();
     let had = had_incident(outcomes);
+    let (mut sampled_audits, mut sampled_misses) = (0, 0);
     for o in latest(outcomes) {
+        if o.sampled && !o.audited {
+            s.awaiting_audit += 1;
+        }
+        if o.sampled && o.audited {
+            sampled_audits += 1;
+            sampled_misses += u32::from(o.missed);
+        }
         let incident = had.contains(o.change.as_str());
         s.total.add(o, incident);
         s.by_agent
@@ -381,6 +491,7 @@ pub fn summarize(outcomes: &[Outcome]) -> Summary {
         s.total.changes,
     );
     s.audit_miss_rate = ratio(s.total.missed, s.total.audited);
+    s.sampled_miss_rate = ratio(sampled_misses, sampled_audits);
     s
 }
 
@@ -404,6 +515,8 @@ mod tests {
             note: None,
             components: vec![],
             reviewed_by: vec![],
+            sampled: false,
+            audit: None,
         }
     }
 
@@ -569,5 +682,152 @@ mod tests {
         let o: Outcome = serde_json::from_str(old).unwrap();
         assert!(o.components.is_empty());
         assert!(!serde_json::to_string(&o).unwrap().contains("components"));
+    }
+
+    #[test]
+    fn approved_without_a_person() {
+        for lane in [Lane::AutoMerge, Lane::Judge, Lane::Human, Lane::Blocked] {
+            for verdict in [None, Some("approve"), Some("escalate")] {
+                let want =
+                    lane == Lane::AutoMerge || (lane == Lane::Judge && verdict == Some("approve"));
+                assert_eq!(
+                    approved_without_person(lane, verdict),
+                    want,
+                    "{lane:?} {verdict:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_audit_is_built_from_the_latest_outcome() {
+        let mut merged = o("a/b/c", Lane::AutoMerge, "merged", false, false);
+        merged.change = "acme/shop#7".into();
+        merged.sampled = true;
+        let err = audit_record(&[], "acme/shop#7", "@alice", true, None, 9).unwrap_err();
+        assert!(err.to_string().contains("has no outcome yet"), "{err}");
+        let a = audit_record(
+            std::slice::from_ref(&merged),
+            "acme/shop#7",
+            "@alice",
+            true,
+            Some("the opt-out was ignored"),
+            9,
+        )
+        .unwrap();
+        assert!(a.audited && a.missed && a.sampled);
+        assert_eq!(a.at, 9);
+        assert_eq!(
+            a.note.as_deref(),
+            Some("audited by @alice: the opt-out was ignored")
+        );
+        assert_eq!(
+            a.audit,
+            Some(AuditMark {
+                by: "@alice".into(),
+                at: 9,
+                missed: true,
+                note: Some("the opt-out was ignored".into()),
+            })
+        );
+        let ok = audit_record(&[merged], "acme/shop#7", "@bob", false, None, 10).unwrap();
+        assert_eq!(ok.note.as_deref(), Some("audited by @bob"));
+        assert!(!ok.missed && ok.audit.unwrap().note.is_none());
+    }
+
+    #[test]
+    fn the_audit_queue_and_log() {
+        let at = |change: &str, t: u64, result: &str, sampled: bool| Outcome {
+            at: t,
+            change: change.into(),
+            sampled,
+            ..o("a/b/c", Lane::AutoMerge, result, false, false)
+        };
+        let mut all = vec![
+            at("acme/shop#1", 1, "merged", true),
+            at("acme/shop#2", 2, "merged", false),
+            at("acme/shop#3", 3, "merged", true),
+            at("acme/shop#4", 4, "merged", true),
+            at("acme/shop#5", 5, "merged", true),
+        ];
+        // Later reverted or an incident: still waits.
+        all.push(at("acme/shop#3", 6, "reverted", true));
+        all.push(at("acme/shop#4", 7, "incident", true));
+        all.push(audit_record(&all, "acme/shop#5", "@alice", false, None, 20).unwrap());
+        all.push(audit_record(&all, "acme/shop#2", "@bob", true, Some("x"), 30).unwrap());
+        // An audit written before the mark existed.
+        let mut legacy = at("acme/shop#6", 25, "merged", false);
+        legacy.audited = true;
+        all.push(legacy);
+        let q = audits(&all, 100);
+        let changes = |v: &[Outcome]| v.iter().map(|o| o.change.clone()).collect::<Vec<_>>();
+        assert_eq!(
+            changes(&q.awaiting),
+            ["acme/shop#1", "acme/shop#3", "acme/shop#4"]
+        );
+        assert_eq!(q.awaiting[1].result, "reverted");
+        assert_eq!(
+            changes(&q.audited),
+            ["acme/shop#2", "acme/shop#6", "acme/shop#5"]
+        );
+        let cut = audits(&all, 1);
+        assert_eq!((cut.awaiting.len(), cut.audited.len()), (1, 1));
+        assert_eq!(audits(&[], 100), Audits::default());
+    }
+
+    #[test]
+    fn summaries_count_the_sample() {
+        let at = |change: &str, sampled: bool, audited: bool, missed: bool| Outcome {
+            change: change.into(),
+            sampled,
+            ..o("a/b/c", Lane::AutoMerge, "merged", audited, missed)
+        };
+        let all = vec![
+            at("acme/shop#1", true, true, true),
+            at("acme/shop#2", true, true, false),
+            at("acme/shop#3", true, false, false),
+            // Chosen by a person, not sampled.
+            at("acme/shop#4", false, true, true),
+            at("acme/shop#5", false, false, false),
+        ];
+        let s = summarize(&all);
+        assert_eq!(s.total.sampled, 3);
+        assert_eq!(s.awaiting_audit, 1);
+        assert_eq!(s.sampled_miss_rate, Some(0.5));
+        assert_eq!(s.audit_miss_rate, Some(2.0 / 3.0));
+        assert_eq!(summarize(&all[3..]).sampled_miss_rate, None);
+        // A summary stored before these fields still reads.
+        let old = r#"{"total":{"changes":0,"merged":0,"reverted":0,"incidents":0,"autoMerged":0,"audited":0,"missed":0},"byAgent":{},"byJudge":{},"byLane":{},"humanShare":null,"auditMissRate":null}"#;
+        let s: Summary = serde_json::from_str(old).unwrap();
+        assert_eq!((s.awaiting_audit, s.total.sampled), (0, 0));
+    }
+
+    #[test]
+    fn unsampled_lines_stay_the_same() {
+        let old = r#"{"at":1,"change":"x","agent":"a//","lane":"auto-merge","result":"merged","audited":false,"missed":false}"#;
+        let o: Outcome = serde_json::from_str(old).unwrap();
+        assert!(!o.sampled && o.audit.is_none());
+        let line = serde_json::to_string(&o).unwrap();
+        assert!(
+            !line.contains("sampled") && !line.contains("\"audit\""),
+            "{line}"
+        );
+        let mut s = o.clone();
+        s.sampled = true;
+        assert!(
+            serde_json::to_string(&s)
+                .unwrap()
+                .contains(r#""sampled":true"#)
+        );
+        // A later revert keeps the sample and the audit.
+        s.commit = Some("abc1234".into());
+        s = audit_record(&[s], "x", "@a", false, None, 2).unwrap();
+        let reverts = [Revert {
+            revert: "f".repeat(40),
+            reverted: "abc1234".into(),
+            subject: "Revert".into(),
+        }];
+        let added = ingest_reverts(std::slice::from_ref(&s), &reverts, 5);
+        assert!(added[0].sampled && added[0].audit.is_some());
     }
 }

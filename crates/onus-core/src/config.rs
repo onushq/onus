@@ -111,10 +111,15 @@ pub struct LanesConfig {
     /// rule and the hard floors only move a change up.
     #[serde(default)]
     pub rules: Vec<LaneRule>,
-    /// The share of `auto-merge` changes sent to a person anyway, chosen by
-    /// a hash of the head commit (0 to 1). Default 0.05.
+    /// The share of would-be `auto-merge` changes sent to a person before
+    /// merging, chosen by a hash of the head commit (0 to 1). Default 0.05.
     #[serde(default = "default_audit_rate")]
     pub audit_rate: f64,
+    /// The share of changes approved without a person (`auto-merge`, or the
+    /// judge's `approve`) that wait for a person to audit after they merge,
+    /// chosen by a hash of the merge commit (0 to 1). Default 0.05.
+    #[serde(default = "default_audit_rate")]
+    pub audit_after_merge: f64,
     /// Changes an agent setup needs on record before it may use the
     /// `auto-merge` lane. Default 10.
     #[serde(default = "default_min_record")]
@@ -149,6 +154,7 @@ impl Default for LanesConfig {
             default: default_lane(),
             rules: vec![],
             audit_rate: default_audit_rate(),
+            audit_after_merge: default_audit_rate(),
             min_record: default_min_record(),
             held_out: None,
             taste: None,

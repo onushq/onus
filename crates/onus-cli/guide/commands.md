@@ -108,7 +108,7 @@ Opens the web interface for the repository: everything below and above, in a bro
 ## Scopes, lanes and environments
 
 - `onus token`, `onus scope`, `onus gateway`, `onus escalate`, `onus escalation`, `onus audit`, `onus run-test`: task tokens, the git gateway, escalation and the audit log. See `onus help scopes`.
-- `onus submit`, `onus classify`, `onus judge`, `onus outcomes`: risk lanes, the judge and outcome records. See `onus help lanes`.
+- `onus submit`, `onus classify`, `onus judge`, `onus outcomes`: risk lanes, the judge and outcome records. `onus outcomes audits` lists the merged changes sampled for a person to audit and the audit log; `onus outcomes audit` records an audit. See `onus help lanes`.
 - `onus env`, `onus evidence`: environments and the evidence store. See `onus help environments`.
 
 ## onus ci
@@ -125,7 +125,7 @@ What the GitHub Action runs to keep outcome records on a branch (`onus help ci`)
 
 - `ci pr` submits, classifies and (with `--judge`) judges the change, appends to `pulls.jsonl`, writes `submission.json`, `classification.json`, `judgment.json` and the comment section `lane.md` to `--out`, and prints `{lane, verdict, agent, record, review}`. `--evidence <file>` adds test runs; `--reviews <file>` gives the pull request's GitHub reviews, for the human lane's review (`onus help ci`).
 - `ci comment` acts on `/onus approve <row>`, `/onus audit ok|miss [note]` and `/onus incident <note> [involved: a, b]` from OWNER, MEMBER or COLLABORATOR, and prints `{command, ok, reply, rerun}`.
-- `ci closed` turns the pull request's latest record into an outcome; `ci push` records reverts.
+- `ci closed` turns the pull request's latest record into an outcome, and samples a change approved without a person for an audit (`onus help lanes`); `ci push` records reverts.
 - `ci records` takes `--remote` (default `origin`) and `--branch` (default `onus/records`).
 
 ## onus login, onus logout, onus cloud
