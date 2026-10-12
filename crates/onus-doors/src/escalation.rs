@@ -95,8 +95,14 @@ pub struct Request {
     pub reason: String,
     /// Files (outside the asked paths) that depend on code in them.
     pub blast_radius: u32,
-    /// Sensitivity labels of the components the asked paths are in.
+    /// Sensitivity labels of the components the asked paths (and the files
+    /// the evidence names) are in.
     pub sensitive: Vec<String>,
+    /// Owners of the components the asked paths (and the files the evidence
+    /// names) are in, from onus.yaml or CODEOWNERS: who a person-decision is
+    /// routed to. Left out when empty, so older requests keep their ids.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owners: Vec<String>,
     /// Seconds since the Unix epoch.
     pub at: u64,
 }
@@ -113,9 +119,9 @@ impl Request {
         sensitive_labels: &[String],
         at: u64,
     ) -> Request {
-        let (blast_radius, sensitive) = match map {
-            Some(m) => impact(m, &scopes, sensitive_labels),
-            None => (0, vec![]),
+        let (blast_radius, sensitive, owners) = match map {
+            Some(m) => impact(m, &scopes, &evidence, sensitive_labels),
+            None => (0, vec![], vec![]),
         };
         let mut r = Request {
             id: String::new(),
@@ -126,6 +132,7 @@ impl Request {
             reason: reason.to_string(),
             blast_radius,
             sensitive,
+            owners,
             at,
         };
         r.id = r.content_id();
@@ -153,8 +160,15 @@ impl Request {
 }
 
 /// Files outside the asked paths that depend on code inside them, and the
-/// sensitive labels of the components the asked paths are in.
-fn impact(map: &CodebaseMap, scopes: &[Right], sensitive_labels: &[String]) -> (u32, Vec<String>) {
+/// sensitive labels and owners of the components the asked paths and the
+/// repository files the evidence names are in (so a broken-test report with
+/// no scopes goes to the owners of the test).
+fn impact(
+    map: &CodebaseMap,
+    scopes: &[Right],
+    evidence: &[Evidence],
+    sensitive_labels: &[String],
+) -> (u32, Vec<String>, Vec<String>) {
     let res: Vec<regex::Regex> = scopes
         .iter()
         .filter(|r| matches!(r.kind, Kind::Write | Kind::Read))
@@ -188,24 +202,37 @@ fn impact(map: &CodebaseMap, scopes: &[Right], sensitive_labels: &[String]) -> (
             }
         }
     }
+    let named: BTreeSet<&str> = evidence
+        .iter()
+        .filter(|e| matches!(e.kind.as_str(), "failing-test" | "trace" | "draft-diff"))
+        .map(|e| e.reference.trim().trim_start_matches("./"))
+        .collect();
     let comps: BTreeSet<&str> = map
         .files
         .iter()
-        .filter(|f| files.contains(f.path.as_str()))
+        .filter(|f| files.contains(f.path.as_str()) || named.contains(f.path.as_str()))
         .filter_map(|f| f.component_id.as_deref())
         .collect();
     let mut labels: BTreeSet<String> = BTreeSet::new();
-    for c in &map.components {
-        if comps.contains(c.id.as_str()) {
-            labels.extend(
-                c.labels
-                    .iter()
-                    .filter(|l| sensitive_labels.contains(l))
-                    .cloned(),
-            );
-        }
+    let mut owners: BTreeSet<String> = BTreeSet::new();
+    for c in map
+        .components
+        .iter()
+        .filter(|c| comps.contains(c.id.as_str()))
+    {
+        labels.extend(
+            c.labels
+                .iter()
+                .filter(|l| sensitive_labels.contains(l))
+                .cloned(),
+        );
+        owners.extend(c.owners.iter().cloned());
     }
-    (dependents.len() as u32, labels.into_iter().collect())
+    (
+        dependents.len() as u32,
+        labels.into_iter().collect(),
+        owners.into_iter().collect(),
+    )
 }
 
 /// When a request is granted without a person.
@@ -258,7 +285,7 @@ pub fn decide(req: &Request, policy: &Policy) -> Decision {
     }
     if !req.sensitive.is_empty() {
         why_not.push(format!(
-            "the paths are in components labeled {}",
+            "the request reaches components labeled {}",
             req.sensitive.join(", ")
         ));
     }
@@ -419,6 +446,85 @@ mod tests {
         );
         assert!(matches!(decide(&other, &p), Decision::NeedsPerson { .. }));
         assert!(Evidence::parse("hunch:x").is_err());
+    }
+
+    fn two_component_map() -> CodebaseMap {
+        let component = |id: &str, owner: &str, labels: &[&str]| {
+            serde_json::json!({
+                "id": id, "kind": "service", "roots": [format!("services/{id}/**")],
+                "publicEntrypoints": [], "owners": [owner], "labels": labels,
+                "confidence": "declared",
+            })
+        };
+        let file = |path: &str, component: &str| {
+            serde_json::json!({
+                "path": path, "componentId": component, "language": "typescript",
+                "isTest": path.contains(".test."), "lines": 1, "contentHash": "x", "imports": [],
+            })
+        };
+        serde_json::from_value(serde_json::json!({
+            "schemaVersion": 1, "commit": "worktree",
+            "builtWith": { "onus": "test", "providers": {}, "configHash": "inferred" },
+            "components": [component("orders", "@a", &[]), component("billing", "@b", &["payments"])],
+            "files": [
+                file("services/orders/src/a.ts", "orders"),
+                file("services/billing/src/b.test.ts", "billing"),
+            ],
+            "symbols": [], "edges": [], "externals": [], "packages": [], "tests": [],
+            "rules": [], "diagnostics": [],
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn owners_come_from_the_components_of_the_asked_paths_and_the_evidence() {
+        let map = two_component_map();
+        let r = Request::new(
+            "sms",
+            EscalationKind::Permission,
+            vec!["write:path:services/orders/**".parse().unwrap()],
+            vec![Evidence::parse("failing-test:services/billing/src/b.test.ts").unwrap()],
+            "needed",
+            Some(&map),
+            &["payments".into()],
+            100,
+        );
+        assert_eq!(r.owners, ["@a", "@b"]);
+        // The test is in payments code, so a person decides.
+        assert_eq!(r.sensitive, ["payments"]);
+        assert_eq!(r.content_id(), r.id);
+
+        // A broken test with no scopes goes to the owners of the test.
+        let blocked = Request::new(
+            "sms",
+            EscalationKind::BrokenTest,
+            vec![],
+            vec![
+                Evidence::parse("failing-test:./services/billing/src/b.test.ts").unwrap(),
+                Evidence::parse("rationale:services/orders/src/a.ts").unwrap(),
+            ],
+            "the test expects UTC",
+            Some(&map),
+            &["payments".into()],
+            100,
+        );
+        assert_eq!(blocked.owners, ["@b"]);
+    }
+
+    #[test]
+    fn without_a_map_there_are_no_owners_and_the_id_is_unchanged() {
+        let r = req(
+            EscalationKind::Permission,
+            "write:path:x/**",
+            &["rationale:needed"],
+            false,
+        );
+        assert!(r.owners.is_empty());
+        let json = serde_json::to_value(&r).unwrap();
+        assert!(json.get("owners").is_none(), "{json}");
+        // A request written before owners existed still matches its id.
+        let old: Request = serde_json::from_value(json).unwrap();
+        assert_eq!(old.content_id(), r.id);
     }
 
     #[test]

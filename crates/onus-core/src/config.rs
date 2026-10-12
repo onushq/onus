@@ -330,6 +330,11 @@ pub struct TestsConfig {
     /// `__tests__/`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub globs: Vec<String>,
+    /// How to run one test file, `{test}` replaced by its path
+    /// (e.g. `npx vitest run {test}`). Used to reproduce failing-test
+    /// evidence of escalations. Unset: they are not reproduced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
 }
 
 /// The extractor settings handed to language adapters, with defaults and the

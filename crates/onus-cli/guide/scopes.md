@@ -78,7 +78,7 @@ When a task needs more, it asks with a structured request:
       --evidence failing-test:services/orders/src/ship.test.ts \
       --reason "the shipped event must carry the phone number" --out request.json
 
-Evidence is graded: 1 a failing test, 2 a trace, 3 a path through the map, 4 a draft diff, 5 a rationale. Onus adds the blast radius (files that depend on the asked paths) and the sensitivity labels of the components involved.
+Evidence is graded: 1 a failing test, 2 a trace, 3 a path through the map, 4 a draft diff, 5 a rationale. Onus adds the blast radius (files that depend on the asked paths), and the sensitivity labels and owners (from onus.yaml or CODEOWNERS) of the components involved: those of the asked paths and of the files the evidence names. The owners are who a person-decision goes to, so a broken-test report with no scopes goes to the owners of the test.
 
     onus escalation decide request.json --token "$TOKEN" --key-public root.pub --key root.key \
       --reproduce-at HEAD --image node:22 --setup "npm ci" --test-command "npx vitest run {test}" \
@@ -95,6 +95,16 @@ Then the command prints a new token: the original rights plus exactly what was a
 
     onus escalation grant request.json --token "$TOKEN" --key-public root.pub --key root.key --by @team-orders
     onus escalation deny request.json --by @team-orders --reason "use the events API instead"
+
+Before running a failing test, Onus checks that its reference is a plain path in the repository (letters, digits and `._/@+-`, no `..`, not absolute), that the file exists at the commit, and that it is a test file (onus.yaml `tests.globs`). A reference that fails a check is not run. It counts as not reproduced and sends the request to a person, even when another failing test reproduced, and the reasons say why. Whether a test reproduced is only ever what this run saw: a request file that says so is not believed, and one changed after it was filed is refused.
+
+### Assessing without minting
+
+`onus escalation assess` applies the same policy and mints nothing, so it needs neither a token nor a key. Hosted services use it, and it records nothing in the audit log, because assessing is not deciding:
+
+    onus escalation assess request.json --repo <trusted checkout> --reproduce-at <commit>
+
+The test command comes from the trusted checkout's onus.yaml (`tests.command`), and the image and setup from its `environment:` (or devcontainer), else `node:22`. An environment that is declared but cannot be used (a devcontainer that builds from a Dockerfile, say) is not replaced by `node:22`: the test is not run, and the reasons say why. The agent's commit is only the tree the test runs in, so the agent cannot choose what reproduces a failure. `--test-command`, `--image` and `--setup` override them. Without a test command, failing tests are not reproduced, and the reasons say so. It prints the request with its reproduced evidence, `decision` (`granted` or `needs-person`) and `reasons`, and exits 0 when policy would grant it, 3 when a person decides.
 
 ### The test runner
 

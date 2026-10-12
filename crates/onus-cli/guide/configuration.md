@@ -29,6 +29,7 @@ Onus works without configuration. An `onus.yaml` at the repository root adds wha
         clients: [prisma, db]
     tests:
       globs: ["**/*.test.ts", "e2e/**"]
+      command: "npx vitest run {test}"
     testData: ["fixtures/**"]
 
 Unknown keys are an error, so a typo never silently does nothing.
@@ -149,6 +150,8 @@ Packs are read from the base version of a change, like this file.
 `globs`: which files are tests. Declaring globs replaces the defaults:
 
     **/*.test.*  **/*.spec.*  **/__tests__/**  **/test/**  **/tests/**  **/e2e/**
+
+`command`: how to run one test file, with `{test}` replaced by its path, such as `npx vitest run {test}`. `onus escalation assess` uses it to reproduce the failing test an escalation names, in a container built from `environment:` (`onus help scopes`). Without it, failing tests are not reproduced, so no escalation is granted by policy.
 
 ## testData
 

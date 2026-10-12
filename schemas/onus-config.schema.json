@@ -545,6 +545,13 @@
     "TestsConfig": {
       "type": "object",
       "properties": {
+        "command": {
+          "description": "How to run one test file, `{test}` replaced by its path\n(e.g. `npx vitest run {test}`). Used to reproduce failing-test\nevidence of escalations. Unset: they are not reproduced.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "globs": {
           "description": "Globs of test files. Defaults cover `*.test.*`, `*.spec.*` and\n`__tests__/`.",
           "type": "array",
