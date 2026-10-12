@@ -40,6 +40,8 @@ pub fn tier(change: &SemanticChange) -> u8 {
         ChangeKind::Additive if change.level == ChangeLevel::Relationship => TIER_RELATIONSHIP,
         ChangeKind::Additive => TIER_ADDITIVE_CONTRACT,
         ChangeKind::Test => TIER_TEST,
+        // An edit to a declared contract's code.
+        ChangeKind::Internal if change.hints.rules_of_the_game => TIER_RULES_OF_THE_GAME,
         ChangeKind::Internal if change.subkind == SUBKIND_INTERNAL_CHANGES => TIER_INTERNAL,
         ChangeKind::Internal if change.level == ChangeLevel::Behavior => TIER_INTERNAL_BEHAVIOR,
         ChangeKind::Internal => TIER_INTERNAL_RENAME,
@@ -88,6 +90,8 @@ mod tests {
                 rules_of_the_game: false,
                 intent_mismatch: false,
                 needs_person: false,
+                dependent_components: 0,
+                tested: None,
             },
             locations: vec![],
             stats: None,

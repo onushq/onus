@@ -383,3 +383,178 @@ fn submissions_list_only_granted_escalations() {
     assert_eq!(s["agent"]["tool"], "claude-code");
     assert_eq!(s["agent"]["model"], "opus");
 }
+
+#[test]
+fn risk_inputs_and_new_floors_raise_lanes() {
+    let dir = repo();
+    let r = dir.path();
+    // Additive changes to logger may auto-merge too, so the inputs are what
+    // raise them.
+    let yaml = std::fs::read_to_string(r.join("onus.yaml"))
+        .unwrap()
+        .replace(
+            "kinds: [internal], components: [logger]",
+            "kinds: [internal, additive], components: [logger]",
+        )
+        .replace(
+            "\ncontracts:\n",
+            "\ncontracts:\n  Logger:\n    symbol: \"logger:src/logger.ts#createLogger\"\n",
+        );
+    std::fs::write(r.join("onus.yaml"), yaml).unwrap();
+    git(r, &["commit", "-q", "-am", "policy"]);
+    let input = |c: &serde_json::Value, source: &str, text: &str| {
+        c["applied"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["source"] == source && a["reason"].as_str().unwrap().contains(text))
+    };
+    let logger_ts = std::fs::read_to_string(r.join("packages/logger/src/logger.ts")).unwrap();
+
+    // Internals that a test exercises still auto-merge.
+    let logger = format!(
+        "{logger_ts}\nfunction redact(message: string): string {{\n  return message.replace(/[0-9]+/g, '#');\n}}\nvoid redact;\n"
+    );
+    change(r, "logger", &[("packages/logger/src/logger.ts", &logger)]);
+    let c = lane_of(r, "logger");
+    assert_eq!(c["lane"], "auto-merge", "{c}");
+    assert!(!input(&c, "input", ""), "{c}");
+
+    // A file no test imports.
+    change(
+        r,
+        "untested",
+        &[(
+            "packages/logger/src/redact.ts",
+            "export function redact(s: string): string {\n  return s;\n}\n",
+        )],
+    );
+    let c = lane_of(r, "untested");
+    assert_eq!(c["lane"], "judge", "{c}");
+    assert!(input(&c, "input", "no test exercises"), "{c}");
+
+    // `createLogger` is used by billing, notifications and orders.
+    let wider = logger_ts.replace(
+        "createLogger(name: string)",
+        "createLogger(name: string, prefix?: string)",
+    );
+    change(r, "wider", &[("packages/logger/src/logger.ts", &wider)]);
+    let c = lane_of(r, "wider");
+    assert_eq!(c["lane"], "human", "{c}");
+    assert!(input(&c, "input", "used by 3 other components"), "{c}");
+
+    // Third-party code new to the repository.
+    let pkg = std::fs::read_to_string(r.join("packages/logger/package.json"))
+        .unwrap()
+        .replace(
+            "\"private\": true,",
+            "\"private\": true,\n  \"dependencies\": { \"left-pad\": \"1.3.0\" },",
+        );
+    let format = std::fs::read_to_string(r.join("packages/logger/src/format.ts")).unwrap();
+    change(
+        r,
+        "left-pad",
+        &[
+            ("packages/logger/package.json", &pkg),
+            (
+                "packages/logger/src/format.ts",
+                &format!("import leftPad from \"left-pad\";\nvoid leftPad;\n{format}"),
+            ),
+        ],
+    );
+    let c = lane_of(r, "left-pad");
+    assert_eq!(c["lane"], "human", "{c}");
+    assert!(
+        input(&c, "floor", "third-party code new to this repository"),
+        "{c}"
+    );
+
+    // The history of the components a change touches.
+    let sub = out(r, "logger.json");
+    let outcomes = out(r, "outcomes.jsonl");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let classify = |days_ago: u64, change: &str| {
+        let line = serde_json::json!({
+            "at": now - days_ago * 86_400, "change": "acme/shop#1", "agent": "other//",
+            "lane": "judge", "result": "incident", "components": ["logger"],
+        });
+        std::fs::write(&outcomes, format!("{line}\n")).unwrap();
+        let (code, out, err) = onus(
+            r,
+            &[
+                "classify",
+                "--submission",
+                &sub,
+                "--outcomes",
+                &outcomes,
+                "--change",
+                change,
+            ],
+        );
+        assert_eq!(code, 0, "{err}");
+        serde_json::from_str::<serde_json::Value>(&out).unwrap()
+    };
+    let c = classify(10, "acme/shop#2");
+    assert_eq!(c["lane"], "human", "{c}");
+    assert!(
+        input(
+            &c,
+            "input",
+            "`logger` had 1 incident in the last 90 days (acme/shop#1)"
+        ),
+        "{c}"
+    );
+    assert_eq!(classify(200, "acme/shop#2")["lane"], "auto-merge");
+    assert_eq!(classify(10, "acme/web#2")["lane"], "auto-merge");
+
+    // A body-only edit of a declared contract is a rule of the game.
+    let body = logger_ts.replace("console.log(", "console.info(");
+    change(r, "declared", &[("packages/logger/src/logger.ts", &body)]);
+    let report = out(r, "declared.report.json");
+    let (code, json, err) = onus(
+        r,
+        &[
+            "report", "--base", "main", "--head", "declared", "--format", "json",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    std::fs::write(&report, &json).unwrap();
+    assert!(
+        json.contains("\"subkind\": \"declared-contract-edited\""),
+        "{json}"
+    );
+    let c = lane_of(r, "declared");
+    assert_eq!(c["lane"], "human", "{c}");
+    assert!(input(&c, "floor", "changes the rules of the game"), "{c}");
+
+    // Outcomes recorded by hand can name the components.
+    let file = out(r, "recorded.jsonl");
+    let (code, _, err) = onus(
+        r,
+        &[
+            "outcomes",
+            "record",
+            "--file",
+            &file,
+            "--change",
+            "acme/shop#3",
+            "--agent",
+            "test//",
+            "--lane",
+            "judge",
+            "--result",
+            "merged",
+            "--component",
+            "logger",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        std::fs::read_to_string(&file)
+            .unwrap()
+            .contains(r#""components":["logger"]"#)
+    );
+}

@@ -53,7 +53,7 @@ Every row lists the lines it explains. The changed lines no row explains collaps
 
 ## Evidence
 
-The collapsed "Evidence per row" section lists, for each row, its kind and subkind, confidence, labels, blast radius, novelty and line counts, and every file and line behind it. Lines marked "(before the change)" are in the base tree, for example a deleted assertion.
+The collapsed "Evidence per row" section lists, for each row, its kind and subkind, confidence, labels, blast radius, how many other components use what it changed ("used by 3 other components"), whether tests reach its code ("tested", "traced, not tested" or "untested"), novelty and line counts, and every file and line behind it. Lines marked "(before the change)" are in the base tree, for example a deleted assertion.
 
 ## Structure only
 
@@ -68,7 +68,7 @@ Code in the changed files that Onus could not resolve statically: dynamic import
 `--format json` gives everything in the Markdown and more (schemas/semantic-report.schema.json):
 
 - `summary`: counts of rows, rows needing attention, secrets, new rule violations and intent mismatches.
-- `changes`: the ranked rows. Each has an `id`, `kind`, `subkind`, `level` (relationship, behavior or structure), `subject` (the map id it is about), `component`, `title`, `whyItMatters`, `hints` (labels, blastRadius, novelty, confidence, rulesOfTheGame, intentMismatch, needsPerson), `locations` (file, lines, side) and, for internal rows, `stats`.
+- `changes`: the ranked rows. Each has an `id`, `kind`, `subkind`, `level` (relationship, behavior or structure), `subject` (the map id it is about), `component`, `title`, `whyItMatters`, `hints` (labels, blastRadius, novelty, confidence, rulesOfTheGame, intentMismatch, needsPerson, dependentComponents, and `tested` for rows that change code), `locations` (file, lines, side) and, for internal rows, `stats`.
 - `intentCheck`, `ruleViolations`, `structure`, `textStats` and `mapDiagnostics`.
 
 Output is deterministic: the same two trees always give byte-identical Markdown and JSON, with no timestamps or absolute paths.

@@ -245,6 +245,10 @@ export interface SemanticChange {
 		rulesOfTheGame: boolean;
 		intentMismatch: boolean;
 		needsPerson: boolean;
+		/** Other components that depend on what the row changed. */
+		dependentComponents?: number;
+		/** Whether tests or traces reach the files the row changes. */
+		tested?: 'tested' | 'traced' | 'untested';
 	};
 	locations: Location[];
 	stats?: { linesAdded: number; linesRemoved: number; files: number } | null;
@@ -277,8 +281,11 @@ export interface SemanticReport {
 
 export interface Applied {
 	lane: Lane;
+	/** `default`, `policy`, `input`, `floor`, `record` or `audit`. */
 	source: string;
 	reason: string;
+	/** The ids of the report rows behind it. */
+	rows?: string[];
 }
 
 export interface Classification {

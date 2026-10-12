@@ -4,15 +4,15 @@
 //! of sampled human audits of auto-approved changes, and the share of
 //! changes in the human lane.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, Write};
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use onus_core::Lane;
+use onus_core::{Lane, ids};
 use serde::{Deserialize, Serialize};
 
-use crate::classify::Record;
+use crate::classify::{AreaHistories, AreaHistory, Record};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -47,6 +47,10 @@ pub struct Outcome {
     /// For an incident or revert: what happened.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// The components the change touched (from its report): what per-area
+    /// history counts reverts and incidents against.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub components: Vec<String>,
 }
 
 /// The latest outcome of each change, in the order changes first appeared:
@@ -128,6 +132,81 @@ fn had_incident(outcomes: &[Outcome]) -> std::collections::HashSet<&str> {
         .iter()
         .filter(|o| o.result == "incident")
         .map(|o| o.change.as_str())
+        .collect()
+}
+
+/// What the history input looks at: since when, which repository's changes
+/// (`owner/repo` of `owner/repo#123`; None = all), and the change being
+/// classified (left out of its own history).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HistoryScope<'a> {
+    /// Unix seconds; earlier records do not count.
+    pub since: u64,
+    pub repo: Option<&'a str>,
+    pub exclude: Option<&'a str>,
+}
+
+/// The `owner/repo` of a change id `owner/repo#123`.
+pub fn repo_of(change: &str) -> Option<&str> {
+    change.split_once('#').map(|(repo, _)| repo)
+}
+
+/// Reverts (and rollbacks) and incidents per component among `areas`,
+/// recorded at or after `scope.since`. A change's areas are its
+/// `components` plus the component of each `involved` id. Every record
+/// counts, not only the latest of each change: a revert and an incident are
+/// events at their own time. A change counts once per area and kind.
+/// Records of a bare commit (no `#`) count for every repository.
+pub fn area_history(
+    outcomes: &[Outcome],
+    areas: &BTreeSet<String>,
+    scope: &HistoryScope,
+) -> AreaHistories {
+    // Area → (reverted changes, changes with incidents).
+    type Changes<'o> = (BTreeSet<&'o str>, BTreeSet<&'o str>);
+    let mut found: BTreeMap<&str, Changes> = BTreeMap::new();
+    for o in outcomes {
+        if o.at < scope.since || scope.exclude == Some(o.change.as_str()) {
+            continue;
+        }
+        if let (Some(want), Some(repo)) = (scope.repo, repo_of(&o.change))
+            && want != repo
+        {
+            continue;
+        }
+        let revert = match o.result.as_str() {
+            "reverted" | "rolled-back" => true,
+            "incident" => false,
+            _ => continue,
+        };
+        let touched = o
+            .components
+            .iter()
+            .map(String::as_str)
+            .chain(o.involved.iter().map(|i| ids::component_of(i).unwrap_or(i)))
+            .filter(|c| areas.contains(*c));
+        for c in touched {
+            let (reverts, incidents) = found.entry(c).or_default();
+            if revert {
+                reverts.insert(&o.change);
+            } else {
+                incidents.insert(&o.change);
+            }
+        }
+    }
+    found
+        .into_iter()
+        .map(|(c, (reverts, incidents))| {
+            let changes: BTreeSet<&str> = reverts.union(&incidents).copied().collect();
+            (
+                c.to_string(),
+                AreaHistory {
+                    reverts: reverts.len() as u32,
+                    incidents: incidents.len() as u32,
+                    changes: changes.into_iter().map(str::to_string).collect(),
+                },
+            )
+        })
         .collect()
 }
 
@@ -319,6 +398,7 @@ mod tests {
             commit: None,
             involved: vec![],
             note: None,
+            components: vec![],
         }
     }
 
@@ -394,5 +474,95 @@ mod tests {
         assert_eq!(s.by_judge.len(), 1);
         assert_eq!(s.by_judge["j1"].changes, 1);
         assert_eq!(s.total.changes, 3);
+    }
+
+    #[test]
+    fn area_history_counts_events_in_the_window_and_the_repository() {
+        let event = |change: &str, result: &str, at: u64, components: &[&str]| Outcome {
+            at,
+            change: change.into(),
+            result: result.into(),
+            components: components.iter().map(|c| c.to_string()).collect(),
+            ..o("a/b/c", Lane::Judge, "merged", false, false)
+        };
+        let all = vec![
+            event("acme/shop#1", "merged", 100, &["logger"]),
+            event("acme/shop#1", "incident", 100, &["logger"]),
+            event("acme/shop#1", "reverted", 110, &["logger"]),
+            // Recorded twice: one change.
+            event("acme/shop#1", "reverted", 120, &["logger"]),
+            // Before the window.
+            event("acme/shop#3", "incident", 10, &["logger"]),
+            // Another repository.
+            event("acme/web#2", "incident", 100, &["logger"]),
+            // The change being classified.
+            event("acme/shop#9", "incident", 100, &["logger"]),
+            // A bare commit counts everywhere.
+            event("abc1234", "rolled-back", 100, &["billing"]),
+            Outcome {
+                involved: vec!["billing:src/a.ts#charge".into()],
+                ..event("acme/shop#4", "incident", 100, &[])
+            },
+            event("acme/shop#5", "incident", 100, &["orders"]),
+        ];
+        let areas: BTreeSet<String> = ["logger", "billing"].map(String::from).into();
+        let h = area_history(
+            &all,
+            &areas,
+            &HistoryScope {
+                since: 50,
+                repo: Some("acme/shop"),
+                exclude: Some("acme/shop#9"),
+            },
+        );
+        assert_eq!(h.len(), 2, "{h:?}");
+        assert_eq!(
+            h["logger"],
+            AreaHistory {
+                reverts: 1,
+                incidents: 1,
+                changes: vec!["acme/shop#1".into()],
+            }
+        );
+        assert_eq!((h["billing"].reverts, h["billing"].incidents), (1, 1));
+        assert_eq!(h["billing"].changes, ["abc1234", "acme/shop#4"]);
+        // From another repository, only its own and bare commits count.
+        let web = area_history(
+            &all,
+            &areas,
+            &HistoryScope {
+                since: 0,
+                repo: Some("acme/web"),
+                exclude: None,
+            },
+        );
+        assert_eq!(web["logger"].changes, ["acme/web#2"]);
+    }
+
+    #[test]
+    fn components_survive_reverts_incidents_and_old_lines() {
+        let mut merged = o("a/b/c", Lane::AutoMerge, "merged", false, false);
+        merged.commit = Some("abc1234".into());
+        merged.components = vec!["logger".into()];
+        let reverts = [Revert {
+            revert: "f".repeat(40),
+            reverted: "abc1234".into(),
+            subject: "Revert".into(),
+        }];
+        let added = ingest_reverts(std::slice::from_ref(&merged), &reverts, 5);
+        assert_eq!(added[0].components, ["logger"]);
+        // What `onus outcomes incident` writes: the last record, changed.
+        let incident = Outcome {
+            result: "incident".into(),
+            involved: vec!["logger".into()],
+            ..merged.clone()
+        };
+        assert_eq!(incident.components, ["logger"]);
+        let line = serde_json::to_string(&merged).unwrap();
+        assert!(line.contains(r#""components":["logger"]"#));
+        let old = r#"{"at":1,"change":"x","agent":"a//","lane":"judge","result":"merged"}"#;
+        let o: Outcome = serde_json::from_str(old).unwrap();
+        assert!(o.components.is_empty());
+        assert!(!serde_json::to_string(&o).unwrap().contains("components"));
     }
 }

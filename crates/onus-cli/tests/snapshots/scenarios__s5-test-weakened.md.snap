@@ -15,7 +15,7 @@ expression: md
 <details><summary>Evidence per row (files and lines)</summary>
 
 1. **`LOYALTY_RATE` changes from `0.1` to `0.15`**
-   - kind `security-sensitive` / `constant-changed` · confidence `static` · labels payments
+   - kind `security-sensitive` / `constant-changed` · confidence `static` · labels payments · tested
    - `services/billing/src/discount.ts` line 2
 2. **Tests in `billing` were weakened**
    - kind `test` / `test-weakened` · confidence `static` · labels payments · rules of the game

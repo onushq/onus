@@ -2,8 +2,8 @@
 
 use std::path::Path;
 
-use onus_core::OnusConfig;
 use onus_core::hash::sha256_hex;
+use onus_core::{Lane, OnusConfig, Thresholds};
 
 use crate::MapError;
 
@@ -121,6 +121,22 @@ pub fn validate(config: &OnusConfig) -> Result<(), MapError> {
             ));
         }
     }
+    if let Some(lanes) = &config.lanes {
+        let inputs = &lanes.inputs;
+        for (key, t) in [
+            ("blastRadius", &inputs.blast_radius),
+            ("history.reverts", &inputs.history.reverts),
+            ("history.incidents", &inputs.history.incidents),
+        ] {
+            thresholds(&format!("lanes.inputs.{key}"), t, &mut problems);
+        }
+        if !(1..=3650).contains(&inputs.history.days) {
+            problems.push(format!(
+                "lanes.inputs.history.days must be between 1 and 3650, found {}",
+                inputs.history.days
+            ));
+        }
+    }
     if let Some(events) = &config.extractors.events {
         for p in events.publish.iter().chain(&events.subscribe) {
             if !p.contains("$EVENT") {
@@ -132,6 +148,29 @@ pub fn validate(config: &OnusConfig) -> Result<(), MapError> {
         Ok(())
     } else {
         Err(MapError::Config(problems.join("; ")))
+    }
+}
+
+/// Thresholds are at least 1 and ascend with the lane.
+fn thresholds(key: &str, t: &Thresholds, problems: &mut Vec<String>) {
+    let set: Vec<(Lane, u32)> = [Lane::Judge, Lane::Human, Lane::Blocked]
+        .into_iter()
+        .filter_map(|l| t.get(l).map(|n| (l, n)))
+        .collect();
+    for (lane, n) in &set {
+        if *n == 0 {
+            problems.push(format!("{key}: {} must be at least 1", lane.as_str()));
+        }
+    }
+    for pair in set.windows(2) {
+        let ((low, a), (high, b)) = (pair[0], pair[1]);
+        if b < a {
+            problems.push(format!(
+                "{key}: {} ({b}) is below {} ({a})",
+                high.as_str(),
+                low.as_str()
+            ));
+        }
     }
 }
 
@@ -169,5 +208,27 @@ extractors:
         let err = parse(bad_rule).unwrap_err().to_string();
         assert!(err.contains("unknown component `b`"), "{err}");
         assert!(parse("version: 2\n").is_err());
+    }
+
+    #[test]
+    fn risk_input_thresholds_ascend_from_one() {
+        let err = |lanes: &str| {
+            parse(&format!("version: 1\nlanes:\n  inputs: {lanes}\n"))
+                .unwrap_err()
+                .to_string()
+        };
+        assert!(
+            err("{ blastRadius: { judge: 3, human: 2 } }")
+                .contains("lanes.inputs.blastRadius: human (2) is below judge (3)")
+        );
+        assert!(
+            err("{ history: { incidents: { human: 0 } } }")
+                .contains("lanes.inputs.history.incidents: human must be at least 1")
+        );
+        assert!(err("{ history: { days: 0 } }").contains("history.days"));
+        assert!(
+            parse("version: 1\nlanes:\n  inputs: { blastRadius: {}, history: { days: 30 } }\n")
+                .is_ok()
+        );
     }
 }

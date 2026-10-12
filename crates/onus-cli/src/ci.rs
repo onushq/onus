@@ -357,11 +357,18 @@ fn pr(a: PrArgs) -> Result<i32> {
         None => lanes::make_submission(&a.repo, &base, &head, parts)?,
     };
     let config = lanes::lanes_config(&a.repo, a.config.as_deref())?;
+    let at = a.at.unwrap_or_else(now);
     let c = lanes::classify_with(
+        &a.repo,
         &sub.report,
         Some(&sub),
         &config,
-        Some(&outcomes_file(&a.records)),
+        &lanes::ClassifyOpts {
+            outcomes: Some(&outcomes_file(&a.records)),
+            change: Some(&a.change),
+            // A backfill sees the history as it was then.
+            now: Some(at),
+        },
     )?;
     let judgment = (a.judge && c.lane == Lane::Judge)
         .then(|| lanes::judge_submission(&a.repo, &sub, &c, &config));
@@ -379,10 +386,18 @@ fn pr(a: PrArgs) -> Result<i32> {
     let all_outcomes = load_outcomes(&a.records)?;
     let record = outcomes::record_for(&all_outcomes, &agent.key());
     let lane = judgment.as_ref().map_or(c.lane, |j| j.lane);
+    let mut components: Vec<String> = sub
+        .report
+        .changes
+        .iter()
+        .filter_map(|r| r.component.clone())
+        .collect();
+    components.sort();
+    components.dedup();
     pulls::append(
         &pulls_file(&a.records),
         &PullRecord {
-            at: a.at.unwrap_or_else(now),
+            at,
             change: a.change.clone(),
             base,
             head,
@@ -394,6 +409,7 @@ fn pr(a: PrArgs) -> Result<i32> {
             // The configuration that decided, only when it did.
             judge: judgment.as_ref().map(|j| j.judge.clone()),
             approvals,
+            components,
         },
     )?;
 
@@ -508,6 +524,7 @@ fn closed(
             commit,
             involved: vec![],
             note: None,
+            components: last.components.clone(),
         },
     )?;
     println!(

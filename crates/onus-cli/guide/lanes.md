@@ -23,15 +23,41 @@ The submission holds the stated intent, Onus's report, every changed path, the t
 
     onus classify --submission submission.json --outcomes outcomes.jsonl
     onus classify --report report.json              # a change without a submission (CI)
+    onus classify --submission submission.json --outcomes outcomes.jsonl --change acme/shop#42
 
-The answer is the lane and every rule that applied, in order:
+The answer is the lane and every rule that applied, in order. Each entry has a `source` (`default`, `policy`, `input`, `floor`, `record` or `audit`), a reason, and the ids of the report rows behind it (`rows`):
 
 1. The policy's `default` lane, or a lower one when a `match: every` rule covers every row of the change (for example, internal changes in a docs component).
 2. Rules that raise the lane when any row matches.
-3. Hard floors:
+3. Risk inputs (`lanes.inputs`, below). They can only raise the lane.
+4. Hard floors:
    - **Blocked:** a committed secret, a write outside the token's scope, or weakened tests without a person's approval.
-   - **Human:** rows in sensitive code (`auth`, `payments`, `pii`, or any label of medium or high sensitivity), security-sensitive rows, rules of the game (tests, CI, policies, `onus.yaml`, declared contracts), and rows outside the stated intent.
-4. An agent setup with fewer than `minRecord` merged changes on record cannot auto-merge. A share (`auditRate`) of the remaining auto-merges is sent to a person as a random audit, chosen by a hash of the head commit.
+   - **Human:** rows in sensitive code (`auth`, `payments`, `pii`, or any label of medium or high sensitivity), security-sensitive rows, rules of the game (tests, CI, policies, `onus.yaml`, and edits to the code of a declared contract), rows outside the stated intent, and third-party code new to the repository (an npm package no component used before).
+   - **Judge:** a new dependency never auto-merges: a package new to a component, or a new dependency between components.
+5. An agent setup with fewer than `minRecord` merged changes on record cannot auto-merge. A share (`auditRate`) of the remaining auto-merges is sent to a person as a random audit, chosen by a hash of the head commit.
+
+## Risk inputs
+
+Four built-in inputs read facts Onus computes for every change. They are on by default, each can be tuned or turned off, and none can lower a lane:
+
+| Input | Fires when | Default |
+|---|---|---|
+| `blastRadius` | A row changes something other components depend on (`dependentComponents` in the report). The highest lane whose threshold the count meets applies. | 3 or more components → `judge` |
+| `tests` | A row changes code no test exercises and no runtime trace has observed (`tested: untested`). | `judge` |
+| `confidence` | A row rests on parts of the map Onus could not resolve (`confidence: low`). | `judge` |
+| `history` | A component the change touches had reverts, rollbacks or incidents in the last `days` days, read from `--outcomes`. | a revert → `judge`, an incident → `human`, over 90 days |
+
+    lanes:
+      inputs:
+        blastRadius: { judge: 3, human: 10 }   # `{}` turns it off
+        tests: { untested: judge }             # `auto-merge` turns it off
+        confidence: { low: judge }
+        history:
+          days: 90
+          reverts: { judge: 1 }
+          incidents: { human: 1 }
+
+Test reach is per file: a file counts as tested when a test in the map exercises anything in it, and as traced when a runtime trace saw it (`onus help environments`). It is not line coverage. History counts each change once per component, from every record in the window, so a revert and an incident count at the time they were recorded. Records shared by several repositories are scoped with `--change owner/repo#N`: only that repository's changes count, and the change itself is left out. `onus ci pr` does this for you.
 
 ## The policy
 
@@ -73,6 +99,8 @@ The GitHub Action keeps these records for you with `records: true`: outcomes whe
     onus outcomes record --file outcomes.jsonl --change acme/shop#42 --agent claude-code/sonnet/default \
       --lane auto-merge --verdict approve --judge 1a2b3c4d --result merged --audited
     onus outcomes summary --file outcomes.jsonl
+
+Pass `--component <id>` (repeatable) to name the components the change touched, for the history input. `onus ci pr` records them from the report, and `onus ci closed`, reverts and incidents keep them.
 
 The summary gives each agent setup its record, and each judge configuration its record of the changes it decided (a verdict on record): merged, reverted, incidents, audited, missed. It also gives the share of changes in the human lane (the review budget), and the miss rate of human audits of automatic approvals, the number that says whether the automatic lanes can be trusted. A judge configuration id is a hash of the lane policy and the Onus version, so changing either starts a new record: that is how configurations are rotated and compared.
 

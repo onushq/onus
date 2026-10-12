@@ -31,7 +31,9 @@ expression: json
         "confidence": "static",
         "rulesOfTheGame": false,
         "intentMismatch": false,
-        "needsPerson": false
+        "needsPerson": false,
+        "dependentComponents": 3,
+        "tested": "untested"
       },
       "locations": [
         {

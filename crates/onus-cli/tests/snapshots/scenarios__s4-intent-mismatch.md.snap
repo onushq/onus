@@ -21,13 +21,13 @@ Stated intent: "Add structured fields to log lines"
 <details><summary>Evidence per row (files and lines)</summary>
 
 1. **`billing` now writes to the `payment` table**
-   - kind `security-sensitive` / `new-data-write` · confidence `static` · labels payments · 1 dependent file
+   - kind `security-sensitive` / `new-data-write` · confidence `static` · labels payments · 1 dependent file · tested
    - `services/billing/src/payments.ts` line 32
 2. **10 lines of new code inside `billing`**
-   - kind `internal` / `internal-changes` · confidence `static` · labels payments · +10 −0 in 1 file
+   - kind `internal` / `internal-changes` · confidence `static` · labels payments · tested · +10 −0 in 1 file
    - `services/billing/src/payments.ts` lines 1, 5–6, 30–31, 33–34, 40–42
 3. **21 changed lines of code inside `logger`**
-   - kind `internal` / `internal-changes` · confidence `static` · 5 dependent files · +19 −2 in 1 file
+   - kind `internal` / `internal-changes` · confidence `static` · 5 dependent files · untested · +19 −2 in 1 file
    - `packages/logger/src/format.ts` lines 9, 12 (before the change)
    - `packages/logger/src/format.ts` lines 1–17, 26, 29
 

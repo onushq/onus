@@ -28,6 +28,10 @@ pub struct PullRecord {
     pub judge: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub approvals: Vec<Approval>,
+    /// The components the change touched (from its report): what per-area
+    /// history counts reverts and incidents against.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub components: Vec<String>,
 }
 
 pub fn load(path: &Path) -> Result<Vec<PullRecord>> {
@@ -199,6 +203,7 @@ mod tests {
             verdict: None,
             judge: None,
             approvals: vec![],
+            components: vec![],
         };
         append(&path, &rec(Lane::Human, 1)).unwrap();
         append(&path, &rec(Lane::Judge, 2)).unwrap();

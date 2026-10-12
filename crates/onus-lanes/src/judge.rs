@@ -428,6 +428,7 @@ mod tests {
                 lane: l,
                 source: "default".into(),
                 reason: "test".into(),
+                rows: vec![],
             }],
         }
     }

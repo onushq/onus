@@ -8,7 +8,7 @@ expression: json
   "head": "head",
   "summary": {
     "meaningChanges": 4,
-    "needsAttention": 1,
+    "needsAttention": 2,
     "secrets": 0,
     "newRuleViolations": 0,
     "intentMismatches": 0
@@ -30,12 +30,15 @@ expression: json
         "novelty": [
           "new-data-egress:phone",
           "new-dependency:@acme/sms",
+          "new-package:@acme/sms",
           "new-vendor:Acme SMS"
         ],
         "confidence": "declared",
         "rulesOfTheGame": false,
         "intentMismatch": false,
-        "needsPerson": true
+        "needsPerson": true,
+        "dependentComponents": 0,
+        "tested": "tested"
       },
       "locations": [
         {
@@ -81,7 +84,7 @@ expression: json
       "component": "user-preferences",
       "kindLabel": "Contract change, additive",
       "title": "`UserPreferences` gains an optional `phoneVerified` field",
-      "whyItMatters": "Shared contract used in 4 files across 2 components; existing callers unaffected; declared invariant: phone numbers are stored in E.164",
+      "whyItMatters": "Shared contract used in 4 files across 2 components; existing callers unaffected; declared invariant: phone numbers are stored in E.164; `UserPreferences` is a declared contract (onus.yaml), so a person approves changes to it",
       "hints": {
         "labels": [
           "pii"
@@ -89,9 +92,11 @@ expression: json
         "blastRadius": 4,
         "novelty": [],
         "confidence": "static",
-        "rulesOfTheGame": false,
+        "rulesOfTheGame": true,
         "intentMismatch": false,
-        "needsPerson": false
+        "needsPerson": true,
+        "dependentComponents": 1,
+        "tested": "tested"
       },
       "locations": [
         {
@@ -121,7 +126,9 @@ expression: json
         "confidence": "static",
         "rulesOfTheGame": false,
         "intentMismatch": false,
-        "needsPerson": false
+        "needsPerson": false,
+        "dependentComponents": 1,
+        "tested": "untested"
       },
       "locations": [
         {
@@ -151,7 +158,9 @@ expression: json
         "confidence": "low",
         "rulesOfTheGame": false,
         "intentMismatch": false,
-        "needsPerson": false
+        "needsPerson": false,
+        "dependentComponents": 0,
+        "tested": "untested"
       },
       "locations": [
         {

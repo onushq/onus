@@ -135,6 +135,13 @@
         "confidence": {
           "$ref": "#/$defs/Confidence"
         },
+        "dependentComponents": {
+          "description": "Other components (not the row's own) that depend on the subject in\nthe head map (the base map for removed subjects). 0 for rows about a\nwhole component.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
         "intentMismatch": {
           "description": "The change is outside the stated intent.",
           "type": "boolean"
@@ -159,6 +166,17 @@
         "rulesOfTheGame": {
           "description": "Tests, CI, policies, labels or declared contracts were touched.",
           "type": "boolean"
+        },
+        "tested": {
+          "description": "How well tests and traces cover the code the row changes; absent\nwhen the row changes no code (config, dependencies, tests).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TestReach"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -458,6 +476,26 @@
       "required": [
         "movedFiles",
         "formattingOnly"
+      ]
+    },
+    "TestReach": {
+      "description": "Whether tests or traces reach the files a row changes. File granularity:\na file counts as tested when a test exercises any symbol in it.",
+      "oneOf": [
+        {
+          "description": "A test in the head map exercises every changed code file.",
+          "type": "string",
+          "const": "tested"
+        },
+        {
+          "description": "Every changed code file is tested or seen in a runtime trace.",
+          "type": "string",
+          "const": "traced"
+        },
+        {
+          "description": "At least one changed code file is neither.",
+          "type": "string",
+          "const": "untested"
+        }
       ]
     },
     "TextStats": {

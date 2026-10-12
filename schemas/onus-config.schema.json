@@ -154,6 +154,17 @@
         "module"
       ]
     },
+    "ConfidenceInput": {
+      "type": "object",
+      "properties": {
+        "low": {
+          "description": "The lane of a change with a row that rests on parts of the map Onus\ncould not resolve. Default `judge`; `auto-merge` turns it off.",
+          "$ref": "#/$defs/Lane",
+          "default": "judge"
+        }
+      },
+      "additionalProperties": false
+    },
     "ContractConfig": {
       "type": "object",
       "properties": {
@@ -319,6 +330,33 @@
       },
       "additionalProperties": false
     },
+    "HistoryInput": {
+      "type": "object",
+      "properties": {
+        "days": {
+          "description": "How many days back the outcome records count (1 to 3650). Default 90.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 90,
+          "minimum": 0
+        },
+        "incidents": {
+          "description": "Incidents per component. Default `{ human: 1 }`.",
+          "$ref": "#/$defs/Thresholds",
+          "default": {
+            "human": 1
+          }
+        },
+        "reverts": {
+          "description": "Reverts and rollbacks per component. Default `{ judge: 1 }`.",
+          "$ref": "#/$defs/Thresholds",
+          "default": {
+            "judge": 1
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "LabelConfig": {
       "type": "object",
       "properties": {
@@ -426,6 +464,30 @@
             }
           ]
         },
+        "inputs": {
+          "description": "Built-in risk inputs; each can only raise a lane (`onus help lanes`).",
+          "$ref": "#/$defs/RiskInputs",
+          "default": {
+            "blastRadius": {
+              "judge": 3
+            },
+            "confidence": {
+              "low": "judge"
+            },
+            "history": {
+              "days": 90,
+              "incidents": {
+                "human": 1
+              },
+              "reverts": {
+                "judge": 1
+              }
+            },
+            "tests": {
+              "untested": "judge"
+            }
+          }
+        },
         "minRecord": {
           "description": "Changes an agent setup needs on record before it may use the\n`auto-merge` lane. Default 10.",
           "type": "integer",
@@ -477,6 +539,47 @@
           "default": [],
           "items": {
             "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "RiskInputs": {
+      "description": "The built-in risk inputs of the classifier. They are on by default and\nonly ever raise a lane. Writing a field replaces its default as a whole.",
+      "type": "object",
+      "properties": {
+        "blastRadius": {
+          "description": "Other components that depend on what a row changed. Default\n`{ judge: 3 }`; `{}` turns it off.",
+          "$ref": "#/$defs/Thresholds",
+          "default": {
+            "judge": 3
+          }
+        },
+        "confidence": {
+          "description": "Rows that rest on parts of the map Onus could not resolve.",
+          "$ref": "#/$defs/ConfidenceInput",
+          "default": {
+            "low": "judge"
+          }
+        },
+        "history": {
+          "description": "Reverts, rollbacks and incidents in the components a change touches,\nfrom the outcome records.",
+          "$ref": "#/$defs/HistoryInput",
+          "default": {
+            "days": 90,
+            "incidents": {
+              "human": 1
+            },
+            "reverts": {
+              "judge": 1
+            }
+          }
+        },
+        "tests": {
+          "description": "Rows that change code no test exercises and no trace has observed.",
+          "$ref": "#/$defs/TestsInput",
+          "default": {
+            "untested": "judge"
           }
         }
       },
@@ -558,6 +661,48 @@
           "items": {
             "type": "string"
           }
+        }
+      },
+      "additionalProperties": false
+    },
+    "TestsInput": {
+      "type": "object",
+      "properties": {
+        "untested": {
+          "description": "The lane of a change with a row whose code no test exercises and no\ntrace has observed. Default `judge`; `auto-merge` turns it off.",
+          "$ref": "#/$defs/Lane",
+          "default": "judge"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Thresholds": {
+      "description": "Counts at which a lane applies; the highest one met wins. A threshold of\nN means N or more; an unset one never applies.",
+      "type": "object",
+      "properties": {
+        "blocked": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "human": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "judge": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
         }
       },
       "additionalProperties": false

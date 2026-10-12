@@ -48,6 +48,14 @@
 				{/if}
 				<dt class="text-muted-foreground">Blast radius</dt>
 				<dd>{change.hints.blastRadius} dependent files</dd>
+				{#if change.hints.dependentComponents}
+					<dt class="text-muted-foreground">Used by</dt>
+					<dd>{change.hints.dependentComponents} other {change.hints.dependentComponents === 1 ? 'component' : 'components'}</dd>
+				{/if}
+				{#if change.hints.tested}
+					<dt class="text-muted-foreground">Tests</dt>
+					<dd>{change.hints.tested === 'traced' ? 'traced, not tested' : change.hints.tested}</dd>
+				{/if}
 				<dt class="text-muted-foreground">Confidence</dt>
 				<dd>{change.hints.confidence}</dd>
 				{#if change.hints.labels.length}

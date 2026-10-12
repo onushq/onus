@@ -19,7 +19,7 @@ expression: md
    - `services/orders/package.json` line 13
    - `services/orders/src/shipping/eta.ts` line 1
 2. **16 changed lines of code inside `orders`**
-   - kind `internal` / `internal-changes` · confidence `static` · +2 −14 in 1 file
+   - kind `internal` / `internal-changes` · confidence `static` · tested · +2 −14 in 1 file
    - `services/orders/src/shipping/eta.ts` lines 9–13, 16–24 (before the change)
    - `services/orders/src/shipping/eta.ts` lines 2, 13
 

@@ -126,6 +126,12 @@ fn a_pull_request_is_recorded_from_open_to_revert() {
     .unwrap();
     assert_eq!(summary["agent"], "codex//");
     assert_eq!(summary["lane"], "human", "{summary}");
+    // The record names the components the change touched.
+    let pulls = lines(&rec.join("pulls.jsonl"));
+    assert_eq!(
+        pulls[0]["components"],
+        serde_json::json!(["notifications", "user-preferences"])
+    );
     let md = std::fs::read_to_string(out.join("lane.md")).unwrap();
     assert!(
         md.contains("/onus approve new-external-service:external:acme-sms@notifications"),
@@ -281,6 +287,10 @@ fn a_pull_request_is_recorded_from_open_to_revert() {
     assert_eq!(outcomes[0]["agent"], "codex//");
     assert_eq!(outcomes[0]["lane"], "human");
     assert!(outcomes[0]["judge"].is_null(), "{:?}", outcomes[0]);
+    assert_eq!(
+        outcomes[0]["components"],
+        serde_json::json!(["notifications", "user-preferences"])
+    );
 
     // Audited after the fact, and an incident.
     assert_eq!(
@@ -316,6 +326,45 @@ fn a_pull_request_is_recorded_from_open_to_revert() {
     // The incident still counts after the revert.
     assert_eq!(codex["incidents"], 1, "{summary}");
     assert_eq!(summary["total"]["audited"], 1);
+    let outcomes = lines(&rec.join("outcomes.jsonl"));
+    let reverted = outcomes.last().unwrap();
+    assert_eq!(reverted["result"], "reverted");
+    assert_eq!(reverted["components"], outcomes[0]["components"]);
+
+    // The next change to notifications carries that history.
+    git(&r, &["checkout", "-q", "-b", "codex/sms-again"]);
+    std::fs::write(
+        r.join("services/notifications/src/again.ts"),
+        "export const AGAIN = 1;\n",
+    )
+    .unwrap();
+    git(&r, &["add", "-A"]);
+    git(&r, &["commit", "-q", "-m", "Again"]);
+    onus(
+        &r,
+        &[
+            "ci",
+            "pr",
+            "--base",
+            "main",
+            "--head",
+            "codex/sms-again",
+            "--change",
+            "acme/shop#8",
+            "--records",
+            rs,
+            "--out",
+            out.to_str().unwrap(),
+        ],
+    );
+    let md = std::fs::read_to_string(out.join("lane.md")).unwrap();
+    assert!(
+        md.contains(
+            "- input → `human`: `notifications` had 1 incident and 1 revert in the last 90 days (acme/shop#7)"
+        ),
+        "{md}"
+    );
+    git(&r, &["checkout", "-q", "main"]);
 
     // Two runs pushing at once: both sets of lines end up on the branch.
     std::fs::write(

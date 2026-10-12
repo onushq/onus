@@ -33,7 +33,9 @@ expression: json
         "confidence": "static",
         "rulesOfTheGame": false,
         "intentMismatch": false,
-        "needsPerson": true
+        "needsPerson": true,
+        "dependentComponents": 0,
+        "tested": "tested"
       },
       "locations": [
         {
@@ -65,7 +67,8 @@ expression: json
         "confidence": "static",
         "rulesOfTheGame": true,
         "intentMismatch": false,
-        "needsPerson": true
+        "needsPerson": true,
+        "dependentComponents": 0
       },
       "locations": [
         {

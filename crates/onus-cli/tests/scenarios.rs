@@ -79,6 +79,8 @@ fn s1_sms_alerts_has_exactly_the_manifesto_rows() {
         "`UserPreferences` gains an optional `phoneVerified` field"
     );
     assert!(contract.hints.blast_radius > 0);
+    // `UserPreferences` is declared in onus.yaml: a rule of the game.
+    assert!(contract.hints.rules_of_the_game && contract.hints.needs_person);
     assert!(
         contract
             .why_it_matters
@@ -102,7 +104,7 @@ fn s1_sms_alerts_has_exactly_the_manifesto_rows() {
             .iter()
             .any(|l| l.file.ends_with("sms/client.ts") && l.lines == [51, 51])
     );
-    assert_eq!(r.summary.needs_attention, 1);
+    assert_eq!(r.summary.needs_attention, 2);
     assert_eq!(r.text_stats.files, 23);
     assert_eq!(r.text_stats.lines_added + r.text_stats.lines_removed, 1_408);
 }
@@ -194,6 +196,27 @@ fn s7_new_dependency_row() {
     assert_eq!(d.title, "`orders` adds the npm package `date-fns` (^4.1.0)");
     assert_eq!(d.hints.novelty, ["new-package:date-fns"]);
     assert_eq!(subkinds(&r)[0], "new-dependency");
+    // Third-party code new to the repository goes to a person, even under a
+    // policy that auto-merges dependency changes.
+    let policy = onus_core::LanesConfig {
+        rules: vec![onus_core::LaneRule {
+            lane: onus_core::Lane::AutoMerge,
+            match_: onus_core::RuleMatch::Every,
+            kinds: vec![],
+            subkinds: vec![],
+            components: vec![],
+            labels: vec![],
+        }],
+        audit_rate: 0.0,
+        ..Default::default()
+    };
+    let c = onus_lanes::classify::classify(&r, None, &policy, &Default::default());
+    assert_eq!(c.lane, onus_core::Lane::Human);
+    assert!(
+        c.applied
+            .iter()
+            .any(|a| a.source == "floor" && a.reason.contains("`date-fns`"))
+    );
 }
 
 #[test]

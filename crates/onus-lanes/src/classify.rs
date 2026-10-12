@@ -3,15 +3,22 @@
 //! 1. Start at the policy's default lane, or lower when a `match: every`
 //!    rule covers every row.
 //! 2. Raise it with every other rule that applies.
-//! 3. Raise it with the hard floors, which no policy can lower: sensitive
-//!    code and rules of the game go to a person; committed secrets, writes
-//!    outside the token's scope and weakened tests without an approval are
-//!    blocked.
-//! 4. A setup with too short a record may not auto-merge, and a share of
+//! 3. Raise it with the built-in risk inputs (`lanes.inputs`): blast
+//!    radius, untested code, low map confidence and the history of the
+//!    components the change touches. They only raise (ADR 0014).
+//! 4. Raise it with the hard floors, which no policy can lower: sensitive
+//!    code, rules of the game and third-party code new to the repository go
+//!    to a person; a new dependency never auto-merges; committed secrets,
+//!    writes outside the token's scope and weakened tests without an
+//!    approval are blocked.
+//! 5. A setup with too short a record may not auto-merge, and a share of
 //!    the remaining auto-merges is audited by a person.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use onus_core::{
-    ChangeKind, Lane, LaneRule, LanesConfig, RuleMatch, SemanticChange, SemanticReport,
+    ChangeKind, Confidence, Lane, LaneRule, LanesConfig, RuleMatch, SemanticChange, SemanticReport,
+    TestReach, Thresholds,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -23,9 +30,12 @@ use crate::submission::Submission;
 #[serde(rename_all = "camelCase")]
 pub struct Applied {
     pub lane: Lane,
-    /// `default`, `policy`, `floor`, `record` or `audit`.
+    /// `default`, `policy`, `input`, `floor`, `record` or `audit`.
     pub source: String,
     pub reason: String,
+    /// The ids of the report rows behind it, when there are some.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rows: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,21 +86,95 @@ pub struct Record {
     pub recent_incidents: u32,
 }
 
-/// Classifies a change. `writable` says whether the submission's token
-/// allows writing a path (`None` when there is no token).
+/// Reverts (rollbacks included) and incidents recorded against one
+/// component in the history window.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AreaHistory {
+    pub reverts: u32,
+    pub incidents: u32,
+    /// The changes behind them, sorted.
+    pub changes: Vec<String>,
+}
+
+/// Component → its history.
+pub type AreaHistories = BTreeMap<String, AreaHistory>;
+
+static NO_HISTORY: AreaHistories = BTreeMap::new();
+
+/// Everything the classifier reads besides the report, submission and
+/// policy. Later inputs are added here as fields, never as parameters.
+pub struct ClassifyContext<'a> {
+    /// The agent setup's record, when the change has a submission.
+    pub record: Option<Record>,
+    /// The history of the components the change touches.
+    pub areas: &'a AreaHistories,
+    /// Whether the submission's token allows writing a path (`None` when
+    /// there is no token).
+    pub writable: Option<&'a dyn Fn(&str) -> bool>,
+}
+
+impl std::fmt::Debug for ClassifyContext<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClassifyContext")
+            .field("record", &self.record)
+            .field("areas", &self.areas)
+            .field("writable", &self.writable.is_some())
+            .finish()
+    }
+}
+
+impl Default for ClassifyContext<'_> {
+    fn default() -> Self {
+        ClassifyContext {
+            record: None,
+            areas: &NO_HISTORY,
+            writable: None,
+        }
+    }
+}
+
+/// "a, b and c", or "a, b, c and 2 more" past three.
+fn some(items: &[String]) -> String {
+    let shown: Vec<&str> = items.iter().take(3).map(String::as_str).collect();
+    let more = items.len().saturating_sub(3);
+    match (shown.as_slice(), more) {
+        ([], _) => String::new(),
+        ([one], _) => one.to_string(),
+        (_, 0) => format!(
+            "{} and {}",
+            shown[..shown.len() - 1].join(", "),
+            shown[shown.len() - 1]
+        ),
+        (_, n) => format!("{} and {n} more", shown.join(", ")),
+    }
+}
+
+fn plural(n: u32, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
+/// The lane a threshold puts a count in, with the threshold.
+fn threshold_met(t: &Thresholds, n: u32) -> Option<(Lane, u32)> {
+    let lane = t.lane_for(n)?;
+    Some((lane, t.get(lane).unwrap_or(n)))
+}
+
+/// Classifies a change.
 pub fn classify(
     report: &SemanticReport,
     submission: Option<&Submission>,
     config: &LanesConfig,
-    record: Option<Record>,
-    writable: Option<&dyn Fn(&str) -> bool>,
+    ctx: &ClassifyContext,
 ) -> Classification {
+    let record = ctx.record;
     let mut applied = Vec::new();
     let mut lane = config.default;
     applied.push(Applied {
         lane,
         source: "default".into(),
         reason: format!("the policy's default lane is {}", lane.as_str()),
+        rows: vec![],
     });
     let rows = &report.changes;
     // 1. A lower start when one rule covers the whole change.
@@ -101,20 +185,26 @@ pub fn classify(
                 lane,
                 source: "policy".into(),
                 reason: format!("every row matches the rule for {}", describe(rule)),
+                rows: vec![],
             });
         }
     }
-    let raise =
-        |to: Lane, source: &str, reason: String, applied: &mut Vec<Applied>, lane: &mut Lane| {
-            if to > *lane {
-                *lane = to;
-            }
-            applied.push(Applied {
-                lane: to,
-                source: source.into(),
-                reason,
-            });
-        };
+    let raise = |to: Lane,
+                 source: &str,
+                 reason: String,
+                 rows: Vec<String>,
+                 applied: &mut Vec<Applied>,
+                 lane: &mut Lane| {
+        if to > *lane {
+            *lane = to;
+        }
+        applied.push(Applied {
+            lane: to,
+            source: source.into(),
+            reason,
+            rows,
+        });
+    };
     // 2. Rules that raise.
     for rule in config.rules.iter().filter(|r| r.match_ == RuleMatch::Any) {
         if let Some(row) = rows.iter().find(|r| matches(rule, r))
@@ -124,22 +214,152 @@ pub fn classify(
                 rule.lane,
                 "policy",
                 format!("“{}” matches the rule for {}", row.title, describe(rule)),
+                vec![row.id.clone()],
                 &mut applied,
                 &mut lane,
             );
         }
     }
-    // 3. Hard floors.
+    // 3. Built-in risk inputs: they only raise.
+    let inputs = &config.inputs;
+    if let Some(row) = rows
+        .iter()
+        .max_by_key(|r| (r.hints.dependent_components, std::cmp::Reverse(&r.id)))
+        && let Some((to, at)) = threshold_met(&inputs.blast_radius, row.hints.dependent_components)
+        && to > Lane::AutoMerge
+    {
+        raise(
+            to,
+            "input",
+            format!(
+                "“{}” is used by {}; {at} or more go to {}",
+                row.title,
+                plural(
+                    row.hints.dependent_components,
+                    "other component",
+                    "other components"
+                ),
+                to.as_str()
+            ),
+            vec![row.id.clone()],
+            &mut applied,
+            &mut lane,
+        );
+    }
+    let untested: Vec<&SemanticChange> = rows
+        .iter()
+        .filter(|r| r.hints.tested == Some(TestReach::Untested))
+        .collect();
+    if !untested.is_empty() && inputs.tests.untested > Lane::AutoMerge {
+        let named: Vec<String> = untested
+            .iter()
+            .map(|r| match untested_file(r) {
+                Some(f) => format!("“{}” (`{f}`)", r.title),
+                None => format!("“{}”", r.title),
+            })
+            .collect();
+        raise(
+            inputs.tests.untested,
+            "input",
+            format!(
+                "{} {} code no test exercises and no trace has observed: {}",
+                plural(untested.len() as u32, "row", "rows"),
+                if untested.len() == 1 {
+                    "changes"
+                } else {
+                    "change"
+                },
+                some(&named)
+            ),
+            untested.iter().map(|r| r.id.clone()).collect(),
+            &mut applied,
+            &mut lane,
+        );
+    }
+    let low: Vec<&SemanticChange> = rows
+        .iter()
+        .filter(|r| r.hints.confidence == Confidence::Low)
+        .collect();
+    if let Some(first) = low.first()
+        && inputs.confidence.low > Lane::AutoMerge
+    {
+        let more = if low.len() > 1 {
+            format!(
+                " (and {} more)",
+                plural(low.len() as u32 - 1, "row", "rows")
+            )
+        } else {
+            String::new()
+        };
+        raise(
+            inputs.confidence.low,
+            "input",
+            format!(
+                "“{}”{more} rests on parts of the map Onus could not resolve",
+                first.title
+            ),
+            low.iter().map(|r| r.id.clone()).collect(),
+            &mut applied,
+            &mut lane,
+        );
+    }
+    let touched: BTreeSet<&str> = rows
+        .iter()
+        .map(|r| r.component.as_deref().unwrap_or("root"))
+        .collect();
+    for component in touched {
+        let Some(h) = ctx.areas.get(component) else {
+            continue;
+        };
+        let to = [
+            inputs.history.reverts.lane_for(h.reverts),
+            inputs.history.incidents.lane_for(h.incidents),
+        ]
+        .into_iter()
+        .flatten()
+        .max();
+        let Some(to) = to.filter(|l| *l > Lane::AutoMerge) else {
+            continue;
+        };
+        let mut what = Vec::new();
+        if h.incidents > 0 {
+            what.push(plural(h.incidents, "incident", "incidents"));
+        }
+        if h.reverts > 0 {
+            what.push(plural(h.reverts, "revert", "reverts"));
+        }
+        raise(
+            to,
+            "input",
+            format!(
+                "`{component}` had {} in the last {} days ({})",
+                what.join(" and "),
+                inputs.history.days,
+                some(&h.changes)
+            ),
+            rows.iter()
+                .filter(|r| r.component.as_deref().unwrap_or("root") == component)
+                .map(|r| r.id.clone())
+                .collect(),
+            &mut applied,
+            &mut lane,
+        );
+    }
+    // 4. Hard floors.
     if report.summary.secrets > 0 {
         raise(
             Lane::Blocked,
             "floor",
             "a secret is committed".into(),
+            rows.iter()
+                .filter(|r| r.subkind == "secret-committed")
+                .map(|r| r.id.clone())
+                .collect(),
             &mut applied,
             &mut lane,
         );
     }
-    if let (Some(sub), Some(writable)) = (submission, writable) {
+    if let (Some(sub), Some(writable)) = (submission, ctx.writable) {
         let outside: Vec<&String> = sub.changed_files.iter().filter(|f| !writable(f)).collect();
         if !outside.is_empty() {
             raise(
@@ -154,6 +374,7 @@ pub fn classify(
                         .collect::<Vec<_>>()
                         .join(", ")
                 ),
+                vec![],
                 &mut applied,
                 &mut lane,
             );
@@ -165,6 +386,7 @@ pub fn classify(
                 Lane::Blocked,
                 "floor",
                 format!("“{}” without a person's approval", row.title),
+                vec![row.id.clone()],
                 &mut applied,
                 &mut lane,
             );
@@ -179,6 +401,7 @@ pub fn classify(
                 row.title,
                 row.hints.labels.join(", ")
             ),
+            vec![row.id.clone()],
             &mut applied,
             &mut lane,
         );
@@ -191,6 +414,7 @@ pub fn classify(
             Lane::Human,
             "floor",
             format!("“{}” is security-sensitive", row.title),
+            vec![row.id.clone()],
             &mut applied,
             &mut lane,
         );
@@ -200,6 +424,7 @@ pub fn classify(
             Lane::Human,
             "floor",
             format!("“{}” changes the rules of the game", row.title),
+            vec![row.id.clone()],
             &mut applied,
             &mut lane,
         );
@@ -209,11 +434,55 @@ pub fn classify(
             Lane::Human,
             "floor",
             format!("“{}” is outside the stated intent", row.title),
+            vec![row.id.clone()],
             &mut applied,
             &mut lane,
         );
     }
-    // 4. Track record and random audits.
+    // Supply chain: third-party code new to the repository.
+    let new_package = |r: &SemanticChange| {
+        r.hints
+            .novelty
+            .iter()
+            .filter_map(|n| n.strip_prefix("new-package:"))
+            .map(|p| format!("`{p}`"))
+            .collect::<Vec<_>>()
+    };
+    if let Some(row) = rows.iter().find(|r| !new_package(r).is_empty()) {
+        raise(
+            Lane::Human,
+            "floor",
+            format!(
+                "“{}” brings third-party code new to this repository ({})",
+                row.title,
+                some(&new_package(row))
+            ),
+            vec![row.id.clone()],
+            &mut applied,
+            &mut lane,
+        );
+    }
+    // A new dependency never auto-merges.
+    if let Some(row) = rows.iter().find(|r| {
+        matches!(
+            r.subkind.as_str(),
+            "new-dependency" | "new-cross-component-dependency"
+        ) || r
+            .hints
+            .novelty
+            .iter()
+            .any(|n| n.starts_with("new-dependency:"))
+    }) {
+        raise(
+            Lane::Judge,
+            "floor",
+            format!("“{}” adds a new dependency", row.title),
+            vec![row.id.clone()],
+            &mut applied,
+            &mut lane,
+        );
+    }
+    // 5. Track record and random audits.
     if lane == Lane::AutoMerge && record.is_some_and(|r| r.recent_incidents > 0) {
         raise(
             Lane::Judge,
@@ -222,6 +491,7 @@ pub fn classify(
                 "the agent setup caused {} incidents among its recent changes",
                 record.map_or(0, |r| r.recent_incidents)
             ),
+            vec![],
             &mut applied,
             &mut lane,
         );
@@ -236,6 +506,7 @@ pub fn classify(
                     "the agent setup has {changes} changes on record; auto-merge needs {}",
                     config.min_record
                 ),
+                vec![],
                 &mut applied,
                 &mut lane,
             );
@@ -249,11 +520,20 @@ pub fn classify(
                 "chosen for a random human audit ({:.0}% of auto-merges)",
                 config.audit_rate * 100.0
             ),
+            vec![],
             &mut applied,
             &mut lane,
         );
     }
     Classification { lane, applied }
+}
+
+/// The first changed file of an untested row.
+fn untested_file(r: &SemanticChange) -> Option<&str> {
+    r.locations
+        .iter()
+        .find(|l| l.side == onus_core::Side::Head)
+        .map(|l| l.file.as_str())
 }
 
 /// Whether the change at `head` is in the audited share: a hash of the
@@ -273,7 +553,7 @@ pub fn audited(head: &str, rate: f64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use onus_core::{ChangeLevel, Confidence, Hints, ReportSummary, StructureNotes, TextStats};
+    use onus_core::{ChangeLevel, Hints, ReportSummary, StructureNotes, TextStats};
 
     fn row(kind: ChangeKind, subkind: &str, labels: &[&str]) -> SemanticChange {
         SemanticChange {
@@ -294,6 +574,8 @@ mod tests {
                 rules_of_the_game: false,
                 intent_mismatch: false,
                 needs_person: false,
+                dependent_components: 0,
+                tested: None,
             },
             locations: vec![],
             stats: None,
@@ -346,51 +628,226 @@ mod tests {
         }
     }
 
+    fn with(record: Option<Record>) -> ClassifyContext<'static> {
+        ClassifyContext {
+            record,
+            ..ClassifyContext::default()
+        }
+    }
+
+    const VETERAN: Option<Record> = Some(Record {
+        changes: 50,
+        recent_incidents: 0,
+    });
+
+    fn lane_of(r: &SemanticReport, p: &LanesConfig) -> Lane {
+        classify(r, None, p, &with(VETERAN)).lane
+    }
+
+    fn internal(f: impl FnOnce(&mut Hints)) -> SemanticReport {
+        let mut r = row(ChangeKind::Internal, "internal-changes", &[]);
+        f(&mut r.hints);
+        report(vec![r])
+    }
+
+    fn inputs<'a>(c: &'a Classification, source: &str) -> Vec<&'a Applied> {
+        c.applied.iter().filter(|a| a.source == source).collect()
+    }
+
     #[test]
     fn rules_lower_only_for_whole_changes_and_floors_always_raise() {
         let p = policy();
         let docs = report(vec![row(ChangeKind::Internal, "internal-changes", &[])]);
-        let veteran = Some(Record {
-            changes: 50,
-            recent_incidents: 0,
-        });
-        assert_eq!(
-            classify(&docs, None, &p, veteran, None).lane,
-            Lane::AutoMerge
-        );
+        assert_eq!(lane_of(&docs, &p), Lane::AutoMerge);
         // A new setup cannot auto-merge yet.
-        assert_eq!(classify(&docs, None, &p, None, None).lane, Lane::Judge);
+        assert_eq!(
+            classify(&docs, None, &p, &ClassifyContext::default()).lane,
+            Lane::Judge
+        );
         // One row outside the rule keeps the default.
         let mixed = report(vec![
             row(ChangeKind::Internal, "internal-changes", &[]),
             row(ChangeKind::Additive, "export-added", &[]),
         ]);
-        assert_eq!(classify(&mixed, None, &p, veteran, None).lane, Lane::Judge);
+        assert_eq!(lane_of(&mixed, &p), Lane::Judge);
         // Policy raises; floors raise further.
         let migration = report(vec![row(ChangeKind::Config, "migration-changed", &[])]);
-        assert_eq!(
-            classify(&migration, None, &p, veteran, None).lane,
-            Lane::Human
-        );
+        assert_eq!(lane_of(&migration, &p), Lane::Human);
         let payments = report(vec![row(
             ChangeKind::Internal,
             "internal-changes",
             &["payments"],
         )]);
-        let c = classify(&payments, None, &p, veteran, None);
+        let c = classify(&payments, None, &p, &with(VETERAN));
         assert_eq!(c.lane, Lane::Human);
         assert!(c.applied.iter().any(|a| a.reason.contains("payments")));
+        assert_eq!(inputs(&c, "floor")[0].rows, ["internal-changes:x"]);
         let mut secret = docs.clone();
         secret.summary.secrets = 1;
-        assert_eq!(
-            classify(&secret, None, &p, veteran, None).lane,
-            Lane::Blocked
-        );
+        assert_eq!(lane_of(&secret, &p), Lane::Blocked);
         let weakened = report(vec![row(ChangeKind::Test, "test-weakened", &[])]);
-        assert_eq!(
-            classify(&weakened, None, &p, veteran, None).lane,
-            Lane::Blocked
+        assert_eq!(lane_of(&weakened, &p), Lane::Blocked);
+    }
+
+    #[test]
+    fn blast_radius_tests_and_confidence_raise_lanes() {
+        let p = policy();
+        let wide = internal(|h| h.dependent_components = 3);
+        let c = classify(&wide, None, &p, &with(VETERAN));
+        assert_eq!(c.lane, Lane::Judge);
+        let input = inputs(&c, "input");
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0].rows, ["internal-changes:x"]);
+        assert!(
+            input[0]
+                .reason
+                .contains("is used by 3 other components; 3 or more go to judge"),
+            "{}",
+            input[0].reason
         );
+        assert_eq!(
+            lane_of(&internal(|h| h.dependent_components = 2), &p),
+            Lane::AutoMerge
+        );
+        let mut off = policy();
+        off.inputs.blast_radius = Thresholds::default();
+        assert_eq!(lane_of(&wide, &off), Lane::AutoMerge);
+
+        let untested = internal(|h| h.tested = Some(TestReach::Untested));
+        let c = classify(&untested, None, &p, &with(VETERAN));
+        assert_eq!(c.lane, Lane::Judge);
+        assert!(inputs(&c, "input")[0].reason.contains("no test exercises"));
+        assert_eq!(
+            lane_of(&internal(|h| h.tested = Some(TestReach::Tested)), &p),
+            Lane::AutoMerge
+        );
+        assert_eq!(
+            lane_of(&internal(|h| h.tested = Some(TestReach::Traced)), &p),
+            Lane::AutoMerge
+        );
+        let mut off = policy();
+        off.inputs.tests.untested = Lane::AutoMerge;
+        let c = classify(&untested, None, &off, &with(VETERAN));
+        assert_eq!(c.lane, Lane::AutoMerge);
+        assert!(inputs(&c, "input").is_empty());
+
+        let low = internal(|h| h.confidence = Confidence::Low);
+        let c = classify(&low, None, &p, &with(VETERAN));
+        assert_eq!(c.lane, Lane::Judge);
+        assert!(inputs(&c, "input")[0].reason.contains("could not resolve"));
+    }
+
+    #[test]
+    fn history_of_the_touched_components_raises_lanes() {
+        let p = policy();
+        let docs = report(vec![row(ChangeKind::Internal, "internal-changes", &[])]);
+        let lane_with = |component: &str, h: AreaHistory| {
+            let areas: AreaHistories = [(component.to_string(), h)].into();
+            let ctx = ClassifyContext {
+                areas: &areas,
+                ..with(VETERAN)
+            };
+            classify(&docs, None, &p, &ctx)
+        };
+        let incident = AreaHistory {
+            incidents: 1,
+            changes: vec!["acme/shop#1".into()],
+            ..AreaHistory::default()
+        };
+        let c = lane_with("docs", incident.clone());
+        assert_eq!(c.lane, Lane::Human);
+        assert_eq!(
+            inputs(&c, "input")[0].reason,
+            "`docs` had 1 incident in the last 90 days (acme/shop#1)"
+        );
+        let revert = AreaHistory {
+            reverts: 1,
+            changes: vec!["acme/shop#2".into()],
+            ..AreaHistory::default()
+        };
+        assert_eq!(lane_with("docs", revert).lane, Lane::Judge);
+        assert_eq!(lane_with("billing", incident).lane, Lane::AutoMerge);
+    }
+
+    #[test]
+    fn new_packages_and_dependencies_have_floors() {
+        let mut p = policy();
+        p.rules.push(LaneRule {
+            lane: Lane::AutoMerge,
+            match_: RuleMatch::Every,
+            kinds: vec!["dependency".into(), "internal".into()],
+            subkinds: vec![],
+            components: vec![],
+            labels: vec![],
+        });
+        let mut pkg = row(ChangeKind::Dependency, "new-dependency", &[]);
+        pkg.hints.novelty = vec!["new-package:left-pad".into()];
+        let c = classify(&report(vec![pkg]), None, &p, &with(VETERAN));
+        assert_eq!(c.lane, Lane::Human);
+        assert!(c.applied.iter().any(
+            |a| a.source == "floor" && a.reason.contains("new to this repository (`left-pad`)")
+        ));
+        let existing = row(ChangeKind::Dependency, "new-dependency", &[]);
+        assert_eq!(lane_of(&report(vec![existing]), &p), Lane::Judge);
+        let cross = row(ChangeKind::Internal, "new-cross-component-dependency", &[]);
+        assert_eq!(lane_of(&report(vec![cross]), &p), Lane::Judge);
+        let mut sdk = row(ChangeKind::Internal, "internal-changes", &[]);
+        sdk.hints.novelty = vec!["new-dependency:@acme/sms".into()];
+        assert_eq!(lane_of(&report(vec![sdk]), &p), Lane::Judge);
+    }
+
+    #[test]
+    fn inputs_never_lower_a_lane() {
+        let mut off = policy();
+        off.inputs = onus_core::RiskInputs {
+            blast_radius: Thresholds::default(),
+            tests: onus_core::TestsInput {
+                untested: Lane::AutoMerge,
+            },
+            confidence: onus_core::ConfidenceInput {
+                low: Lane::AutoMerge,
+            },
+            history: onus_core::HistoryInput {
+                reverts: Thresholds::default(),
+                incidents: Thresholds::default(),
+                ..Default::default()
+            },
+        };
+        let areas: AreaHistories = [(
+            "docs".to_string(),
+            AreaHistory {
+                reverts: 2,
+                incidents: 1,
+                changes: vec!["acme/shop#1".into()],
+            },
+        )]
+        .into();
+        let reports = [
+            internal(|_| {}),
+            internal(|h| h.dependent_components = 12),
+            internal(|h| h.tested = Some(TestReach::Untested)),
+            internal(|h| h.confidence = Confidence::Low),
+            report(vec![row(ChangeKind::Config, "migration-changed", &[])]),
+            report(vec![row(
+                ChangeKind::Internal,
+                "internal-changes",
+                &["payments"],
+            )]),
+        ];
+        for history in [&AreaHistories::new(), &areas] {
+            let ctx = ClassifyContext {
+                areas: history,
+                ..with(VETERAN)
+            };
+            for r in &reports {
+                let on = classify(r, None, &policy(), &ctx).lane;
+                assert!(on >= classify(r, None, &off, &ctx).lane);
+                let mut human = policy();
+                human.default = Lane::Human;
+                human.rules.clear();
+                assert!(classify(r, None, &human, &ctx).lane >= Lane::Human);
+            }
+        }
     }
 
     #[test]

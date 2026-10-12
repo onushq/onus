@@ -395,7 +395,16 @@ fn report(state: &State, body: Value) -> Answer {
     };
     let outcome = onus_cli::diff_dirs(pair.base.dir.path(), pair.head.dir.path(), &opts)?;
     let config = lanes::lanes_config(&state.root, None)?;
-    let classification = lanes::classify_with(&outcome.report, None, &config, None)?;
+    let classification = lanes::classify_with(
+        &state.root,
+        &outcome.report,
+        None,
+        &config,
+        &lanes::ClassifyOpts {
+            outcomes: Some(&state.outcomes),
+            ..Default::default()
+        },
+    )?;
     Ok(json!({
         "report": outcome.report,
         "markdown": outcome.render(onus_cli::Format::Md),
@@ -682,14 +691,32 @@ fn submission_in(body: Value) -> Result<onus_lanes::submission::Submission, Erro
 fn lanes_classify(state: &State, body: Value) -> Answer {
     let sub = submission_in(body)?;
     let config = lanes::lanes_config(&state.root, None)?;
-    let c = lanes::classify_with(&sub.report, Some(&sub), &config, Some(&state.outcomes))?;
+    let c = lanes::classify_with(
+        &state.root,
+        &sub.report,
+        Some(&sub),
+        &config,
+        &lanes::ClassifyOpts {
+            outcomes: Some(&state.outcomes),
+            ..Default::default()
+        },
+    )?;
     Ok(serde_json::to_value(c)?)
 }
 
 fn lanes_judge(state: &State, body: Value) -> Answer {
     let sub = submission_in(body)?;
     let config = lanes::lanes_config(&state.root, None)?;
-    let c = lanes::classify_with(&sub.report, Some(&sub), &config, Some(&state.outcomes))?;
+    let c = lanes::classify_with(
+        &state.root,
+        &sub.report,
+        Some(&sub),
+        &config,
+        &lanes::ClassifyOpts {
+            outcomes: Some(&state.outcomes),
+            ..Default::default()
+        },
+    )?;
     let j = lanes::judge_submission(&state.root, &sub, &c, &config);
     Ok(json!({ "classification": c, "judgment": j }))
 }
@@ -971,6 +998,8 @@ fn outcomes_record(state: &State, body: Value) -> Answer {
         missed: bool,
         #[serde(default)]
         commit: Option<String>,
+        #[serde(default)]
+        components: Vec<String>,
     }
     let q: In = input(body)?;
     let blank = |s: Option<String>| s.filter(|v| !v.trim().is_empty());
@@ -989,6 +1018,7 @@ fn outcomes_record(state: &State, body: Value) -> Answer {
             commit: blank(q.commit),
             involved: vec![],
             note: None,
+            components: q.components,
         },
     )?;
     outcomes(state)

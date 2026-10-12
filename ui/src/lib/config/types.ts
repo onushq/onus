@@ -19,6 +19,13 @@ export interface LaneRule {
 	labels?: string[];
 }
 
+/** Counts at which a lane applies; the highest one met wins. */
+export interface Thresholds {
+	judge?: number;
+	human?: number;
+	blocked?: number;
+}
+
 export interface OnusConfig {
 	version?: number;
 	components?: Record<string, ComponentConfig>;
@@ -40,6 +47,13 @@ export interface OnusConfig {
 		minRecord?: number;
 		heldOut?: { command: string; image?: string; setup?: string };
 		taste?: { command: string[] };
+		/** Built-in risk inputs; each only raises a lane. */
+		inputs?: {
+			blastRadius?: Thresholds;
+			tests?: { untested?: Lane };
+			confidence?: { low?: Lane };
+			history?: { days?: number; reverts?: Thresholds; incidents?: Thresholds };
+		};
 	};
 	environment?: {
 		image?: string;

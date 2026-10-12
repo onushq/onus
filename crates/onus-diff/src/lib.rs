@@ -10,6 +10,7 @@ mod collapse;
 pub mod config_files;
 mod contracts;
 mod ctx;
+mod declared;
 mod generated;
 pub mod intent;
 mod internal;
@@ -18,10 +19,13 @@ mod matching;
 mod notable;
 mod packages;
 mod patches;
+mod reach;
 mod relations;
 mod risk;
 mod rules;
 mod secrets_scan;
+#[cfg(test)]
+mod testing;
 mod tests_diff;
 pub mod text;
 
@@ -93,6 +97,8 @@ pub fn diff(input: &DiffInput) -> SemanticReport {
     let (internal_rows, structure) = internal::rows(&ctx, &rows, &tests);
     rows.extend(internal_rows);
     let mut rows = collapse::widespread(rows);
+    declared::mark(&ctx, &mut rows);
+    reach::fill(&ctx, &mut rows);
 
     // Hints that depend on the whole picture.
     let changed: BTreeSet<&str> = text.files.iter().map(|f| f.path.as_str()).collect();

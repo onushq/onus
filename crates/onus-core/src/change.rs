@@ -91,6 +91,30 @@ pub struct Hints {
     pub intent_mismatch: bool,
     /// A person should look at this row.
     pub needs_person: bool,
+    /// Other components (not the row's own) that depend on the subject in
+    /// the head map (the base map for removed subjects). 0 for rows about a
+    /// whole component.
+    #[serde(default)]
+    pub dependent_components: u32,
+    /// How well tests and traces cover the code the row changes; absent
+    /// when the row changes no code (config, dependencies, tests).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tested: Option<TestReach>,
+}
+
+/// Whether tests or traces reach the files a row changes. File granularity:
+/// a file counts as tested when a test exercises any symbol in it.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum TestReach {
+    /// A test in the head map exercises every changed code file.
+    Tested,
+    /// Every changed code file is tested or seen in a runtime trace.
+    Traced,
+    /// At least one changed code file is neither.
+    Untested,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]

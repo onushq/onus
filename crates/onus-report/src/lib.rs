@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use onus_core::{SemanticChange, SemanticReport, Side};
+use onus_core::{SemanticChange, SemanticReport, Side, TestReach};
 
 /// Hidden marker so a bot can find and update its own comment.
 pub const COMMENT_MARKER: &str = "<!-- onus-report -->";
@@ -210,6 +210,26 @@ pub fn to_markdown(report: &SemanticReport, rules_declared: bool) -> String {
             if c.hints.blast_radius > 0 {
                 facts.push(
                     plural(c.hints.blast_radius, "dependent file", "dependent files").to_string(),
+                );
+            }
+            if c.hints.dependent_components > 0 {
+                facts.push(format!(
+                    "used by {}",
+                    plural(
+                        c.hints.dependent_components,
+                        "other component",
+                        "other components"
+                    )
+                ));
+            }
+            if let Some(t) = c.hints.tested {
+                facts.push(
+                    match t {
+                        TestReach::Tested => "tested",
+                        TestReach::Traced => "traced, not tested",
+                        TestReach::Untested => "untested",
+                    }
+                    .into(),
                 );
             }
             if !c.hints.novelty.is_empty() {

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
 use onus_core::{Lane, LanesConfig, SemanticReport};
-use onus_lanes::classify::{Classification, classify};
+use onus_lanes::classify::{Classification, ClassifyContext, classify};
 use onus_lanes::judge::{Verdict, judge_with};
 use onus_lanes::outcomes::{self, Outcome};
 use onus_lanes::submission::{AgentSetup, Approval, ScopeUsed, Submission};
@@ -78,9 +78,15 @@ pub struct LaneArgs {
     /// Use this onus.yaml instead.
     #[arg(long, value_name = "FILE")]
     config: Option<PathBuf>,
-    /// Outcome records, for the agent setup's track record.
+    /// Outcome records, for the agent setup's track record and the history
+    /// of the components the change touches.
     #[arg(long, value_name = "FILE")]
     outcomes: Option<PathBuf>,
+    /// The change, as owner/repo#123: history counts only that repository's
+    /// changes (for records shared across repositories) and leaves the change
+    /// itself out.
+    #[arg(long, value_name = "OWNER/REPO#N")]
+    change: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -114,6 +120,9 @@ pub enum OutcomesCmd {
         /// The commit the change landed as (to match reverts against).
         #[arg(long)]
         commit: Option<String>,
+        /// A component the change touched, for per-component history (repeatable).
+        #[arg(long = "component", value_name = "ID")]
+        components: Vec<String>,
     },
     /// Find reverts in git history and record them against the changes they revert.
     IngestReverts {
@@ -401,34 +410,65 @@ fn classify_args(args: &LaneArgs) -> Result<(Option<Submission>, LanesConfig, Cl
             (None, None) => bail!("give --submission or --report"),
         };
     let c = classify_with(
+        &args.repo,
         &report,
         submission.as_ref(),
         &config,
-        args.outcomes.as_deref(),
+        &ClassifyOpts {
+            outcomes: args.outcomes.as_deref(),
+            change: args.change.as_deref(),
+            now: None,
+        },
     )?;
     Ok((submission, config, c))
 }
 
-/// The lane of a change: its report, its submission if any, the policy and
-/// the agent setup's record in `outcomes`.
+/// Where a classification looks for history. Later inputs add fields here.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ClassifyOpts<'a> {
+    /// Outcome records: the agent setup's record and per-component history.
+    pub outcomes: Option<&'a Path>,
+    /// The change, as owner/repo#123: history counts that repository's
+    /// changes only, and leaves this one out.
+    pub change: Option<&'a str>,
+    /// The end of the history window, in Unix seconds (None = now).
+    pub now: Option<u64>,
+}
+
+/// The lane of a change: its report, its submission if any, the policy,
+/// the agent setup's record and the history of the components it touches.
+/// `repo` is the worktree the policy came from.
 pub fn classify_with(
+    _repo: &Path,
     report: &SemanticReport,
     submission: Option<&Submission>,
     config: &LanesConfig,
-    outcomes_file: Option<&Path>,
+    opts: &ClassifyOpts,
 ) -> Result<Classification> {
     // A file not written yet is an empty record.
-    let record = match (outcomes_file, submission) {
-        (Some(f), Some(s)) => {
-            let all = if f.exists() {
-                outcomes::load(f)?
-            } else {
-                Vec::new()
-            };
-            Some(outcomes::record_for(&all, &s.agent.key()))
-        }
+    let all = match opts.outcomes {
+        Some(f) if f.exists() => outcomes::load(f)?,
+        _ => Vec::new(),
+    };
+    let record = match (opts.outcomes, submission) {
+        (Some(_), Some(s)) => Some(outcomes::record_for(&all, &s.agent.key())),
         _ => None,
     };
+    let areas: std::collections::BTreeSet<String> = report
+        .changes
+        .iter()
+        .map(|r| r.component.clone().unwrap_or_else(|| "root".into()))
+        .collect();
+    let now = opts.now.unwrap_or_else(onus_doors::gateway::now);
+    let history = outcomes::area_history(
+        &all,
+        &areas,
+        &outcomes::HistoryScope {
+            since: now.saturating_sub(u64::from(config.inputs.history.days) * 86_400),
+            repo: opts.change.and_then(outcomes::repo_of),
+            exclude: opts.change,
+        },
+    );
     // The scope the change was made under (verified when the submission was
     // made), checked against every path the change writes.
     let scope = submission.and_then(|s| s.scope.as_ref()).map(|sc| {
@@ -437,7 +477,16 @@ pub fn classify_with(
     let writable = |p: &str| scope.as_ref().is_some_and(|s| s.can_write(p));
     let writable_ref: Option<&dyn Fn(&str) -> bool> =
         scope.as_ref().map(|_| &writable as &dyn Fn(&str) -> bool);
-    Ok(classify(report, submission, config, record, writable_ref))
+    Ok(classify(
+        report,
+        submission,
+        config,
+        &ClassifyContext {
+            record,
+            areas: &history,
+            writable: writable_ref,
+        },
+    ))
 }
 
 /// The judge's verdict on a submission, with evidence re-run in containers
@@ -554,6 +603,7 @@ pub fn outcomes_cmd(cmd: OutcomesCmd) -> Result<i32> {
             audited,
             missed,
             commit,
+            components,
         } => {
             record_outcome(
                 &file,
@@ -570,6 +620,7 @@ pub fn outcomes_cmd(cmd: OutcomesCmd) -> Result<i32> {
                     commit,
                     involved: vec![],
                     note: None,
+                    components,
                 },
             )?;
             Ok(0)

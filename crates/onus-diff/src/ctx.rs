@@ -38,6 +38,8 @@ pub struct Ctx<'a> {
     pub packs: BTreeSet<String>,
     /// The `testData` globs of onus.yaml.
     test_data: globset::GlobSet,
+    /// Declared contracts of onus.yaml: symbol id → contract name.
+    pub declared: BTreeMap<String, String>,
 }
 
 impl std::fmt::Debug for Ctx<'_> {
@@ -98,6 +100,14 @@ impl<'a> Ctx<'a> {
                         .packs
                         .iter()
                         .map(|p| p.trim_start_matches("./").to_string())
+                        .collect()
+                })
+                .unwrap_or_default(),
+            declared: config
+                .map(|c| {
+                    c.contracts
+                        .iter()
+                        .map(|(name, c)| (c.symbol.clone(), name.clone()))
                         .collect()
                 })
                 .unwrap_or_default(),
@@ -316,6 +326,8 @@ pub fn change(
             rules_of_the_game: false,
             intent_mismatch: false,
             needs_person: false,
+            dependent_components: 0,
+            tested: None,
         },
         locations,
         stats: None,

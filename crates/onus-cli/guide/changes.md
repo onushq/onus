@@ -20,7 +20,7 @@ These are compared per component, so moving code around inside a component never
 
 | Subkind | Kind | When |
 |---|---|---|
-| new-external-service | security-sensitive | A component starts calling an external service that is new to the repository, or that sends a kind of data (phone numbers, email addresses, payment details, ...) the component never sent before. Its novelty lists `new-vendor:<vendor>` and `new-data-egress:<kind>`. A new npm package that is the service's SDK is folded into this row (`new-dependency:<package>`). |
+| new-external-service | security-sensitive | A component starts calling an external service that is new to the repository, or that sends a kind of data (phone numbers, email addresses, payment details, ...) the component never sent before. Its novelty lists `new-vendor:<vendor>` and `new-data-egress:<kind>`. A new npm package that is the service's SDK is folded into this row (`new-dependency:<package>`, and `new-package:<package>` when no other component used it). |
 | new-external-call | additive | A component starts calling a service another component already uses, sending nothing new. |
 | external-service-removed | internal | A component stops calling a service. |
 | new-event-consumer | additive | A component starts subscribing to an event. The row says whether the publishers also changed; with no publisher in the map it is low confidence. |
@@ -66,6 +66,12 @@ A contract change is breaking only when something outside the change can break: 
 When every user was updated in the same change, or nothing outside it uses the symbol, the row keeps its subkind but is additive ("Contract change, users updated" or "no users affected") and does not need a person. It stays breaking when Onus cannot see every user: the package is published (its package.json is not private and has `files` or `publishConfig`), or some imports of it could not be resolved.
 
 Renaming a parameter is not a contract change. When a contract declared in onus.yaml has invariants, the row repeats them.
+
+A contract declared in onus.yaml is a rule of the game. When its code changes (it is added or removed, or the body, shape or value of it or one of its members differs; formatting, comments and moves do not count), every row about it is marked `rulesOfTheGame` and needs a person. When no row is about it, for example a body-only edit, Onus adds one:
+
+| Subkind | Kind | When |
+|---|---|---|
+| declared-contract-edited | internal | The code of a contract declared in onus.yaml changed and no other row is about it. Rules of the game. |
 
 ## Renames and moves
 
@@ -184,3 +190,7 @@ Grouped rows keep every file and line in their evidence.
 - `novelty`: `new-vendor:<vendor>`, `new-data-egress:<kind>`, `new-dependency:<package>`, `new-package:<package>`, `secret`.
 - `confidence`: `declared` (from onus.yaml), `compiler` (confirmed by a compiler, indexer or language server), `static` (read from the code), `inferred` (from conventions) or `low` (Onus could not resolve something).
 - `rulesOfTheGame`, `intentMismatch`, `needsPerson`.
+- `dependentComponents`: other components (not the row's own) that depend on the subject. 0 for rows about a whole component, such as the per-component internal row.
+- `tested`: for rows that change code, whether tests reach the files it changes: `tested` (a test exercises every changed file), `traced` (each changed file is tested or seen in a runtime trace) or `untested`. Absent for rows that change no code. It is per file, not line coverage.
+
+The lane classifier reads these hints (`onus help lanes`).

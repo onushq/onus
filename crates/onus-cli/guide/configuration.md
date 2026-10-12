@@ -171,7 +171,7 @@ Folders named .git, .onus (where Onus keeps its records), node_modules, dist, bu
 
 ## lanes
 
-What happens to a change after it is reported: the default lane, rules that set or raise it, the share of automatic merges audited by a person, the record an agent setup needs before it may auto-merge, held-out checks and an optional taste reviewer for the judge. See `onus help lanes`.
+What happens to a change after it is reported: the default lane, rules that set or raise it, the built-in risk inputs, the share of automatic merges audited by a person, the record an agent setup needs before it may auto-merge, held-out checks and an optional taste reviewer for the judge. See `onus help lanes`.
 
     lanes:
       default: judge          # auto-merge, judge, human or blocked
@@ -181,6 +181,13 @@ What happens to a change after it is reported: the default lane, rules that set 
         - { lane: auto-merge, match: every, kinds: [internal], components: [docs] }
         - { lane: human, subkinds: [migration-changed] }
       heldOut: { command: "npm run test:held-out", image: "node:22", setup: "npm ci" }
+      inputs:                                  # each key optional; these are the defaults
+        blastRadius: { judge: 3 }              # other components that depend on a row
+        tests: { untested: judge }             # code no test or trace reaches
+        confidence: { low: judge }             # rows on parts of the map Onus could not resolve
+        history: { days: 90, reverts: { judge: 1 }, incidents: { human: 1 } }
+
+Inputs only raise a lane. A threshold of N means N or more, and the highest lane whose threshold is met applies (`judge`, `human`, `blocked`). Writing a key replaces its default as a whole: `blastRadius: { human: 10 }` has no judge threshold, and `blastRadius: {}` turns the input off. A lane of `auto-merge` turns `tests` or `confidence` off. Thresholds are at least 1 and must not go down as the lane goes up; `history.days` is 1 to 3650.
 
 ## environment
 

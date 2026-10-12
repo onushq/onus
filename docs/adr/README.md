@@ -17,3 +17,4 @@ Short records of decisions that are significant or hard to reverse. Propose a ne
 | [0011](0011-web-interface.md) | A web interface shipped in the binary | Accepted |
 | [0012](0012-agents-act-through-mcp.md) | Agents hand work in through MCP, and cannot approve themselves | Accepted |
 | [0013](0013-outcome-records-from-ci.md) | Outcome records kept by CI on a branch of the repository | Accepted |
+| [0014](0014-built-in-risk-inputs.md) | Built-in risk inputs that only raise a lane | Accepted |

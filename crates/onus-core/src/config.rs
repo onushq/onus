@@ -126,6 +126,9 @@ pub struct LanesConfig {
     /// raise concerns that send the change to a person, never approve it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub taste: Option<TasteCommand>,
+    /// Built-in risk inputs; each can only raise a lane (`onus help lanes`).
+    #[serde(default)]
+    pub inputs: RiskInputs,
 }
 
 fn default_lane() -> Lane {
@@ -149,7 +152,160 @@ impl Default for LanesConfig {
             min_record: default_min_record(),
             held_out: None,
             taste: None,
+            inputs: RiskInputs::default(),
         }
+    }
+}
+
+/// The built-in risk inputs of the classifier. They are on by default and
+/// only ever raise a lane. Writing a field replaces its default as a whole.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct RiskInputs {
+    /// Other components that depend on what a row changed. Default
+    /// `{ judge: 3 }`; `{}` turns it off.
+    #[serde(default = "default_blast_radius")]
+    pub blast_radius: Thresholds,
+    /// Rows that change code no test exercises and no trace has observed.
+    #[serde(default)]
+    pub tests: TestsInput,
+    /// Rows that rest on parts of the map Onus could not resolve.
+    #[serde(default)]
+    pub confidence: ConfidenceInput,
+    /// Reverts, rollbacks and incidents in the components a change touches,
+    /// from the outcome records.
+    #[serde(default)]
+    pub history: HistoryInput,
+}
+
+impl Default for RiskInputs {
+    fn default() -> Self {
+        RiskInputs {
+            blast_radius: default_blast_radius(),
+            tests: TestsInput::default(),
+            confidence: ConfidenceInput::default(),
+            history: HistoryInput::default(),
+        }
+    }
+}
+
+/// Counts at which a lane applies; the highest one met wins. A threshold of
+/// N means N or more; an unset one never applies.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct Thresholds {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub judge: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub human: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked: Option<u32>,
+}
+
+impl Thresholds {
+    /// The highest lane whose threshold `n` meets, if any.
+    pub fn lane_for(&self, n: u32) -> Option<Lane> {
+        [
+            (Lane::Blocked, self.blocked),
+            (Lane::Human, self.human),
+            (Lane::Judge, self.judge),
+        ]
+        .into_iter()
+        .find(|(_, t)| t.is_some_and(|t| n >= t))
+        .map(|(lane, _)| lane)
+    }
+
+    /// The threshold that sends a count to `lane`.
+    pub fn get(&self, lane: Lane) -> Option<u32> {
+        match lane {
+            Lane::AutoMerge => None,
+            Lane::Judge => self.judge,
+            Lane::Human => self.human,
+            Lane::Blocked => self.blocked,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct TestsInput {
+    /// The lane of a change with a row whose code no test exercises and no
+    /// trace has observed. Default `judge`; `auto-merge` turns it off.
+    #[serde(default = "default_lane")]
+    pub untested: Lane,
+}
+
+impl Default for TestsInput {
+    fn default() -> Self {
+        TestsInput {
+            untested: default_lane(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ConfidenceInput {
+    /// The lane of a change with a row that rests on parts of the map Onus
+    /// could not resolve. Default `judge`; `auto-merge` turns it off.
+    #[serde(default = "default_lane")]
+    pub low: Lane,
+}
+
+impl Default for ConfidenceInput {
+    fn default() -> Self {
+        ConfidenceInput {
+            low: default_lane(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct HistoryInput {
+    /// How many days back the outcome records count (1 to 3650). Default 90.
+    #[serde(default = "default_history_days")]
+    pub days: u32,
+    /// Reverts and rollbacks per component. Default `{ judge: 1 }`.
+    #[serde(default = "default_reverts")]
+    pub reverts: Thresholds,
+    /// Incidents per component. Default `{ human: 1 }`.
+    #[serde(default = "default_incidents")]
+    pub incidents: Thresholds,
+}
+
+impl Default for HistoryInput {
+    fn default() -> Self {
+        HistoryInput {
+            days: default_history_days(),
+            reverts: default_reverts(),
+            incidents: default_incidents(),
+        }
+    }
+}
+
+fn default_blast_radius() -> Thresholds {
+    Thresholds {
+        judge: Some(3),
+        ..Thresholds::default()
+    }
+}
+
+fn default_history_days() -> u32 {
+    90
+}
+
+fn default_reverts() -> Thresholds {
+    Thresholds {
+        judge: Some(1),
+        ..Thresholds::default()
+    }
+}
+
+fn default_incidents() -> Thresholds {
+    Thresholds {
+        human: Some(1),
+        ..Thresholds::default()
     }
 }
 
@@ -373,3 +529,36 @@ pub const DEFAULT_SUBSCRIBE_PATTERNS: &[&str] = &[
     "events.subscribe($EVENT, ...)",
     "@OnEvent($EVENT)",
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lanes(json: &str) -> Result<LanesConfig, serde_json::Error> {
+        serde_json::from_str(json)
+    }
+
+    #[test]
+    fn risk_inputs_default_and_replace_whole_fields() {
+        assert_eq!(lanes("{}").unwrap().inputs, RiskInputs::default());
+        let off = lanes(r#"{"inputs": {"blastRadius": {}}}"#).unwrap().inputs;
+        assert_eq!(off.blast_radius, Thresholds::default());
+        assert_eq!(off.tests, TestsInput::default());
+        assert_eq!(off.history, HistoryInput::default());
+        assert!(lanes(r#"{"inputs": {"speed": {}}}"#).is_err());
+        assert!(lanes(r#"{"inputs": {"history": {"weeks": 2}}}"#).is_err());
+    }
+
+    #[test]
+    fn the_highest_threshold_met_wins() {
+        let t = Thresholds {
+            judge: Some(3),
+            human: Some(10),
+            blocked: None,
+        };
+        assert_eq!(t.lane_for(2), None);
+        assert_eq!(t.lane_for(3), Some(Lane::Judge));
+        assert_eq!(t.lane_for(12), Some(Lane::Human));
+        assert_eq!(Thresholds::default().lane_for(100), None);
+    }
+}
