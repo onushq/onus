@@ -43,6 +43,7 @@ The same report for two git refs. Each ref is extracted with `git archive` into 
 - `--repo <dir>`: the repository (default: the current directory).
 - `--format`, `--markdown-out`, `--intent`, `--config`, `--fail-on`, `--traces`, `--plugins`, `--trusted`, `--allow-unsandboxed`: as for `onus diff`. SCIP indexes for `report` come from `scip` plugins, which index each ref in trusted mode.
 - `--cache-dir <dir>`: keep the base ref's map in this folder and reuse it on the next report against the same base commit. The report is the same either way; see `onus help ci`.
+- `--head-map-out <file>`: also write the head ref's map (schemas/codebase-map.schema.json) to a file. It is the map the report was computed against, so `onus query --map <file>` answers questions about the head with no second build.
 
 Any ref git understands works: branches, tags, `HEAD~3`, commit hashes. In JSON, `base` and `head` read like `main (abc1234)`.
 
@@ -64,10 +65,10 @@ Writes a starter onus.yaml inferred from workspaces and CODEOWNERS. Sensitivity 
 
 ## onus schema
 
-Writes the JSON Schemas of the map, the report and onus.yaml.
+Writes the JSON Schemas of the map, the report, onus.yaml, the plugins file and protocol, and the map overview (`onus query overview`).
 
     onus schema --out schemas
-    onus schema                         # print all three
+    onus schema                         # print them all
 
 ## onus mcp
 
@@ -80,13 +81,17 @@ Serves the map of the current worktree to a coding agent as MCP tools, on stdin 
 
 ## onus query <question>
 
-The same questions as the MCP tools, from a shell, printed as JSON: `status`, `find <words>`, `symbol <id>`, `dependents <target>`, `dependencies <target>`, `tests-for <target>`, `impact <target> [--change <kind>]`, `invariants [target]`, `owners <target>`, `component <id>`, `file <path>`, `check [--base <ref>]` and `stats`.
+The same questions as the MCP tools, from a shell, printed as JSON: `status`, `find <words>`, `symbol <id>`, `dependents <target>`, `dependencies <target>`, `tests-for <target>`, `impact <target> [--change <kind>]`, `invariants [target]`, `owners <target>`, `component <id>`, `file <path>`, `overview`, `check [--base <ref>]` and `stats`.
 
     onus query find format phone
     onus query dependents UserPreferences --depth 2 --limit 20
+    onus query overview
+    onus query --map map.json dependents money
 
 - `--repo <dir>` and `--no-server`: as for `onus mcp`.
 - `--depth <n>` (1 to 8) and `--limit <n>` (default 50, at most 500) where they apply.
+- `--map <file>`: answer from a map JSON file instead of a worktree: one from `onus map --json` or `onus report --head-map-out`, or a map downloaded from Onus Cloud. `-` reads stdin, so `curl … | onus query --map - dependents money` works in scripts. A map of another schema version is refused. No map server is started, `check` and `stats` need a worktree, and `impact --change add-required-member` lists every file that names the type, since there is no source to read.
+- `overview`: every component with its kind, roots, owners, labels, package, files, lines and first 50 public symbols, the components it uses and that use it (with edge counts), its external services and events; then the links between components, the events, the declared contracts and the rules (schemas/map-overview.schema.json). It is what `onus ui` draws and what Onus Cloud shows for a map it keeps.
 
 ## onus ui
 

@@ -113,6 +113,73 @@ fn tests_owners_components_and_files() {
 }
 
 #[test]
+fn overview_matches_component_for_every_component() {
+    let idx = index();
+    let overview = idx.overview();
+    assert_eq!(overview.components.len(), idx.map().components.len());
+    for c in &overview.components {
+        let one = idx.component(&c.id).unwrap();
+        assert_eq!(c.kind, one.kind, "{}", c.id);
+        assert_eq!(c.uses, one.uses, "{}", c.id);
+        assert_eq!(c.used_by, one.used_by, "{}", c.id);
+        assert_eq!(c.externals, one.externals, "{}", c.id);
+        assert_eq!(c.events_published, one.events_published, "{}", c.id);
+        assert_eq!(c.events_consumed, one.events_consumed, "{}", c.id);
+        assert_eq!(c.public_symbols, one.public_symbols, "{}", c.id);
+        assert_eq!(c.public, one.public, "{}", c.id);
+        assert_eq!(c.files, one.files, "{}", c.id);
+    }
+    // Links say the same as the components' `uses`.
+    for l in &overview.links {
+        let from = overview.components.iter().find(|c| c.id == l.from);
+        if let Some(from) = from {
+            assert_eq!(from.uses.get(&l.to), Some(&l.count), "{l:?}");
+        }
+        assert_eq!(l.kinds.values().sum::<usize>(), l.count);
+    }
+}
+
+#[test]
+fn overview_names_owners_labels_and_contracts() {
+    let idx = index();
+    let overview = idx.overview();
+    assert_eq!(overview.commit, idx.map().commit);
+    let prefs = overview
+        .components
+        .iter()
+        .find(|c| c.id == "user-preferences")
+        .unwrap();
+    assert_eq!(prefs.owners, ["@team-growth"]);
+    assert_eq!(prefs.labels, ["pii"]);
+    assert!(prefs.used_by.contains_key("notifications"));
+    assert!(prefs.lines > 0);
+    let contract = overview
+        .contracts
+        .iter()
+        .find(|c| c.symbol.id == "user-preferences:src/types.ts#UserPreferences")
+        .unwrap();
+    assert_eq!(contract.invariants, ["phone numbers are stored in E.164"]);
+    let billing = overview
+        .components
+        .iter()
+        .find(|c| c.id == "billing")
+        .unwrap();
+    assert!(billing.uses.contains_key("money"));
+    let placed = overview
+        .events
+        .iter()
+        .find(|e| e.name == "OrderPlaced")
+        .unwrap();
+    assert_eq!(placed.publishers, ["orders"]);
+    assert!(placed.consumers.contains(&"notifications".to_string()));
+    // Asked as a query, it is the same overview.
+    let answer = idx.answer(&Query::Overview).unwrap();
+    assert_eq!(answer, serde_json::to_value(&overview).unwrap());
+    let q: Query = serde_json::from_str(r#"{"query":"overview"}"#).unwrap();
+    assert_eq!(q, Query::Overview);
+}
+
+#[test]
 fn answers_are_deterministic_json() {
     let (a, b) = (index(), index());
     for q in [
@@ -129,6 +196,7 @@ fn answers_are_deterministic_json() {
         Query::Component {
             id: "billing".into(),
         },
+        Query::Overview,
     ] {
         assert_eq!(a.answer(&q).unwrap(), b.answer(&q).unwrap(), "{q:?}");
     }

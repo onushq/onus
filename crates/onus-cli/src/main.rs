@@ -210,6 +210,10 @@ Examples:
         /// shapes the map.
         #[arg(long, value_name = "DIR")]
         cache_dir: Option<PathBuf>,
+        /// Also write the head ref's map (schemas/codebase-map.schema.json) to this file: the
+        /// map the report was computed against.
+        #[arg(long, value_name = "FILE")]
+        head_map_out: Option<PathBuf>,
         #[command(flatten)]
         providers: ProviderArgs,
     },
@@ -303,7 +307,10 @@ Examples:
   onus query dependents UserPreferences --depth 2
   onus query tests-for services/billing/src/payments.ts
   onus query impact UserPreferences --change add-required-member
-  onus query check --base main")]
+  onus query overview
+  onus query check --base main
+  onus query --map map.json dependents money
+  curl … | onus query --map - overview")]
     Query {
         #[command(subcommand)]
         question: QueryCmd,
@@ -313,6 +320,15 @@ Examples:
         /// Build the map in this process instead of the shared map server.
         #[arg(long, global = true)]
         no_server: bool,
+        /// Answer from a map JSON file (`onus map --json`, or a map downloaded from Onus
+        /// Cloud) instead of a worktree. `-` reads stdin.
+        #[arg(
+            long,
+            global = true,
+            value_name = "FILE",
+            conflicts_with_all = ["no_server"]
+        )]
+        map: Option<PathBuf>,
     },
     /// Run a repository's map server (started automatically by `onus mcp`).
     #[command(hide = true)]
@@ -479,6 +495,9 @@ enum QueryCmd {
         #[arg(default_value = "")]
         target: String,
     },
+    /// Every component with its owners, labels, what it uses and what uses it; the links,
+    /// events, contracts and rules (schemas/map-overview.schema.json).
+    Overview,
     /// Changes in meaning between a commit and the worktree as it is now.
     Check {
         /// The commit to compare with.
@@ -555,6 +574,7 @@ impl QueryCmd {
                 limit,
             }),
             QueryCmd::Invariants { target } => q(Query::Invariants { target }),
+            QueryCmd::Overview => q(Query::Overview),
             QueryCmd::Check { base } => Op::Check { base: Some(base) },
             QueryCmd::Stats => Op::Stats,
         }
@@ -702,6 +722,7 @@ fn run(cli: Cli) -> Result<i32> {
             head_scip,
             traces,
             cache_dir,
+            head_map_out,
             providers,
         } => {
             let providers = providers.load()?;
@@ -735,6 +756,10 @@ fn run(cli: Cli) -> Result<i32> {
             let outcome = onus_cli::diff_dirs(b.dir.path(), h.dir.path(), &opts)?;
             for note in &outcome.notes {
                 eprintln!("onus: {note}");
+            }
+            if let Some(path) = &head_map_out {
+                std::fs::write(path, serde_json::to_string(&outcome.head_map)?)
+                    .with_context(|| format!("cannot write {}", path.display()))?;
             }
             if let Some(path) = &markdown_out {
                 std::fs::write(path, outcome.render(Format::Md))
@@ -848,8 +873,27 @@ fn run(cli: Cli) -> Result<i32> {
         }
         Cmd::Query {
             question,
+            map: Some(file),
+            ..
+        } => {
+            let onus_cli::daemon::Op::Query { query } = question.op() else {
+                bail!("`check` and `stats` need a worktree; leave out --map");
+            };
+            let index = onus_cli::index_from_map_file(&file)?;
+            let result = index.answer(&query).map_err(anyhow::Error::msg)?;
+            let map = index.map();
+            let body = serde_json::json!({
+                "result": result,
+                "map": { "commit": map.commit, "onus": map.built_with.onus, "source": "file" },
+            });
+            println!("{}", serde_json::to_string_pretty(&body)?);
+            Ok(0)
+        }
+        Cmd::Query {
+            question,
             repo,
             no_server,
+            map: None,
         } => {
             let root = onus_cli::daemon::worktree_root(&repo);
             let req = onus_cli::daemon::Request {
@@ -877,7 +921,8 @@ fn run(cli: Cli) -> Result<i32> {
             }
         }
         Cmd::Schema { out } => {
-            let schemas = onus_core::schema::all_schemas();
+            let mut schemas = onus_core::schema::all_schemas();
+            schemas.push(onus_index::overview_schema());
             match out {
                 Some(dir) => {
                     std::fs::create_dir_all(&dir)?;

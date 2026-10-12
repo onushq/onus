@@ -930,6 +930,149 @@ impl MapIndex {
         })
     }
 
+    /// Every component as [`MapIndex::component`] describes it, with its
+    /// lines; the links and events between components; the externals,
+    /// declared contracts and rules. One pass over the map, so it stays
+    /// fast on large maps.
+    pub fn overview(&self) -> Overview {
+        let at: HashMap<&str, usize> = self
+            .map
+            .components
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (c.id.as_str(), i))
+            .collect();
+        let mut components: Vec<ComponentSummary> = self
+            .map
+            .components
+            .iter()
+            .map(|c| ComponentSummary {
+                id: c.id.clone(),
+                kind: format!("{:?}", c.kind).to_lowercase(),
+                roots: c.roots.clone(),
+                owners: c.owners.clone(),
+                labels: c.labels.clone(),
+                package_name: c.package_name.clone(),
+                files: 0,
+                lines: 0,
+                public_symbols: 0,
+                public: Vec::new(),
+                uses: BTreeMap::new(),
+                used_by: BTreeMap::new(),
+                externals: Vec::new(),
+                events_published: Vec::new(),
+                events_consumed: Vec::new(),
+            })
+            .collect();
+        let of = |id: Option<&str>| id.and_then(|c| at.get(c).copied());
+        for f in &self.map.files {
+            if let Some(i) = of(f.component_id.as_deref()) {
+                components[i].files += 1;
+                components[i].lines += u64::from(f.lines);
+            }
+        }
+        for s in &self.map.symbols {
+            if s.visibility == onus_core::Visibility::Public
+                && let Some(i) = of(s.component_id.as_deref())
+            {
+                let c = &mut components[i];
+                c.public_symbols += 1;
+                if c.public.len() < DEFAULT_LIMIT {
+                    c.public.push(symbol_ref(s));
+                }
+            }
+        }
+        let mut externals: Vec<BTreeSet<String>> = vec![BTreeSet::new(); components.len()];
+        let mut published: Vec<BTreeSet<String>> = vec![BTreeSet::new(); components.len()];
+        let mut consumed: Vec<BTreeSet<String>> = vec![BTreeSet::new(); components.len()];
+        let mut links: BTreeMap<(&str, &str), BTreeMap<String, usize>> = BTreeMap::new();
+        let mut publishers: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+        let mut consumers: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+        for e in &self.map.edges {
+            let Some(from) = ids::component_of(&e.from) else {
+                continue;
+            };
+            let to = ids::component_of(&e.to);
+            match e.kind {
+                EdgeKind::CallsExternal => {
+                    if let Some(i) = of(Some(from)) {
+                        externals[i].insert(e.to.clone());
+                    }
+                }
+                EdgeKind::Publishes => {
+                    let name = ids::name_of(&e.to);
+                    publishers.entry(name).or_default().insert(from);
+                    if let Some(i) = of(Some(from)) {
+                        published[i].insert(name.to_string());
+                    }
+                }
+                EdgeKind::Consumes => {
+                    let name = ids::name_of(&e.to);
+                    consumers.entry(name).or_default().insert(from);
+                    if let Some(i) = of(Some(from)) {
+                        consumed[i].insert(name.to_string());
+                    }
+                }
+                k if k.is_code_dependency() => {
+                    let Some(to) = to.filter(|t| *t != from) else {
+                        continue;
+                    };
+                    *links
+                        .entry((from, to))
+                        .or_default()
+                        .entry(k.as_str().to_string())
+                        .or_default() += 1;
+                    if let Some(i) = of(Some(from)) {
+                        *components[i].uses.entry(to.to_string()).or_default() += 1;
+                    }
+                    if let Some(i) = of(Some(to)) {
+                        *components[i].used_by.entry(from.to_string()).or_default() += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        for (i, c) in components.iter_mut().enumerate() {
+            c.externals = std::mem::take(&mut externals[i]).into_iter().collect();
+            c.events_published = std::mem::take(&mut published[i]).into_iter().collect();
+            c.events_consumed = std::mem::take(&mut consumed[i]).into_iter().collect();
+        }
+        let names: BTreeSet<&str> = publishers.keys().chain(consumers.keys()).copied().collect();
+        let list = |m: &BTreeMap<&str, BTreeSet<&str>>, name: &str| -> Vec<String> {
+            m.get(name)
+                .into_iter()
+                .flatten()
+                .map(|c| c.to_string())
+                .collect()
+        };
+        Overview {
+            commit: self.map.commit.clone(),
+            onus: self.map.built_with.onus.clone(),
+            components,
+            links: links
+                .into_iter()
+                .map(|((from, to), kinds)| ComponentLink {
+                    from: from.to_string(),
+                    to: to.to_string(),
+                    count: kinds.values().sum(),
+                    kinds,
+                })
+                .collect(),
+            events: names
+                .into_iter()
+                .map(|name| EventLink {
+                    name: name.to_string(),
+                    publishers: list(&publishers, name),
+                    consumers: list(&consumers, name),
+                })
+                .collect(),
+            externals: self.map.externals.clone(),
+            contracts: self.invariants("").map(|i| i.contracts).unwrap_or_default(),
+            rules: self.map.rules.clone(),
+            diagnostics: self.map.diagnostics.len(),
+        }
+    }
+
     /// A file: its component, symbols, imports and importers.
     pub fn file(&self, path: &str) -> Option<FileInfo> {
         let path = path.trim_start_matches("./");
@@ -1219,6 +1362,85 @@ pub struct ComponentInfo {
     pub events_consumed: Vec<String>,
 }
 
+/// The whole map at component level (`onus query overview`,
+/// schemas/map-overview.schema.json): what `onus ui` draws and what Onus
+/// Cloud shows for a kept map.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Overview {
+    /// The commit the map was built from.
+    pub commit: String,
+    /// The onus version that built the map.
+    pub onus: String,
+    /// Every component, in map order.
+    pub components: Vec<ComponentSummary>,
+    /// Code dependencies between components, sorted by (from, to).
+    pub links: Vec<ComponentLink>,
+    /// Events with the components that publish and consume them, by name.
+    pub events: Vec<EventLink>,
+    pub externals: Vec<onus_core::ExternalService>,
+    /// Every declared invariant, by symbol.
+    pub contracts: Vec<DeclaredInvariants>,
+    pub rules: Vec<onus_core::BoundaryRule>,
+    /// How many things the map could not resolve.
+    pub diagnostics: usize,
+}
+
+/// A component in an [`Overview`]: the same counts as [`ComponentInfo`],
+/// plus its lines.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ComponentSummary {
+    pub id: String,
+    pub kind: String,
+    pub roots: Vec<String>,
+    pub owners: Vec<String>,
+    pub labels: Vec<String>,
+    pub package_name: Option<String>,
+    pub files: usize,
+    pub lines: u64,
+    pub public_symbols: usize,
+    /// The first public symbols, by id.
+    pub public: Vec<SymbolRef>,
+    /// Components this one depends on, with the number of edges.
+    pub uses: BTreeMap<String, usize>,
+    /// Components that depend on this one, with the number of edges.
+    pub used_by: BTreeMap<String, usize>,
+    pub externals: Vec<String>,
+    pub events_published: Vec<String>,
+    pub events_consumed: Vec<String>,
+}
+
+/// Code dependencies from one component to another.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ComponentLink {
+    pub from: String,
+    pub to: String,
+    /// Edges in all.
+    pub count: usize,
+    /// Edges per kind: imports, calls, references-type, …
+    pub kinds: BTreeMap<String, usize>,
+}
+
+/// An event and the components on each side of it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct EventLink {
+    pub name: String,
+    pub publishers: Vec<String>,
+    pub consumers: Vec<String>,
+}
+
+/// The JSON Schema of [`Overview`], as `onus schema` writes it. It lives
+/// here because onus-core cannot name onus-index's types.
+pub fn overview_schema() -> (&'static str, String) {
+    let mut json =
+        serde_json::to_string_pretty(&schemars::schema_for!(Overview)).expect("schemas serialize");
+    json.push('\n');
+    ("map-overview.schema.json", json)
+}
+
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct FileInfo {
@@ -1349,6 +1571,9 @@ pub enum Query {
         #[serde(default)]
         target: String,
     },
+    /// Every component with its owners, labels, what it uses and what uses
+    /// it; the links, events, contracts and rules.
+    Overview,
 }
 
 fn one() -> u32 {
@@ -1407,6 +1632,7 @@ impl MapIndex {
                 limit,
             } => json(serde_json::to_value(self.impact(target, *change, *limit)?)),
             Query::Invariants { target } => json(serde_json::to_value(self.invariants(target)?)),
+            Query::Overview => json(serde_json::to_value(self.overview())),
         }
     }
 }

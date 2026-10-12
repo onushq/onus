@@ -390,3 +390,177 @@ fn one_run_writes_both_formats() {
         .unwrap();
     assert_eq!(md, String::from_utf8(alone.stdout).unwrap());
 }
+
+/// A git repository holding the shop fixture, committed once.
+fn shop_repo() -> tempfile::TempDir {
+    let repo = tempfile::tempdir().unwrap();
+    git(repo.path(), &["init", "-q", "-b", "main"]);
+    copy_dir(&fixture().join("base"), repo.path());
+    git(repo.path(), &["add", "-A"]);
+    git(repo.path(), &["commit", "-q", "-m", "base"]);
+    repo
+}
+
+/// `onus map --json` of the shop fixture, written to a file in `dir`.
+fn shop_map_file(dir: &Path) -> std::path::PathBuf {
+    let out = onus()
+        .args(["map", "--json"])
+        .arg(fixture().join("base"))
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let path = dir.join("m.json");
+    std::fs::write(&path, &out.stdout).unwrap();
+    path
+}
+
+fn json_of(out: &std::process::Output) -> serde_json::Value {
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    serde_json::from_slice(&out.stdout).unwrap()
+}
+
+#[test]
+fn query_answers_from_a_map_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let map = shop_map_file(dir.path());
+    let from_file = json_of(
+        &onus()
+            .args(["query", "--map"])
+            .arg(&map)
+            .args(["dependents", "money"])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(from_file["map"]["source"], "file");
+    assert!(from_file["map"]["onus"].is_string());
+    let repo = shop_repo();
+    let from_worktree = json_of(
+        &onus()
+            .args(["query", "--no-server", "--repo"])
+            .arg(repo.path())
+            .args(["dependents", "money"])
+            .output()
+            .unwrap(),
+    );
+    assert!(from_file["result"]["total"].as_u64().unwrap() > 0);
+    assert_eq!(from_file["result"], from_worktree["result"]);
+
+    // `-` reads the map from stdin.
+    let mut child = onus()
+        .args(["query", "--map", "-", "overview"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        use std::io::Write as _;
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(&std::fs::read(&map).unwrap()).unwrap();
+    }
+    let overview = json_of(&child.wait_with_output().unwrap());
+    let prefs = overview["result"]["components"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == "user-preferences")
+        .unwrap();
+    assert_eq!(prefs["owners"], serde_json::json!(["@team-growth"]));
+    assert_eq!(prefs["labels"], serde_json::json!(["pii"]));
+    assert!(prefs["usedBy"]["notifications"].as_u64().unwrap() > 0);
+}
+
+#[test]
+fn query_map_refuses_other_schema_versions() {
+    let dir = tempfile::tempdir().unwrap();
+    let map = shop_map_file(dir.path());
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&map).unwrap()).unwrap();
+    value["schemaVersion"] = serde_json::json!(99);
+    std::fs::write(&map, serde_json::to_vec(&value).unwrap()).unwrap();
+    let out = onus()
+        .args(["query", "--map"])
+        .arg(&map)
+        .arg("status")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("schema 99"), "{err}");
+}
+
+#[test]
+fn query_map_check_needs_a_worktree() {
+    let dir = tempfile::tempdir().unwrap();
+    let map = shop_map_file(dir.path());
+    for question in ["check", "stats"] {
+        let out = onus()
+            .args(["query", "--map"])
+            .arg(&map)
+            .arg(question)
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(1), "{question}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("need a worktree"), "{err}");
+    }
+    // A map file has no server to leave out.
+    let out = onus()
+        .args(["query", "--no-server", "--map"])
+        .arg(&map)
+        .arg("status")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+}
+
+#[test]
+fn report_writes_the_head_map() {
+    let repo = shop_repo();
+    apply_overlay(&fixture().join("scenarios/s1-sms-alerts"), repo.path());
+    git(repo.path(), &["add", "-A"]);
+    git(repo.path(), &["commit", "-q", "-m", "sms alerts"]);
+    let head = String::from_utf8(
+        Command::new("git")
+            .arg("-C")
+            .arg(repo.path())
+            .args(["rev-parse", "main"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_string();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("h.json");
+    let out = onus()
+        .args(["report", "--base", "main~1", "--head", "main", "--repo"])
+        .arg(repo.path())
+        .arg("--head-map-out")
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let map: onus_core::CodebaseMap =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(map.commit, head);
+    let status = json_of(
+        &onus()
+            .args(["query", "--map"])
+            .arg(&path)
+            .arg("status")
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(status["result"]["commit"], head.as_str());
+    assert_eq!(status["map"]["commit"], head.as_str());
+}

@@ -7,7 +7,7 @@ use std::path::{Component as PathPart, Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, anyhow, bail};
-use onus_core::{EdgeKind, Lane, ids};
+use onus_core::Lane;
 use onus_index::Query;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -228,72 +228,16 @@ fn map_query(state: &State, body: Value) -> Answer {
         .map_err(|e| Error::Failed(anyhow!(e)))
 }
 
-/// Components and how they depend on each other, for drawing.
+/// Components and how they depend on each other, for drawing: the
+/// binary's overview (`onus query overview`), in the shape the page reads.
 fn map_graph(state: &State) -> Answer {
     let session = state.server.session(&state.root)?;
     let (index, _) = session.index()?;
-    let map = index.map();
-    let mut files: BTreeMap<&str, (u32, u32)> = BTreeMap::new();
-    for f in &map.files {
-        if let Some(c) = &f.component_id {
-            let e = files.entry(c.as_str()).or_default();
-            e.0 += 1;
-            e.1 += f.lines;
-        }
-    }
-    let mut public: BTreeMap<&str, u32> = BTreeMap::new();
-    for s in &map.symbols {
-        if s.visibility == onus_core::Visibility::Public
-            && let Some(c) = ids::component_of(&s.id)
-        {
-            *public.entry(c).or_default() += 1;
-        }
-    }
-    // Code dependencies between components, by kind.
-    let mut deps: BTreeMap<(String, String), BTreeMap<&str, u32>> = BTreeMap::new();
-    let mut publishes: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    let mut consumes: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    let mut externals: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for e in &map.edges {
-        let Some(from) = ids::component_of(&e.from) else {
-            continue;
-        };
-        match e.kind {
-            EdgeKind::Publishes => {
-                publishes
-                    .entry(ids::name_of(&e.to).to_string())
-                    .or_default()
-                    .insert(from.to_string());
-            }
-            EdgeKind::Consumes => {
-                consumes
-                    .entry(ids::name_of(&e.to).to_string())
-                    .or_default()
-                    .insert(from.to_string());
-            }
-            EdgeKind::CallsExternal => {
-                externals
-                    .entry(from.to_string())
-                    .or_default()
-                    .insert(e.to.clone());
-            }
-            k if k.is_code_dependency() => {
-                if let Some(to) = ids::component_of(&e.to).filter(|t| *t != from) {
-                    *deps
-                        .entry((from.to_string(), to.to_string()))
-                        .or_default()
-                        .entry(k.as_str())
-                        .or_default() += 1;
-                }
-            }
-            _ => {}
-        }
-    }
-    let components: Vec<Value> = map
+    let overview = index.overview();
+    let components: Vec<Value> = overview
         .components
         .iter()
         .map(|c| {
-            let (n, lines) = files.get(c.id.as_str()).copied().unwrap_or((0, 0));
             json!({
                 "id": c.id,
                 "kind": c.kind,
@@ -301,40 +245,20 @@ fn map_graph(state: &State) -> Answer {
                 "owners": c.owners,
                 "labels": c.labels,
                 "packageName": c.package_name,
-                "files": n,
-                "lines": lines,
-                "publicSymbols": public.get(c.id.as_str()).copied().unwrap_or(0),
-                "externals": externals.get(&c.id).cloned().unwrap_or_default(),
+                "files": c.files,
+                "lines": c.lines,
+                "publicSymbols": c.public_symbols,
+                "externals": c.externals,
             })
         })
         .collect();
-    let edges: Vec<Value> = deps
-        .into_iter()
-        .map(|((from, to), kinds)| {
-            json!({ "from": from, "to": to, "count": kinds.values().sum::<u32>(), "kinds": kinds })
-        })
-        .collect();
-    let mut events = Vec::new();
-    let names: BTreeSet<&String> = publishes.keys().chain(consumes.keys()).collect();
-    for name in names {
-        events.push(json!({
-            "name": name,
-            "publishers": publishes.get(name).cloned().unwrap_or_default(),
-            "consumers": consumes.get(name).cloned().unwrap_or_default(),
-        }));
-    }
-    let rules: Vec<Value> = map
-        .rules
-        .iter()
-        .map(|r| serde_json::to_value(r).unwrap_or(Value::Null))
-        .collect();
     Ok(json!({
         "components": components,
-        "edges": edges,
-        "events": events,
-        "externals": map.externals,
-        "rules": rules,
-        "diagnostics": map.diagnostics,
+        "edges": overview.links,
+        "events": overview.events,
+        "externals": overview.externals,
+        "rules": overview.rules,
+        "diagnostics": index.map().diagnostics,
     }))
 }
 

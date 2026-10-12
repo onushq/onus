@@ -556,6 +556,41 @@ pub fn read_intent(path: &Path) -> Result<Option<Intent>> {
 }
 
 /// Whether any `--fail-on` condition is met.
+/// An index over a map JSON file (`onus map --json`, `onus report
+/// --head-map-out`, or a map downloaded from Onus Cloud); `-` reads stdin.
+/// A map of another schema version is refused.
+pub fn index_from_map_file(path: &Path) -> Result<onus_index::MapIndex> {
+    let bytes = if path == Path::new("-") {
+        let mut buf = Vec::new();
+        std::io::Read::read_to_end(&mut std::io::stdin(), &mut buf)
+            .context("cannot read the map from stdin")?;
+        buf
+    } else {
+        std::fs::read(path).with_context(|| format!("cannot read {}", path.display()))?
+    };
+    index_from_map_json(&bytes).with_context(|| format!("{} is not a usable map", path.display()))
+}
+
+/// An index over a map's JSON; see [`index_from_map_file`].
+pub fn index_from_map_json(bytes: &[u8]) -> Result<onus_index::MapIndex> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).context("not JSON")?;
+    // The version first, so a newer map is named as such rather than failing to parse.
+    let version = value.get("schemaVersion").and_then(|v| v.as_u64());
+    if version != Some(u64::from(onus_core::map::SCHEMA_VERSION)) {
+        let onus = value
+            .pointer("/builtWith/onus")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let n = version.map_or("none".to_string(), |v| v.to_string());
+        bail!(
+            "this map was built by onus {onus} (schema {n}); this onus reads schema {}",
+            onus_core::map::SCHEMA_VERSION
+        );
+    }
+    let map: CodebaseMap = serde_json::from_value(value).context("not a codebase map")?;
+    Ok(onus_index::MapIndex::new(map))
+}
+
 pub fn should_fail(report: &SemanticReport, fail_on: &[FailOn]) -> bool {
     fail_on.iter().any(|f| match f {
         FailOn::RuleViolation => report.summary.new_rule_violations > 0,

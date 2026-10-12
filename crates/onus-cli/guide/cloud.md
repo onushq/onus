@@ -51,6 +51,24 @@ Onus Cloud keeps it for the run's commit and, when that is the pull request's he
     onus cloud pulls --repo acme/shop --lane judge
     onus cloud pull acme/shop#42                            # its lane, analyses and evidence
 
+## The map Onus Cloud keeps
+
+Onus Cloud keeps the map of every default-branch commit it maps (after each push to the default branch) and of the newest head of each pull request it analyses. A newer head of a pull request replaces the older one; a closed pull request keeps its last. Every map is the binary's own output, kept byte for byte, and so is its overview (`onus query overview`).
+
+    GET /v1/orgs/<org>/repos/<owner/name>/map                        # the newest default-branch map
+    GET /v1/orgs/<org>/repos/<owner/name>/map?commit=<40-hex sha>    # the map of that commit
+    GET /v1/orgs/<org>/repos/<owner/name>/map/overview[?commit=…]    # its overview
+    GET /v1/orgs/<org>/repos/<owner/name>/maps                       # the maps kept, newest first
+
+The `x-onus-map-commit` header names the commit of the map sent. A commit Onus Cloud never mapped answers 404 `no_map`: ask a worktree at that commit with `onus query` instead. The web app's map explorer shows the overview: components, owners, labels, what each uses and what uses it.
+
+A downloaded map answers every question `onus query` does, with no worktree:
+
+    curl -s -H "authorization: Bearer $ONUS_API_KEY" \
+      "https://api.onushq.com/v1/orgs/acme/repos/acme%2Fshop/map?commit=$SHA" > map.json
+    onus query --map map.json dependents UserPreferences --depth 2
+    onus query --map map.json impact UserPreferences --change remove
+
 ## For agents
 
 When the CLI is signed in (or `ONUS_API_KEY` is set), `onus mcp` adds tools for Onus Cloud:

@@ -72,3 +72,7 @@ Code in the changed files that Onus could not resolve statically: dynamic import
 - `intentCheck`, `ruleViolations`, `structure`, `textStats` and `mapDiagnostics`.
 
 Output is deterministic: the same two trees always give byte-identical Markdown and JSON, with no timestamps or absolute paths.
+
+## The head's map
+
+`onus report --head-map-out <file>` also writes the head ref's map (schemas/codebase-map.schema.json), built with the same onus.yaml as the report. It is the map every row was computed against, so the two always agree. Ask it questions with `onus query --map <file>`, such as what depends on a contract a row names. Onus Cloud keeps this map for the newest head of each pull request it analyses (`onus help cloud`).

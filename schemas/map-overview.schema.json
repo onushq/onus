@@ -1,0 +1,446 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Overview",
+  "description": "The whole map at component level (`onus query overview`,\nschemas/map-overview.schema.json): what `onus ui` draws and what Onus\nCloud shows for a kept map.",
+  "type": "object",
+  "properties": {
+    "commit": {
+      "description": "The commit the map was built from.",
+      "type": "string"
+    },
+    "components": {
+      "description": "Every component, in map order.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ComponentSummary"
+      }
+    },
+    "contracts": {
+      "description": "Every declared invariant, by symbol.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/DeclaredInvariants"
+      }
+    },
+    "diagnostics": {
+      "description": "How many things the map could not resolve.",
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0
+    },
+    "events": {
+      "description": "Events with the components that publish and consume them, by name.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/EventLink"
+      }
+    },
+    "externals": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ExternalService"
+      }
+    },
+    "links": {
+      "description": "Code dependencies between components, sorted by (from, to).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ComponentLink"
+      }
+    },
+    "onus": {
+      "description": "The onus version that built the map.",
+      "type": "string"
+    },
+    "rules": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/BoundaryRule"
+      }
+    }
+  },
+  "required": [
+    "commit",
+    "onus",
+    "components",
+    "links",
+    "events",
+    "externals",
+    "contracts",
+    "rules",
+    "diagnostics"
+  ],
+  "$defs": {
+    "BoundaryRule": {
+      "type": "object",
+      "properties": {
+        "confidence": {
+          "$ref": "#/$defs/Confidence"
+        },
+        "deny": {
+          "$ref": "#/$defs/RuleEndpoints"
+        },
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "deny",
+        "confidence"
+      ]
+    },
+    "ComponentLink": {
+      "description": "Code dependencies from one component to another.",
+      "type": "object",
+      "properties": {
+        "count": {
+          "description": "Edges in all.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "from": {
+          "type": "string"
+        },
+        "kinds": {
+          "description": "Edges per kind: imports, calls, references-type, …",
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          }
+        },
+        "to": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "from",
+        "to",
+        "count",
+        "kinds"
+      ]
+    },
+    "ComponentSummary": {
+      "description": "A component in an [`Overview`]: the same counts as [`ComponentInfo`],\nplus its lines.",
+      "type": "object",
+      "properties": {
+        "eventsConsumed": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "eventsPublished": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "externals": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "files": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "labels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "lines": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "owners": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "packageName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "public": {
+          "description": "The first public symbols, by id.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SymbolRef"
+          }
+        },
+        "publicSymbols": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "roots": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "usedBy": {
+          "description": "Components that depend on this one, with the number of edges.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          }
+        },
+        "uses": {
+          "description": "Components this one depends on, with the number of edges.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          }
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "roots",
+        "owners",
+        "labels",
+        "files",
+        "lines",
+        "publicSymbols",
+        "public",
+        "uses",
+        "usedBy",
+        "externals",
+        "eventsPublished",
+        "eventsConsumed"
+      ]
+    },
+    "Confidence": {
+      "description": "How a fact in the map is known.\n\nOrdered from most to least trustworthy, so `max()` over a set of facts\ngives the weakest one.",
+      "oneOf": [
+        {
+          "description": "Written down by a person in `onus.yaml`.",
+          "type": "string",
+          "const": "declared"
+        },
+        {
+          "description": "Confirmed by the language's own compiler, indexer or language server.",
+          "type": "string",
+          "const": "compiler"
+        },
+        {
+          "description": "Read directly from the syntax.",
+          "type": "string",
+          "const": "static"
+        },
+        {
+          "description": "Observed at runtime (later phases).",
+          "type": "string",
+          "const": "traced"
+        },
+        {
+          "description": "Guessed from conventions or heuristics.",
+          "type": "string",
+          "const": "inferred"
+        },
+        {
+          "description": "Onus could not resolve it; treat as higher risk.",
+          "type": "string",
+          "const": "low"
+        }
+      ]
+    },
+    "DeclaredInvariants": {
+      "type": "object",
+      "properties": {
+        "invariants": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "symbol": {
+          "$ref": "#/$defs/SymbolRef"
+        }
+      },
+      "required": [
+        "symbol",
+        "invariants"
+      ]
+    },
+    "EventLink": {
+      "description": "An event and the components on each side of it.",
+      "type": "object",
+      "properties": {
+        "consumers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "name": {
+          "type": "string"
+        },
+        "publishers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "name",
+        "publishers",
+        "consumers"
+      ]
+    },
+    "ExternalService": {
+      "type": "object",
+      "properties": {
+        "category": {
+          "description": "`sms`, `email`, `payments`, `http`, …",
+          "type": "string"
+        },
+        "confidence": {
+          "$ref": "#/$defs/Confidence"
+        },
+        "egress": {
+          "description": "Kinds of data that leave the system through this service.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "hosts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "id": {
+          "description": "`external:<slug>`.",
+          "type": "string"
+        },
+        "packages": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "source": {
+          "$ref": "#/$defs/ExternalSource"
+        },
+        "vendor": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "vendor",
+        "category",
+        "egress",
+        "packages",
+        "hosts",
+        "source",
+        "confidence"
+      ]
+    },
+    "ExternalSource": {
+      "oneOf": [
+        {
+          "description": "From Onus's built-in registry of SDKs.",
+          "type": "string",
+          "const": "built-in"
+        },
+        {
+          "description": "From `extractors.externals` in `onus.yaml`.",
+          "type": "string",
+          "const": "declared"
+        },
+        {
+          "description": "Seen as a literal host in a `fetch`/`axios`/`got` call.",
+          "type": "string",
+          "const": "observed"
+        }
+      ]
+    },
+    "RuleEndpoints": {
+      "type": "object",
+      "properties": {
+        "from": {
+          "description": "A component id.",
+          "type": "string"
+        },
+        "to": {
+          "description": "A component id, or `<component>.internal` for its internal symbols.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "from",
+        "to"
+      ]
+    },
+    "SymbolRef": {
+      "type": "object",
+      "properties": {
+        "component": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "file": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "line": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "name": {
+          "type": "string"
+        },
+        "public": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "kind",
+        "public"
+      ]
+    }
+  }
+}

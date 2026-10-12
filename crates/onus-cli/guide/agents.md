@@ -83,6 +83,7 @@ The same questions work from a shell, with the same answers:
     onus query tests-for services/billing/src/payments.ts
     onus query impact UserPreferences --change add-required-member
     onus query invariants
+    onus query overview
     onus query check --base main
 
 ## Many agents, many worktrees
