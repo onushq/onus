@@ -120,7 +120,7 @@ Each outcome is kept against an agent setup. Onus reads it from what git and Git
 ### Notes
 
 - Pull requests from forks get a read-only token on `pull_request` events, so they are classified but not recorded.
-- Concurrent runs merge their records by taking every line from both sides, and retry the push when another run pushed first.
+- Concurrent runs merge their records by taking every line from both sides, each as many times as the side that holds it most, and retry the push when another run pushed first. So a line one run wrote twice is kept twice, and a line two runs each wrote once is kept once.
 - The `onus ci` commands the action runs work in any CI system: `onus ci pr`, `onus ci closed`, `onus ci comment`, `onus ci push` and `onus ci records pull|push` (see `onus help commands` and `onus ci --help`).
 
 ## Caching the base map

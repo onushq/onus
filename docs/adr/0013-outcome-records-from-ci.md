@@ -9,7 +9,7 @@ Lanes earn trust from track records: an agent setup may auto-merge only after en
 ## Decision
 
 1. **CI records outcomes.** `onus ci pr` classifies each pull request and appends what it knew to `pulls.jsonl`; `onus ci closed` turns the latest of those into an outcome when the pull request closes; `onus ci push` records reverts on the default branch. The GitHub Action runs them with `records: true`.
-2. **The records live on a branch of the repository**, `onus/records`, as append-only JSON Lines files. No service, database or token beyond the workflow's own. Concurrent runs merge by taking every line from both sides and retry the push.
+2. **The records live on a branch of the repository**, `onus/records`, as append-only JSON Lines files. No service, database or token beyond the workflow's own. Concurrent runs merge by taking every line from both sides, each as many times as the side that holds it most, and retry the push. A line one run wrote twice is kept twice. A line two runs each wrote once is the same record, change and second included, and is kept once.
 3. **People add what CI cannot see with `/onus` comments**: `approve <row>`, `audit ok|miss`, `incident <note> involved: …`. Only owners, members and collaborators may record; the comment's author is kept with the record.
 4. **The agent setup is read from git and GitHub**, in a fixed order: an `Onus-Agent:` trailer, a branch prefix, a bot author, a `Co-authored-by` trailer, else the person. No model is asked.
 5. An incident counts against its agent setup even after the change is reverted.

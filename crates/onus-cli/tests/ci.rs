@@ -174,7 +174,9 @@ fn a_pull_request_is_recorded_from_open_to_revert() {
         serde_json::Value::Null
     );
 
-    // The next run shows the approval and no longer offers that row.
+    // The next run shows the approval and no longer offers that row. It
+    // runs in the same second as the approval, so it writes the same line.
+    let approved_at = pulls.last().unwrap()["at"].to_string();
     onus(
         &r,
         &[
@@ -188,12 +190,18 @@ fn a_pull_request_is_recorded_from_open_to_revert() {
             change,
             "--branch",
             "codex/sms",
+            "--at",
+            &approved_at,
             "--records",
             rs,
             "--out",
             out.to_str().unwrap(),
         ],
     );
+    let pulls = std::fs::read_to_string(rec.join("pulls.jsonl")).unwrap();
+    let pulls: Vec<&str> = pulls.lines().collect();
+    assert_eq!(pulls.len(), 3);
+    assert_eq!(pulls[1], pulls[2]);
     let md = std::fs::read_to_string(out.join("lane.md")).unwrap();
     assert!(
         md.contains("**Approved:**") && !md.contains("/onus approve new-external-service"),
@@ -228,7 +236,13 @@ fn a_pull_request_is_recorded_from_open_to_revert() {
         &other,
         &["ci", "records", "pull", "--dir", rec2.to_str().unwrap()],
     );
+    // Every record arrives, the approval and the run it triggered too,
+    // though they are the same line.
     assert_eq!(lines(&rec2.join("pulls.jsonl")).len(), 3);
+    assert_eq!(
+        std::fs::read_to_string(rec2.join("pulls.jsonl")).unwrap(),
+        std::fs::read_to_string(rec.join("pulls.jsonl")).unwrap()
+    );
 
     // Merged: the last record becomes an outcome, once.
     git(&r, &["checkout", "-q", "main"]);

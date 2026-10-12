@@ -2,7 +2,8 @@
 //! itself (`onus/records` by default), so every workflow run, every
 //! machine and `onus ui` read the same history, and nothing outside the
 //! repository is needed. The files only grow by whole lines, so concurrent
-//! runs merge by taking every line from both sides.
+//! runs merge by taking every line from both sides, keeping each line as
+//! many times as the side that holds it most.
 
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -74,14 +75,29 @@ fn read_at(repo: &Path, commit: Option<&str>, file: &str) -> String {
         .unwrap_or_default()
 }
 
-/// Every line of `ours` and of `theirs`, `theirs` first, each once.
+/// Every line of `theirs`, then the lines of `ours` that `theirs` does not
+/// already hold. Lines are counted, not just compared: one run can write
+/// the same line twice in a second (an approval and the run it triggers),
+/// and both are kept. A line of `ours` matches one copy in `theirs`, so
+/// lines both sides pulled from the branch are not doubled, and two runs
+/// that each wrote the same line keep one copy: a record that is byte for
+/// byte the same, change, time and all, says the same thing, and counting
+/// it twice would count a re-delivered event twice.
 pub fn union(theirs: &str, ours: &str) -> String {
-    let mut seen = std::collections::HashSet::new();
+    let mut left: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     let mut out = String::new();
-    for line in theirs.lines().chain(ours.lines()) {
-        if !line.trim().is_empty() && seen.insert(line.to_string()) {
-            out.push_str(line);
-            out.push('\n');
+    for line in theirs.lines().filter(|l| !l.trim().is_empty()) {
+        *left.entry(line).or_default() += 1;
+        out.push_str(line);
+        out.push('\n');
+    }
+    for line in ours.lines().filter(|l| !l.trim().is_empty()) {
+        match left.get_mut(line) {
+            Some(n) if *n > 0 => *n -= 1,
+            _ => {
+                out.push_str(line);
+                out.push('\n');
+            }
         }
     }
     out
@@ -176,5 +192,24 @@ mod tests {
         assert_eq!(union("a\nb\n", "a\nb\nc\n"), "a\nb\nc\n");
         assert_eq!(union("a\nb\nx\n", "a\nb\nc\n"), "a\nb\nx\nc\n");
         assert_eq!(union("", ""), "");
+    }
+
+    #[test]
+    fn records_written_twice_stay_twice() {
+        // An approval and the run it triggers, in the same second.
+        assert_eq!(union("", "a\nb\nb\n"), "a\nb\nb\n");
+        assert_eq!(union("a\nb\n", "a\nb\nb\n"), "a\nb\nb\n");
+        assert_eq!(union("a\nb\nb\n", "a\nb\nb\n"), "a\nb\nb\n");
+        // Another run added a line meanwhile: both runs' lines are kept.
+        assert_eq!(union("a\nb\nx\n", "a\nb\nb\n"), "a\nb\nx\nb\n");
+    }
+
+    #[test]
+    fn the_same_record_from_two_runs_is_kept_once() {
+        // Two runs from the same tip each wrote line `x` (a re-delivered
+        // event): one copy, as before.
+        assert_eq!(union("a\nx\n", "a\nx\n"), "a\nx\n");
+        // One of them wrote it twice: the run's two copies are kept.
+        assert_eq!(union("a\nx\n", "a\nx\nx\n"), "a\nx\nx\n");
     }
 }
