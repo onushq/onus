@@ -1262,14 +1262,15 @@ pub fn request_path(state: &State, id: &str) -> anyhow::Result<PathBuf> {
     Ok(state.escalations.join(format!("{id}.json")))
 }
 
-/// Decisions on record in the audit log, by request id.
+/// Decisions on record in the audit log, by request id; the later entry wins, so a
+/// grant mirrored from Onus Cloud replaces `sent-to-onus-cloud`.
 pub fn decisions(state: &State) -> BTreeMap<String, Value> {
     let mut out = BTreeMap::new();
     let Ok(entries) = onus_doors::audit::AuditLog::new(&state.audit).verify() else {
         return out;
     };
     for e in entries {
-        if matches!(e.action.as_str(), "escalate" | "grant" | "deny") {
+        if matches!(e.action.as_str(), "escalate" | "grant" | "deny" | "answer") {
             out.insert(
                 e.subject.clone(),
                 json!({ "action": e.action, "decision": e.decision, "by": e.actor, "reason": e.reason, "at": e.at }),
@@ -1290,7 +1291,13 @@ fn escalations_list(state: &State) -> Answer {
             }
             if let Ok(req) = doors::load_request(&path) {
                 let decision = decided.get(&req.id).cloned();
-                requests.push(json!({ "request": req, "decision": decision, "file": path }));
+                // Where it was filed in Onus Cloud, if it was.
+                let cloud = std::fs::read_to_string(path.with_extension("cloud.json"))
+                    .ok()
+                    .and_then(|t| serde_json::from_str::<Value>(&t).ok());
+                requests.push(
+                    json!({ "request": req, "decision": decision, "cloud": cloud, "file": path }),
+                );
             }
         }
     }

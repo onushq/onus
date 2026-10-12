@@ -467,7 +467,11 @@ pub fn authorize(
         t if is_query(t) => Ok(()),
         "onus_lanes" | "onus_outcomes" | "onus_cloud_status" => Ok(()),
         // The token decides the hosts and secrets; the task is forced.
-        "onus_env_create" | "onus_escalate" => Ok(()),
+        "onus_env_create" | "onus_escalate" | "onus_blocked" => Ok(()),
+        // A narrower Onus Cloud token than the one this server holds: it can only narrow.
+        "onus_cloud_token" => Ok(()),
+        // Answers are filtered to the read scope, as the map tools' are.
+        "onus_cloud_map" => same_repository(args, facts),
         // Filtered to the task's environments afterwards.
         "onus_envs" | "onus_cloud_envs" => Ok(()),
         "onus_submit" => {
@@ -582,7 +586,22 @@ pub fn subject(tool: &str, args: &Value) -> String {
             str_arg(args, "base").unwrap_or_default(),
             str_arg(args, "head").unwrap_or("HEAD")
         ),
-        "onus_escalate" => strings(args, "scopes").join(" "),
+        "onus_escalate" | "onus_cloud_token" => strings(args, "scopes").join(" "),
+        "onus_blocked" => str_arg(args, "kind").unwrap_or_default().to_string(),
+        "onus_cloud_map" => {
+            let q = &args["question"];
+            let at = match (str_arg(args, "commit"), args["pull"].as_u64()) {
+                (Some(c), _) => format!(" @{c}"),
+                (None, Some(n)) => format!(" #{n}"),
+                (None, None) => String::new(),
+            };
+            let target = ["target", "id", "path", "text"]
+                .iter()
+                .find_map(|k| str_arg(q, k))
+                .map(|t| format!(" {t}"))
+                .unwrap_or_default();
+            format!("{}{target}{at}", str_arg(q, "query").unwrap_or_default())
+        }
         _ => [
             "name", "id", "run", "target", "path", "text", "ref", "image",
         ]
@@ -608,7 +627,16 @@ pub fn result_fields(tool: &str, args: &Value, subject: &str, answer: &Value) ->
         "onus_env_run" => {
             json!({ "runId": answer["id"], "exitCode": answer["manifest"]["exitCode"] })
         }
-        "onus_escalate" => json!({ "id": answer["id"] }),
+        "onus_escalate" => json!({ "id": answer["id"], "state": answer["state"] }),
+        "onus_blocked" => json!({ "id": answer["id"], "state": answer["state"] }),
+        // Never the token itself.
+        "onus_cloud_token" => json!({
+            "tokenId": answer["tokenId"], "scopes": answer["scopes"],
+            "repositories": answer["repositories"], "expiresAt": answer["expiresAt"],
+        }),
+        "onus_cloud_map" => {
+            json!({ "repository": answer["map"]["repository"], "commit": answer["map"]["commit"] })
+        }
         "onus_escalation" => json!({ "state": answer["state"], "adopted": answer["adopted"] }),
         "onus_cloud_env_create" => json!({ "name": answer["environment"]["name"] }),
         "onus_cloud_env_run" => {
@@ -1097,6 +1125,22 @@ mod tests {
         }
         assert!(check("onus_env_create", json!({ "ref": "HEAD" })).is_ok());
         assert!(check("onus_escalate", json!({ "task": "other" })).is_ok());
+        assert!(check("onus_blocked", json!({ "kind": "broken-test" })).is_ok());
+        assert!(check("onus_cloud_token", json!({ "scopes": ["pulls:read"] })).is_ok());
+        assert!(
+            check(
+                "onus_cloud_map",
+                json!({ "question": { "query": "status" } })
+            )
+            .is_ok()
+        );
+        assert!(
+            denied(
+                "onus_cloud_map",
+                json!({ "repository": "acme/other", "question": { "query": "status" } })
+            )
+            .contains("your token is for this worktree's repository `acme/shop`")
+        );
         assert!(check("onus_envs", json!({})).is_ok());
         assert!(check("onus_cloud_envs", json!({})).is_ok());
     }

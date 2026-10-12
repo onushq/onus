@@ -44,18 +44,28 @@ Handing work in (leave these out with `onus mcp --no-actions`):
 - `onus_run_test`: a test command once in a throwaway container, to reproduce a failure; nothing is recorded.
 - `onus_submit`: hands in a committed change with an intent, run ids as evidence and the ids of escalations granted during the task. Onus reports it, attaches the scope of the server's task token, classifies it, and keeps it in `.onus/submissions/` where people see it in `onus ui`. Returns the lane, every reason, and a submission id.
 - `onus_judge`: the verifying judge on a submission: evidence re-run in fresh containers, intent, contracts, tests, held-out checks. The verdict is kept beside the submission.
-- `onus_escalate`, `onus_escalation`: ask for rights the token lacks, with evidence, and check the answer. A granted request returns the new token, the old rights plus exactly what was asked, and the server uses it from then on. The granted token names its request, so it proves the grant wherever the person's decision was logged.
+- `onus_escalate`, `onus_escalation`: ask for rights the token lacks, with evidence, and check the answer (`wait` waits up to 50 seconds for it). A granted request returns the new token, the old rights plus exactly what was asked, and the server uses it from then on. The granted token names its request, so it proves the grant wherever the person's decision was logged. Where a request goes is in `onus help scopes`.
+- `onus_blocked`: the safe exit. A test the agent did not write fails and cannot be fixed in scope, the spec contradicts itself or the code, or the task cannot be done as asked: the agent reports it with evidence (`kind` `broken-test`, `contradictory-spec` or `impossible-task`) and stops. It is filed like an escalation that asks for no rights, routed to the owners of the code involved, and listed even when the CLI is signed out. A person answers it; the agent reads the answer with `onus_escalation` (state `answered`).
 - `onus_outcomes`: track records and the held-out backlog, read-only.
 
-Onus Cloud (listed only when the CLI is signed in with `onus login`, or `ONUS_API_KEY` is set; see `onus help cloud`):
+Onus Cloud (listed only when the CLI is signed in with `onus login`, `ONUS_CLOUD_TOKEN` or `ONUS_API_KEY`; see `onus help cloud`):
 
 - `onus_cloud_env_create`, `onus_cloud_env_run`, `onus_cloud_envs`, `onus_cloud_env_destroy`: environments built and run on Onus Cloud's machines from a pushed commit, each run recorded by Onus Cloud.
 - `onus_cloud_attach_evidence`: a recorded run to a pull request, for the judge.
 - `onus_cloud_status`, `onus_cloud_pulls`, `onus_cloud_pull`: who the CLI is and what its plan allows; governed pull requests, their lanes and evidence.
+- `onus_cloud_map`: the map tools' questions (`{"query": "dependents", "target": …}`) asked of the map Onus Cloud keeps at a commit or a pull request's head, answered here and filtered to the token's read scope.
+- `onus_cloud_token`: a narrower Onus Cloud token for a sub-agent: only the scopes and repositories named, never more than the server's, ending within 24 hours.
+
+A server signed in with a login never sends the login with an agent's call: it mints a scoped token for the worktree's repository on first use and uses that. The flags:
+
+- `--key <file>`: the root private key, held by the server and never shown to the agent. With it, grants decided by policy, or by a person in Onus Cloud, are minted by the server. Needs `--token`.
+- `--cloud-token <token>` (`ONUS_CLOUD_TOKEN`): a scoped Onus Cloud token to use as it is.
+- `--cloud-repo <owner/name>` (`ONUS_CLOUD_REPO`): the repository in Onus Cloud, when the worktree's remote is not GitHub.
+- `--cloud-ttl <duration>`: how long the token minted from a login lasts (default `8h`, at most `24h`).
 
 The order an agent should follow is in the server's instructions: commit, run the tests with `onus_env_create` and `onus_env_run`, `onus_submit` with an intent and those runs, then `onus_judge`.
 
-What agents cannot do through MCP: record outcomes, grant or deny escalations, mint or widen tokens, or choose the scope a submission is checked against. With `--token`, submissions, environments (their hosts and secrets) and escalations use the server's task token, whatever the agent asks for.
+What agents cannot do through MCP: record outcomes, grant or deny escalations, mint or widen task tokens, widen an Onus Cloud token, or choose the scope a submission is checked against. With `--token`, submissions, environments (their hosts and secrets) and escalations use the server's task token, whatever the agent asks for.
 
 Every call is checked at the door and logged. With `--token`, each tool first checks the token: its signature when the server starts, its expiry on every call, then the tool's own rule. A refused call says which right is missing and how to ask for it:
 

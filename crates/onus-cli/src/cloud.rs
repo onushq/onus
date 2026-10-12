@@ -3,13 +3,16 @@
 //! `onus login` signs the CLI in as a person: it asks Onus Cloud for a code, the person
 //! approves it in the browser (the device authorization grant, RFC 8628), and the CLI
 //! keeps the token it is given in `~/.config/onus/cloud.json`. In CI, an organisation's
-//! API key in `ONUS_API_KEY` stands in for a login. Either way [`Client`] calls the API:
-//! hosted environments Onus Cloud builds and records, pull requests and their lanes, and
-//! evidence attached to them.
+//! API key in `ONUS_API_KEY` stands in for a login. A scoped token in `ONUS_CLOUD_TOKEN`
+//! (`onus cloud token create`) stands in for both, and opens only the doors it names.
+//! Either way [`Client`] calls the API: hosted environments Onus Cloud builds and
+//! records, pull requests and their lanes, evidence attached to them, escalations and
+//! the maps Onus Cloud keeps.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -18,6 +21,24 @@ use serde_json::{Value, json};
 
 /// The hosted API, unless `--url` or `ONUS_CLOUD_URL` names another.
 pub const DEFAULT_URL: &str = "https://api.onushq.com";
+
+/// What a scoped Onus Cloud token can open (C2's `TOKEN_SCOPES`, same order).
+/// `env:run` implies `env:read` on the server.
+pub const CLOUD_SCOPES: &[&str] = &[
+    "env:read",
+    "env:run",
+    "evidence:write",
+    "pulls:read",
+    "map:read",
+    "escalation:write",
+];
+
+/// The scopes `onus mcp` mints for an agent from a login: all of them, for one
+/// organisation and one repository, for hours.
+pub const AGENT_SCOPES: &[&str] = CLOUD_SCOPES;
+
+/// How long a scoped token may last: 60 seconds to 24 hours.
+pub const TOKEN_TTL: std::ops::RangeInclusive<u64> = 60..=86_400;
 
 /// What `onus login` keeps: where, as whom, and the organisation commands act in.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -112,13 +133,23 @@ pub fn forget_credentials_at(path: &Path) -> Result<bool> {
 #[derive(Debug)]
 pub struct ApiError {
     pub status: u16,
-    pub code: String,
+    /// The body's `error`, such as `insufficient_scope` or `no_map`.
+    pub code: Option<String>,
+    /// For `insufficient_scope`: the scope the route needs.
+    pub scope: Option<String>,
     pub message: String,
+    /// How the caller signed in ([`Client::via`]).
+    pub via: &'static str,
 }
 
 impl std::fmt::Display for ApiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.status {
+            401 if self.via == "token" => write!(
+                f,
+                "{} (the token ended or was revoked: ask for a new one)",
+                self.message
+            ),
             401 => write!(
                 f,
                 "{} (run `onus login`, or set ONUS_API_KEY in CI)",
@@ -129,9 +160,23 @@ impl std::fmt::Display for ApiError {
                 "{} (see your plan in the Onus Cloud billing settings)",
                 self.message
             ),
+            403 if self.code.as_deref() == Some("insufficient_scope") => write!(
+                f,
+                "{} (mint one with `onus cloud token create --scope {}`, or ask with onus_escalate)",
+                self.message,
+                self.scope.as_deref().unwrap_or("<scope>")
+            ),
+            // Denials teach as they are.
+            403 => write!(f, "{}", self.message),
             _ => write!(f, "{} ({})", self.message, self.status),
         }
     }
+}
+
+/// Whether `e` is an answer of the API with this status.
+pub fn is_status(e: &anyhow::Error, status: u16) -> bool {
+    e.downcast_ref::<ApiError>()
+        .is_some_and(|a| a.status == status)
 }
 
 impl std::error::Error for ApiError {}
@@ -150,12 +195,14 @@ pub fn segment(s: &str) -> String {
 }
 
 /// A caller of the Onus Cloud API.
+#[derive(Clone)]
 pub struct Client {
     pub url: String,
     token: Option<String>,
     /// The organisation (slug or id) commands act in, when known.
     pub org: Option<String>,
-    /// How the client signed in: `login` (a person, from `onus login`) or `api-key`.
+    /// How the client signed in: `login` (a person, from `onus login`), `api-key`, or
+    /// `token` (a scoped token, from `ONUS_CLOUD_TOKEN` or minted by `onus mcp`).
     pub via: &'static str,
     agent: ureq::Agent,
 }
@@ -183,6 +230,13 @@ fn env_var(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.trim().is_empty())
 }
 
+/// Seconds since the Unix epoch.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
 impl Client {
     /// A client that is not signed in, for `onus login`.
     pub fn anonymous(url: &str) -> Client {
@@ -195,25 +249,44 @@ impl Client {
         }
     }
 
-    /// How this process is signed in: `ONUS_API_KEY` (CI), else `onus login`'s
-    /// credentials; none when neither. `ONUS_CLOUD_URL` and `ONUS_CLOUD_ORG` override
-    /// where and in which organisation.
+    /// How this process is signed in: `ONUS_CLOUD_TOKEN` (a scoped token), else
+    /// `ONUS_API_KEY` (CI), else `onus login`'s credentials; none when there is none.
+    /// `ONUS_CLOUD_URL` and `ONUS_CLOUD_ORG` override where and in which organisation.
     pub fn discover() -> Result<Option<Client>> {
-        let url = env_var("ONUS_CLOUD_URL");
-        let org = env_var("ONUS_CLOUD_ORG");
-        if let Some(key) = env_var("ONUS_API_KEY") {
-            return Ok(Some(Client {
-                url: url
-                    .unwrap_or_else(|| DEFAULT_URL.into())
-                    .trim_end_matches('/')
-                    .into(),
-                token: Some(key),
-                org,
-                via: "api-key",
-                agent: agent(),
-            }));
+        Client::discover_from(&|k| std::env::var(k).ok(), &load_credentials)
+    }
+
+    /// [`Client::discover`] over a given environment and credentials loader. With a
+    /// token, the loader is never called: the token and nothing else.
+    pub fn discover_from(
+        env: &dyn Fn(&str) -> Option<String>,
+        load: &dyn Fn() -> Result<Option<Credentials>>,
+    ) -> Result<Option<Client>> {
+        let get = |k: &str| {
+            env(k)
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        };
+        let url = get("ONUS_CLOUD_URL");
+        let org = get("ONUS_CLOUD_ORG");
+        let with = |token: String, via: &'static str| Client {
+            url: url
+                .clone()
+                .unwrap_or_else(|| DEFAULT_URL.into())
+                .trim_end_matches('/')
+                .into(),
+            token: Some(token),
+            org: org.clone(),
+            via,
+            agent: agent(),
+        };
+        if let Some(t) = get("ONUS_CLOUD_TOKEN") {
+            return Ok(Some(with(t, "token")));
         }
-        let Some(c) = load_credentials()? else {
+        if let Some(key) = get("ONUS_API_KEY") {
+            return Ok(Some(with(key, "api-key")));
+        }
+        let Some(c) = load()? else {
             return Ok(None);
         };
         Ok(Some(Client {
@@ -225,11 +298,43 @@ impl Client {
         }))
     }
 
+    /// The same API and organisation, signed in with another token.
+    pub fn with_token(&self, token: String, via: &'static str) -> Client {
+        Client {
+            token: Some(token),
+            via,
+            ..self.clone()
+        }
+    }
+
     /// [`Client::discover`], or the reason there is none.
     pub fn require() -> Result<Client> {
         Client::discover()?.ok_or_else(|| {
             anyhow!("not signed in to Onus Cloud: run `onus login` (in CI, set ONUS_API_KEY)")
         })
+    }
+
+    /// The error for an answer that is not a success.
+    fn api_error(&self, status: u16, text: &str) -> anyhow::Error {
+        let body: Value = serde_json::from_str(text).unwrap_or(Value::Null);
+        let message = body["message"]
+            .as_str()
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                if text.trim().is_empty() {
+                    format!("{} answered {status}", self.url)
+                } else {
+                    text.chars().take(300).collect()
+                }
+            });
+        ApiError {
+            status,
+            code: body["error"].as_str().map(str::to_string),
+            scope: body["scope"].as_str().map(str::to_string),
+            message,
+            via: self.via,
+        }
+        .into()
     }
 
     fn answer(
@@ -251,23 +356,7 @@ impl Client {
             // JSON, or text (a run's log).
             return Ok(serde_json::from_str(&text).unwrap_or(Value::String(text)));
         }
-        let body: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
-        let message = body["message"]
-            .as_str()
-            .map(str::to_string)
-            .unwrap_or_else(|| {
-                if text.trim().is_empty() {
-                    format!("{} answered {status}", self.url)
-                } else {
-                    text.chars().take(300).collect()
-                }
-            });
-        Err(ApiError {
-            status,
-            code: body["error"].as_str().unwrap_or_default().to_string(),
-            message,
-        }
-        .into())
+        Err(self.api_error(status, &text))
     }
 
     fn authorised<B>(&self, req: ureq::RequestBuilder<B>) -> ureq::RequestBuilder<B> {
@@ -292,6 +381,28 @@ impl Client {
         self.answer(req.call())
     }
 
+    /// A GET answered with bytes (a map, up to 256 MiB): the status, the body and the
+    /// `x-onus-map-commit` header.
+    pub fn get_raw(&self, path: &str) -> Result<(u16, Vec<u8>, Option<String>)> {
+        let req = self.authorised(self.agent.get(format!("{}{path}", self.url)));
+        let mut response = req
+            .call()
+            .map_err(|e| anyhow!("cannot reach {}: {e}", self.url))?;
+        let status = response.status().as_u16();
+        let commit = response
+            .headers()
+            .get("x-onus-map-commit")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        let bytes = response
+            .body_mut()
+            .with_config()
+            .limit(256 * 1024 * 1024)
+            .read_to_vec()
+            .with_context(|| format!("cannot read the answer of {}", self.url))?;
+        Ok((status, bytes, commit))
+    }
+
     /// Who is calling, and their organisations.
     pub fn whoami(&self) -> Result<Value> {
         self.get("/v1/whoami")
@@ -303,6 +414,10 @@ impl Client {
             return Ok(o.clone());
         }
         let me = self.whoami()?;
+        // A scoped token acts in its one organisation.
+        if let Some(slug) = me["token"]["organisation"]["slug"].as_str() {
+            return Ok(slug.to_string());
+        }
         let orgs = me["organisations"].as_array().cloned().unwrap_or_default();
         match orgs.as_slice() {
             [one] => Ok(one["slug"].as_str().unwrap_or_default().to_string()),
@@ -442,6 +557,393 @@ pub fn commit_of(dir: &Path, reference: &str) -> Option<String> {
 /// Whether a remote-tracking branch has the commit (Onus Cloud can only fetch what is pushed).
 pub fn is_pushed(dir: &Path, commit: &str) -> bool {
     git(dir, &["branch", "-r", "--contains", commit]).is_some_and(|b| !b.is_empty())
+}
+
+/// This worktree's HEAD, which must be pushed: Onus Cloud reads it from GitHub.
+pub fn pushed_head(root: &Path) -> Result<String> {
+    let head = commit_of(root, "HEAD").context("this worktree has no commit")?;
+    if !is_pushed(root, &head) {
+        bail!(
+            "HEAD ({}) is not pushed, and Onus Cloud reads it from GitHub: push it first, or pass ref",
+            &head[..12.min(head.len())]
+        );
+    }
+    Ok(head)
+}
+
+/// Whether `s` is a full commit sha: 40 lowercase hex characters.
+pub fn is_sha(s: &str) -> bool {
+    s.len() == 40
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+// ---------------------------------------------------------------------------
+// Scoped tokens (C2)
+
+/// What a scoped token is for: some repositories of one organisation, some scopes,
+/// for a while. The body of `POST /v1/orgs/:org/tokens`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Narrow {
+    /// `owner/name`; `None` is every repository (from a login only).
+    pub repositories: Option<Vec<String>>,
+    pub scopes: Vec<String>,
+    pub ttl_seconds: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+/// Mints a scoped token in the client's organisation. A login or a scoped token can;
+/// an API key cannot.
+pub fn mint_token(client: &Client, n: &Narrow) -> Result<Value> {
+    if client.via == "api-key" {
+        bail!("API keys cannot mint tokens; sign in with onus login");
+    }
+    if let Some(s) = n
+        .scopes
+        .iter()
+        .find(|s| !CLOUD_SCOPES.contains(&s.as_str()))
+    {
+        bail!("`{s}` is not a scope: {}", CLOUD_SCOPES.join(", "));
+    }
+    client.post(&client.org_path("/tokens")?, &serde_json::to_value(n)?)
+}
+
+/// A token's lifetime: `90`, `90s`, `30m`, `2h` or `1d`, from 60 seconds to 24 hours.
+pub fn parse_ttl(s: &str) -> Result<u64> {
+    let t = s.trim();
+    let split = t.find(|c: char| !c.is_ascii_digit()).unwrap_or(t.len());
+    let (number, unit) = t.split_at(split);
+    let n: u64 = number
+        .parse()
+        .with_context(|| format!("`{s}` is not a duration: write 90s, 30m, 2h or 1d"))?;
+    let unit = match unit {
+        "" | "s" => 1,
+        "m" => 60,
+        "h" => 3600,
+        "d" => 86_400,
+        _ => bail!("`{s}` is not a duration: write 90s, 30m, 2h or 1d"),
+    };
+    let seconds = n.saturating_mul(unit);
+    if !TOKEN_TTL.contains(&seconds) {
+        bail!("a token lasts 60 seconds to 24 hours, not {s}");
+    }
+    Ok(seconds)
+}
+
+/// Seconds since the Unix epoch of an ISO 8601 UTC time (`2026-10-12T20:14:03.000Z`).
+pub fn parse_utc(s: &str) -> Option<u64> {
+    let s = s.trim().strip_suffix('Z')?;
+    let (date, time) = s.split_once('T')?;
+    let mut d = date.split('-').map(|p| p.parse::<i64>().ok());
+    let (y, m, day) = (d.next()??, d.next()??, d.next()??);
+    let time = time.split('.').next()?;
+    let mut t = time.split(':').map(|p| p.parse::<i64>().ok());
+    let (hh, mm, ss) = (t.next()??, t.next()??, t.next()??);
+    // Days from civil (Howard Hinnant's algorithm).
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    u64::try_from(days * 86_400 + hh * 3600 + mm * 60 + ss).ok()
+}
+
+/// What `onus mcp` uses for every Onus Cloud call. Signed in with a login, it never
+/// sends the login on: it mints a scoped token from it on first use, for one
+/// repository and the agent's scopes, keeps it in memory, and mints again 60 seconds
+/// before it ends. With a scoped token or an API key, it uses that as it is.
+pub struct CloudDoor {
+    base: Client,
+    narrow: Option<Narrow>,
+    repository: Option<String>,
+    current: Mutex<Option<(Client, u64)>>,
+}
+
+impl std::fmt::Debug for CloudDoor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CloudDoor")
+            .field("base", &self.base)
+            .field("narrow", &self.narrow)
+            .finish_non_exhaustive()
+    }
+}
+
+impl CloudDoor {
+    /// A door that narrows a login to `narrow`. Its repositories name the one the
+    /// agent works in; an empty list means it is not known, which the first call
+    /// reports.
+    pub fn new(base: Client, narrow: Narrow) -> CloudDoor {
+        let repository = narrow
+            .repositories
+            .as_ref()
+            .and_then(|r| r.first().cloned());
+        CloudDoor {
+            base,
+            narrow: Some(narrow),
+            repository,
+            current: Mutex::new(None),
+        }
+    }
+
+    /// A door that uses the client as it is (the CLI, for its own person).
+    pub fn plain(base: Client, repository: Option<String>) -> CloudDoor {
+        CloudDoor {
+            base,
+            narrow: None,
+            repository,
+            current: Mutex::new(None),
+        }
+    }
+
+    /// How the process signed in: `login`, `api-key` or `token`.
+    pub fn via(&self) -> &'static str {
+        self.base.via
+    }
+
+    /// The repository (`owner/name`) the agent works in, when known.
+    pub fn repository(&self) -> Option<String> {
+        self.repository.clone()
+    }
+
+    /// The client for the next call.
+    pub fn client(&self) -> Result<Client> {
+        let Some(n) = self.narrow.as_ref().filter(|_| self.base.via == "login") else {
+            return Ok(self.base.clone());
+        };
+        if n.repositories.as_ref().is_some_and(Vec::is_empty) {
+            bail!(
+                "this worktree has no GitHub remote, so onus mcp cannot tell which repository its Onus Cloud token is for: start it with --cloud-repo owner/name (or ONUS_CLOUD_REPO)"
+            );
+        }
+        let mut current = self
+            .current
+            .lock()
+            .map_err(|_| anyhow!("the cloud door is poisoned"))?;
+        let now = unix_now();
+        if let Some((c, ends)) = current.as_ref()
+            && *ends > now + 60
+        {
+            return Ok(c.clone());
+        }
+        let minted = mint_token(&self.base, n).context("cannot mint a scoped Onus Cloud token")?;
+        let token = minted["token"]
+            .as_str()
+            .context("Onus Cloud answered without a token")?;
+        let latest = now + n.ttl_seconds;
+        let ends = minted["expiresAt"]
+            .as_str()
+            .and_then(parse_utc)
+            .map_or(latest, |e| e.min(latest));
+        let mut c = self.base.with_token(token.to_string(), "token");
+        if let Some(slug) = minted["organisation"]["slug"].as_str() {
+            c.org = Some(slug.to_string());
+        }
+        *current = Some((c.clone(), ends));
+        Ok(c)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Escalations (C5)
+
+/// Files an escalation request in Onus Cloud: `POST /v1/orgs/:org/escalations`.
+pub fn file_escalation(c: &Client, body: &Value) -> Result<Value> {
+    c.post(&c.org_path("/escalations")?, body)
+}
+
+/// Where an escalation stands, waiting up to `wait` seconds (at most 50) while it is
+/// being checked or waiting for a person.
+pub fn escalation(c: &Client, id: &str, wait: u64) -> Result<Value> {
+    c.get(&c.org_path(&format!(
+        "/escalations/{}?wait={}",
+        segment(id),
+        wait.min(50)
+    ))?)
+}
+
+/// The organisation's escalations: those waiting for a person, or all.
+pub fn escalations(c: &Client, waiting: bool) -> Result<Value> {
+    c.get(&c.org_path(if waiting {
+        "/escalations?status=waiting"
+    } else {
+        "/escalations?status=all"
+    })?)
+}
+
+/// Withdraws an escalation the caller filed.
+pub fn withdraw_escalation(c: &Client, id: &str) -> Result<Value> {
+    c.post(
+        &c.org_path(&format!("/escalations/{}/withdraw", segment(id)))?,
+        &json!({}),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// The maps Onus Cloud keeps (C6)
+
+/// `$ONUS_CACHE_DIR`, else `$XDG_CACHE_HOME/onus`, else `~/.cache/onus`.
+pub fn cache_dir() -> Result<PathBuf> {
+    if let Some(dir) = env_var("ONUS_CACHE_DIR") {
+        return Ok(PathBuf::from(dir));
+    }
+    if let Some(dir) = env_var("XDG_CACHE_HOME") {
+        return Ok(PathBuf::from(dir).join("onus"));
+    }
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .context("cannot tell where your home folder is: set ONUS_CACHE_DIR")?;
+    Ok(PathBuf::from(home).join(".cache").join("onus"))
+}
+
+/// Where the map of `sha` is kept: `<cache>/cloud-maps/<api host>/<org>/<owner>__<name>/<sha>.json`.
+pub fn map_cache_path(cache: &Path, url: &str, org: &str, repo: &str, sha: &str) -> PathBuf {
+    let host = url
+        .split_once("://")
+        .map_or(url, |(_, rest)| rest)
+        .split('/')
+        .next()
+        .unwrap_or_default();
+    let clean = |s: &str| -> String {
+        s.chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || "-._".contains(c) {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect()
+    };
+    cache
+        .join("cloud-maps")
+        .join(clean(host))
+        .join(clean(org))
+        .join(clean(&repo.replace('/', "__")))
+        .join(format!("{sha}.json"))
+}
+
+/// The commit a hosted map is kept under: the one asked for, else the one Onus Cloud
+/// named; none (and nothing is kept) when neither is a full sha.
+pub fn cached_sha(asked: Option<&str>, named: Option<&str>) -> Option<String> {
+    asked.or(named).filter(|s| is_sha(s)).map(str::to_string)
+}
+
+/// A map Onus Cloud sent: this onus's schema, and the commit asked for.
+pub fn parse_hosted_map(bytes: &[u8], want: Option<&str>) -> Result<onus_core::CodebaseMap> {
+    let value: Value =
+        serde_json::from_slice(bytes).context("Onus Cloud sent a map that is not JSON")?;
+    let version = value.get("schemaVersion").and_then(Value::as_u64);
+    if version != Some(u64::from(onus_core::map::SCHEMA_VERSION)) {
+        bail!(
+            "the map Onus Cloud keeps was built by onus {} (schema {}); this onus reads schema {}: update onus",
+            value
+                .pointer("/builtWith/onus")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown"),
+            version.map_or("none".to_string(), |v| v.to_string()),
+            onus_core::map::SCHEMA_VERSION
+        );
+    }
+    let map: onus_core::CodebaseMap =
+        serde_json::from_value(value).context("Onus Cloud sent something that is not a map")?;
+    if let Some(w) = want
+        && is_sha(&map.commit)
+        && map.commit != w
+    {
+        bail!(
+            "Onus Cloud sent the map of {} when {w} was asked for",
+            map.commit
+        );
+    }
+    Ok(map)
+}
+
+/// The map Onus Cloud keeps of a repository (`owner/name`) at `commit`, or of its
+/// default branch's newest commit. Maps of a commit are kept in [`cache_dir`] and
+/// never asked for again.
+pub fn hosted_map(c: &Client, repo: &str, commit: Option<&str>) -> Result<onus_core::CodebaseMap> {
+    if let Some(s) = commit
+        && !is_sha(s)
+    {
+        bail!("`{s}` is not a full commit sha (40 hex characters)");
+    }
+    let org = c.organisation()?;
+    let cache = cache_dir().ok();
+    if let (Some(sha), Some(dir)) = (commit, &cache) {
+        let path = map_cache_path(dir, &c.url, &org, repo, sha);
+        if let Ok(bytes) = std::fs::read(&path)
+            && let Ok(map) = parse_hosted_map(&bytes, Some(sha))
+        {
+            return Ok(map);
+        }
+    }
+    let mut path = format!("/v1/orgs/{}/repos/{}/map", segment(&org), segment(repo));
+    if let Some(sha) = commit {
+        path.push_str(&format!("?commit={sha}"));
+    }
+    let (status, bytes, named) = c.get_raw(&path)?;
+    if !(200..300).contains(&status) {
+        return Err(c.api_error(status, &String::from_utf8_lossy(&bytes)));
+    }
+    let want = commit.or(named.as_deref().filter(|s| is_sha(s)));
+    let map = parse_hosted_map(&bytes, want)?;
+    if let (Some(sha), Some(dir)) = (cached_sha(commit, named.as_deref()), &cache) {
+        // Best effort: an unwritable cache only costs a download.
+        let _ = write_atomically(&map_cache_path(dir, &c.url, &org, repo, &sha), &bytes);
+    }
+    Ok(map)
+}
+
+/// The commit to ask the map of: a pull request's head as Onus Cloud analysed it, a
+/// commit (a full sha, or anything `root` resolves), or none for the default branch's
+/// newest map.
+pub fn map_commit(
+    c: &Client,
+    root: &Path,
+    repo: &str,
+    commit: Option<&str>,
+    pull: Option<u64>,
+) -> Result<Option<String>> {
+    match (commit, pull) {
+        (Some(_), Some(_)) => bail!("give a commit or a pull request, not both"),
+        (None, Some(n)) => {
+            let p = c.get(&c.org_path(&format!("/repos/{}/pulls/{n}", segment(repo)))?)?;
+            Ok(Some(
+                p["pull"]["headSha"]
+                    .as_str()
+                    .with_context(|| format!("Onus Cloud knows no head commit of {repo}#{n}"))?
+                    .to_string(),
+            ))
+        }
+        (Some(s), None) if is_sha(s) => Ok(Some(s.to_string())),
+        (Some(s), None) => {
+            Ok(Some(commit_of(root, s).with_context(|| {
+                format!("`{s}` names no commit here: give the full sha")
+            })?))
+        }
+        (None, None) => Ok(None),
+    }
+}
+
+fn write_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
+    let dir = path.parent().context("no folder")?;
+    std::fs::create_dir_all(dir)?;
+    let tmp = tempfile::NamedTempFile::new_in(dir)?;
+    std::fs::write(tmp.path(), bytes)?;
+    tmp.persist(path)?;
+    Ok(())
+}
+
+/// The repository an agent's call is about: the one it names, else this worktree's
+/// GitHub remote, else `ONUS_CLOUD_REPO`.
+pub fn repository_for(root: &Path, named: Option<&str>) -> Option<String> {
+    named
+        .map(str::to_string)
+        .or_else(|| repository_of(root))
+        .or_else(|| env_var("ONUS_CLOUD_REPO"))
 }
 
 /// What the CLI calls itself on the approval page.
@@ -592,7 +1094,12 @@ pub fn act(client: &Client, root: &Path, name: &str, input: Value) -> Result<Val
             let me = client.whoami()?;
             let org = client.organisation().ok();
             let allowance = match &org {
-                Some(_) => client.get(&client.org_path("/environments")?)?["allowance"].clone(),
+                // A token without env:read still has a status.
+                Some(_) => match client.get(&client.org_path("/environments")?) {
+                    Ok(v) => v["allowance"].clone(),
+                    Err(e) if is_status(&e, 403) => Value::Null,
+                    Err(e) => return Err(e),
+                },
                 None => Value::Null,
             };
             Ok(json!({
@@ -601,6 +1108,7 @@ pub fn act(client: &Client, root: &Path, name: &str, input: Value) -> Result<Val
                 "who": if me["kind"] == "apiKey" { me["apiKey"].clone() } else { me["user"].clone() },
                 "organisation": org,
                 "organisations": me["organisations"],
+                "token": me["token"],
                 "environments": allowance,
             }))
         }
@@ -612,16 +1120,7 @@ pub fn act(client: &Client, root: &Path, name: &str, input: Value) -> Result<Val
             };
             let reference = match text("ref") {
                 Some(r) => r.to_string(),
-                None => {
-                    let head = commit_of(root, "HEAD").context("this worktree has no commit")?;
-                    if !is_pushed(root, &head) {
-                        bail!(
-                            "HEAD ({}) is not pushed, and Onus Cloud builds from GitHub: push it first, or pass ref",
-                            &head[..12.min(head.len())]
-                        );
-                    }
-                    head
-                }
+                None => pushed_head(root)?,
             };
             let mut body = json!({ "repository": repository, "ref": reference });
             if let Some(n) = text("name") {
@@ -726,6 +1225,83 @@ pub fn act(client: &Client, root: &Path, name: &str, input: Value) -> Result<Val
                 &json!({ "environmentRun": run }),
             )
         }
+        "cloud.map" => {
+            let repository = repository_for(root, text("repository"))
+                .context("this worktree has no GitHub remote: pass repository (owner/name)")?;
+            let question: onus_index::Query = serde_json::from_value(input["question"].clone())
+                .context("question is not a map question: {\"query\": \"dependents\", \"target\": …}, as onus query takes")?;
+            let commit = map_commit(
+                client,
+                root,
+                &repository,
+                text("commit"),
+                input["pull"].as_u64(),
+            )?;
+            let map = hosted_map(client, &repository, commit.as_deref())?;
+            let index = onus_index::MapIndex::new(map);
+            let result = index.answer(&question).map_err(anyhow::Error::msg)?;
+            let m = index.map();
+            Ok(json!({
+                "result": result,
+                "map": {
+                    "repository": repository,
+                    "commit": m.commit,
+                    "onus": m.built_with.onus,
+                    "source": "onus-cloud",
+                },
+                "componentDirs": index.status().component_dirs,
+            }))
+        }
+        "cloud.tokenMint" => {
+            let scopes: Vec<String> = input["scopes"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str())
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            if scopes.is_empty() {
+                bail!("name the scopes it opens: {}", CLOUD_SCOPES.join(", "));
+            }
+            let named: Vec<String> = input["repositories"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str())
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let repositories = if input["allRepositories"].as_bool() == Some(true) {
+                None
+            } else if !named.is_empty() {
+                Some(named)
+            } else {
+                Some(vec![repository_for(root, None).context(
+                    "this worktree has no GitHub remote: name the repositories (owner/name), or allRepositories",
+                )?])
+            };
+            let ttl_seconds = input["ttlSeconds"].as_u64().unwrap_or(3600);
+            if !TOKEN_TTL.contains(&ttl_seconds) {
+                bail!("a token lasts 60 seconds to 24 hours (ttlSeconds 60 to 86400)");
+            }
+            let mut out = mint_token(
+                client,
+                &Narrow {
+                    repositories,
+                    scopes,
+                    ttl_seconds,
+                    label: text("label").map(str::to_string),
+                },
+            )?;
+            out["next"] = json!(format!(
+                "Give it to the sub-agent as ONUS_CLOUD_TOKEN. It opens only these doors, ends at {}, and cannot be widened.",
+                out["expiresAt"].as_str().unwrap_or("its end")
+            ));
+            Ok(out)
+        }
         _ => bail!("no cloud action `{name}`"),
     }
 }
@@ -758,6 +1334,170 @@ mod tests {
         assert_eq!(segment("acme/payments"), "acme%2Fpayments");
         assert_eq!(segment("e-1.2_x~"), "e-1.2_x~");
         assert_eq!(segment("a b#c"), "a%20b%23c");
+    }
+
+    #[test]
+    fn a_token_beats_an_api_key_which_beats_the_login() {
+        let saved = || {
+            Ok(Some(Credentials {
+                url: "http://login.example".into(),
+                token: "onus_cli_login".into(),
+                organisation: Some("acme".into()),
+                user: Value::Null,
+            }))
+        };
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |k: &str| {
+                pairs
+                    .iter()
+                    .find(|(n, _)| *n == k)
+                    .map(|(_, v)| v.to_string())
+            }
+        };
+        let never = || -> Result<Option<Credentials>> { panic!("cloud.json was read") };
+        let c = Client::discover_from(
+            &env(&[
+                ("ONUS_CLOUD_TOKEN", "onus_tok_a"),
+                ("ONUS_API_KEY", "onus_key"),
+            ]),
+            &never,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!((c.via, c.token.as_deref()), ("token", Some("onus_tok_a")));
+        assert_eq!(c.url, DEFAULT_URL);
+        let c = Client::discover_from(
+            &env(&[("ONUS_CLOUD_TOKEN", "  "), ("ONUS_API_KEY", "onus_key")]),
+            &never,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(c.via, "api-key");
+        let c = Client::discover_from(
+            &env(&[("ONUS_CLOUD_TOKEN", ""), ("ONUS_CLOUD_ORG", "beta")]),
+            &saved,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!((c.via, c.url.as_str()), ("login", "http://login.example"));
+        assert_eq!(c.org.as_deref(), Some("beta"));
+        assert!(
+            Client::discover_from(&env(&[]), &|| Ok(None))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn token_lifetimes_are_a_minute_to_a_day() {
+        for (s, secs) in [
+            ("90", 90),
+            ("90s", 90),
+            ("30m", 1800),
+            ("8h", 28_800),
+            ("1d", 86_400),
+        ] {
+            assert_eq!(parse_ttl(s).unwrap(), secs, "{s}");
+        }
+        for s in ["0", "59s", "2d", "25h", "abc", "1w", ""] {
+            assert!(parse_ttl(s).is_err(), "{s}");
+        }
+        assert_eq!(parse_utc("2026-10-12T18:00:00.000Z"), Some(1_791_828_000));
+        assert_eq!(parse_utc("2026-10-12T18:00:00Z"), Some(1_791_828_000));
+        assert_eq!(parse_utc("yesterday"), None);
+    }
+
+    #[test]
+    fn a_missing_scope_says_how_to_get_it() {
+        let e = ApiError {
+            status: 403,
+            code: Some("insufficient_scope".into()),
+            scope: Some("env:read".into()),
+            message: "Denied: this token does not have env:read (it has pulls:read).".into(),
+            via: "token",
+        };
+        assert_eq!(
+            e.to_string(),
+            "Denied: this token does not have env:read (it has pulls:read). (mint one with `onus cloud token create --scope env:read`, or ask with onus_escalate)"
+        );
+        let ended = ApiError {
+            status: 401,
+            code: None,
+            scope: None,
+            message: "This token ended".into(),
+            via: "token",
+        };
+        assert!(ended.to_string().contains("ask for a new one"), "{ended}");
+        let e: anyhow::Error = ended.into();
+        assert!(is_status(&e, 401) && !is_status(&e, 403));
+        let mint = mint_token(
+            &Client::discover_from(&|k| (k == "ONUS_API_KEY").then(|| "k".into()), &|| Ok(None))
+                .unwrap()
+                .unwrap(),
+            &Narrow {
+                repositories: None,
+                scopes: vec!["pulls:read".into()],
+                ttl_seconds: 60,
+                label: None,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            mint.to_string().contains("API keys cannot mint tokens"),
+            "{mint}"
+        );
+    }
+
+    fn map_json(commit: &str, schema: u32) -> Vec<u8> {
+        let dir = tempfile::tempdir().unwrap();
+        let mut map = serde_json::to_value(crate::build(dir.path(), None, None).unwrap()).unwrap();
+        map["commit"] = json!(commit);
+        map["schemaVersion"] = json!(schema);
+        map["builtWith"]["onus"] = json!("9.9.9");
+        serde_json::to_vec(&map).unwrap()
+    }
+
+    #[test]
+    fn hosted_maps_are_this_schema_and_the_commit_asked_for() {
+        let sha = "3f2a1c0000000000000000000000000000000000";
+        let other = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let current = onus_core::map::SCHEMA_VERSION;
+        assert_eq!(
+            parse_hosted_map(&map_json(sha, current), Some(sha))
+                .unwrap()
+                .commit,
+            sha
+        );
+        let err = parse_hosted_map(&map_json(sha, current + 1), Some(sha)).unwrap_err();
+        assert!(err.to_string().contains("built by onus 9.9.9"), "{err}");
+        assert!(err.to_string().contains("update onus"), "{err}");
+        let err = parse_hosted_map(&map_json(other, current), Some(sha)).unwrap_err();
+        assert!(err.to_string().contains("when 3f2a1c"), "{err}");
+        // A label (a map of a folder) is not a commit to compare.
+        assert!(parse_hosted_map(&map_json("worktree", current), Some(sha)).is_ok());
+        assert!(parse_hosted_map(b"{", None).is_err());
+    }
+
+    #[test]
+    fn hosted_maps_are_cached_by_their_full_sha_only() {
+        let sha = "3f2a1c0000000000000000000000000000000000";
+        let path = map_cache_path(
+            Path::new("/c"),
+            "http://localhost:8080",
+            "acme",
+            "acme/shop",
+            sha,
+        );
+        assert_eq!(
+            path,
+            Path::new("/c/cloud-maps/localhost_8080/acme/acme__shop").join(format!("{sha}.json"))
+        );
+        assert_eq!(cached_sha(Some(sha), None).as_deref(), Some(sha));
+        assert_eq!(cached_sha(None, Some(sha)).as_deref(), Some(sha));
+        assert_eq!(cached_sha(None, None), None);
+        assert_eq!(cached_sha(Some("main"), None), None);
+        assert_eq!(cached_sha(None, Some("3f2a1c")), None);
+        assert!(is_sha(sha) && !is_sha(&sha.to_uppercase()) && !is_sha("HEAD"));
     }
 
     #[test]

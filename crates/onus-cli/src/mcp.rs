@@ -285,8 +285,65 @@ fn permission() -> String {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct EscalationParams {
-    /// An escalation id from `onus_escalate`.
+    /// An escalation id from `onus_escalate` or `onus_blocked`.
     pub id: String,
+    /// Wait up to this many seconds (at most 50) while it is being checked or waiting
+    /// for a person (default 0: answer now).
+    #[serde(default)]
+    pub wait: u64,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct BlockedParams {
+    /// `broken-test` (a test you did not write fails and cannot be fixed in scope),
+    /// `contradictory-spec` (the spec contradicts itself or the code) or
+    /// `impossible-task` (it cannot be done as asked).
+    pub kind: String,
+    /// Evidence, strongest first: `failing-test:<file>`, `trace:<file>`,
+    /// `map-path:<path>`, `draft-diff:<file>`, `rationale:<text>`.
+    #[serde(default)]
+    pub evidence: Vec<String>,
+    /// What blocks you, in a sentence or two.
+    pub reason: String,
+    /// The task (default: your token's task).
+    #[serde(default)]
+    pub task: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CloudMapParams {
+    /// The GitHub repository, `owner/name` (default: this worktree's).
+    #[serde(default)]
+    pub repository: Option<String>,
+    /// A commit Onus Cloud mapped (default: the default branch's newest map).
+    #[serde(default)]
+    pub commit: Option<String>,
+    /// A pull request's number: its head commit, as Onus Cloud analysed it.
+    #[serde(default)]
+    pub pull: Option<u64>,
+    /// The question, as the map tools take it: `{"query": "dependents", "target":
+    /// "UserPreferences", "depth": 2}`, `{"query": "impact", "target": "formatPhone",
+    /// "change": "change-signature"}`, `{"query": "status"}`, `{"query": "overview"}`.
+    pub question: Query,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CloudTokenParams {
+    /// The scopes it opens: `env:read`, `env:run`, `evidence:write`, `pulls:read`,
+    /// `map:read`, `escalation:write`. Never more than yours.
+    pub scopes: Vec<String>,
+    /// The repositories it is for, `owner/name` (default: this worktree's).
+    #[serde(default)]
+    pub repositories: Vec<String>,
+    /// Every repository yours is for, instead.
+    #[serde(default, rename = "allRepositories")]
+    pub all_repositories: bool,
+    /// How long it lasts, in seconds (60 to 86400; default 3600). Never past yours.
+    #[serde(default, rename = "ttlSeconds")]
+    pub ttl_seconds: Option<u64>,
+    /// A name for it, such as the sub-agent's step.
+    #[serde(default)]
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -469,13 +526,71 @@ impl OnusMcp {
         dirs
     }
 
+    /// An action whose answer is a map answer (`{result, componentDirs, ...}`):
+    /// its `result` is limited to what the token may read, as the map tools' are.
+    async fn act_limited(
+        &self,
+        name: &'static str,
+        input: serde_json::Value,
+    ) -> Result<CallToolResult, ErrorData> {
+        let Some(actions) = self.actions.clone() else {
+            return Ok(CallToolResult::error(vec![ContentBlock::text(
+                "this Onus server only answers questions (started with --no-actions)",
+            )]));
+        };
+        let answer = tokio::task::spawn_blocking(move || actions.call(name, input))
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        let mut v = match answer {
+            Ok(v) => v,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                    "{e:#}"
+                ))]));
+            }
+        };
+        let dirs: BTreeMap<String, String> =
+            serde_json::from_value(v["componentDirs"].clone()).unwrap_or_default();
+        let result = v["result"].take();
+        Ok(match self.limit(result, Some(dirs)).await {
+            Ok((result, hidden)) => {
+                v["result"] = result;
+                if let Some(o) = v.as_object_mut() {
+                    o.remove("componentDirs");
+                }
+                if hidden > 0 {
+                    v["hidden"] = json!(format!(
+                        "{hidden} items outside your read scope were left out"
+                    ));
+                }
+                note(|n| n.hidden = hidden);
+                let text = serde_json::to_string_pretty(&v).unwrap_or_default();
+                note(|n| n.answer = Some(v));
+                CallToolResult::success(vec![ContentBlock::text(text)])
+            }
+            Err(denial) => {
+                let text = denial.text();
+                note(|n| n.denial = Some(denial));
+                CallToolResult::error(vec![ContentBlock::text(text)])
+            }
+        })
+    }
+
     /// Removes what the token may not read; a denial when the whole answer
-    /// is about an unreadable file.
-    async fn limit(&self, mut ok: Value) -> Result<(Value, usize), Denial> {
+    /// is about an unreadable file. `dirs` maps component ids to their folders
+    /// (default: this worktree's map).
+    async fn limit(
+        &self,
+        mut ok: Value,
+        dirs: Option<BTreeMap<String, String>>,
+    ) -> Result<(Value, usize), Denial> {
         let Some(door) = self.door.clone().filter(|d| d.task().is_some()) else {
             return Ok((ok, 0));
         };
-        let dirs = self.component_dirs().await;
+        let dirs = match dirs {
+            Some(d) => d,
+            None => self.component_dirs().await,
+        };
         let readable = |p: &str| door.readable(p);
         if let Some(path) = onus_doors::filter::unreadable_subject(&ok, &readable) {
             return Err(door.read_denial(&path));
@@ -506,7 +621,7 @@ impl OnusMcp {
         Ok(match response {
             Ok(Response {
                 ok: Some(ok), map, ..
-            }) => match self.limit(ok).await {
+            }) => match self.limit(ok, None).await {
                 Ok((ok, hidden)) => {
                     note(|n| n.hidden = hidden);
                     let mut body = serde_json::json!({ "result": ok, "map": map });
@@ -842,8 +957,26 @@ impl OnusMcp {
         &self,
         Parameters(p): Parameters<EscalationParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.act("agent.escalation", serde_json::json!({ "id": p.id }))
-            .await
+        self.act(
+            "agent.escalation",
+            serde_json::json!({ "id": p.id, "wait": p.wait.min(50) }),
+        )
+        .await
+    }
+
+    #[tool(
+        name = "onus_blocked",
+        description = "You are blocked: a test you did not write fails and cannot be fixed in scope, the spec contradicts itself or the code, or the task cannot be done as asked. Report it with evidence and stop; do not work around it. A person answers through onus_escalation."
+    )]
+    async fn blocked(
+        &self,
+        Parameters(p): Parameters<BlockedParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.act(
+            "agent.blocked",
+            serde_json::json!({ "kind": p.kind, "evidence": p.evidence, "reason": p.reason, "task": p.task }),
+        )
+        .await
     }
 
     #[tool(
@@ -946,6 +1079,36 @@ impl OnusMcp {
         self.act(
             "cloud.pull",
             serde_json::json!({ "repository": p.repository, "number": p.number }),
+        )
+        .await
+    }
+
+    #[tool(
+        name = "onus_cloud_map",
+        description = "Ask the map Onus Cloud keeps of a repository: at a commit it mapped, at a pull request's head, or (by default) at the default branch's newest commit. The same questions and answers as the map tools, answered here from the map the binary built in Onus Cloud; nothing is read from this worktree."
+    )]
+    async fn cloud_map(
+        &self,
+        Parameters(p): Parameters<CloudMapParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.act_limited(
+            "cloud.map",
+            serde_json::json!({ "repository": p.repository, "commit": p.commit, "pull": p.pull, "question": p.question }),
+        )
+        .await
+    }
+
+    #[tool(
+        name = "onus_cloud_token",
+        description = "Mint a narrower Onus Cloud token for a sub-agent or a step of your task: only the scopes and repositories you name, never more than yours, ending within 24 hours. Pass it as ONUS_CLOUD_TOKEN."
+    )]
+    async fn cloud_token(
+        &self,
+        Parameters(p): Parameters<CloudTokenParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.act(
+            "cloud.tokenMint",
+            serde_json::json!({ "scopes": p.scopes, "repositories": p.repositories, "allRepositories": p.all_repositories, "ttlSeconds": p.ttl_seconds, "label": p.label }),
         )
         .await
     }
@@ -1166,12 +1329,15 @@ impl ServerHandler for OnusMcp {
                  change in: commit it, run its tests with onus_env_create and onus_env_run, then \
                  onus_submit with an intent and those runs as evidence, and onus_judge to see the \
                  verdict. If your token does not allow what the task needs, onus_escalate with \
-                 evidence instead of working around it. Every call is checked against your task's \
-                 token and logged; a denial says which right is missing and how to ask for it. When \
-                 the onus_cloud_ tools are listed, this CLI is signed in to Onus Cloud: \
-                 onus_cloud_env_create and onus_cloud_env_run build and run a pushed commit on Onus \
-                 Cloud's machines and record the runs, which onus_cloud_attach_evidence attaches to \
-                 the pull request for the judge.",
+                 evidence instead of working around it. If you are blocked (broken test, \
+                 contradictory spec, impossible task), call onus_blocked with evidence and stop. \
+                 Every call is checked against your task's token and logged; a denial says which \
+                 right is missing and how to ask for it. When the onus_cloud_ tools are listed, this \
+                 CLI is signed in to Onus Cloud: onus_cloud_env_create and onus_cloud_env_run build \
+                 and run a pushed commit on Onus Cloud's machines and record the runs, which \
+                 onus_cloud_attach_evidence attaches to the pull request for the judge. \
+                 onus_cloud_map asks the map Onus Cloud keeps for a commit or pull request. A denial \
+                 from Onus Cloud says which scope is missing; ask for it instead of working around it.",
             )
     }
 }

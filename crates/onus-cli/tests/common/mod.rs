@@ -119,6 +119,18 @@ impl Scenario {
     }
 }
 
+/// The environment variables that say how the CLI signs in to Onus Cloud.
+pub const CLOUD_ENV: &[&str] = &[
+    "ONUS_CLOUD_TOKEN",
+    "ONUS_API_KEY",
+    "ONUS_CLOUD_URL",
+    "ONUS_CLOUD_ORG",
+    "ONUS_CLOUD_REPO",
+    "ONUS_CONFIG_DIR",
+    "ONUS_CACHE_DIR",
+    "ONUS_TOKEN",
+];
+
 /// `onus mcp` over stdio, driven as a client would.
 pub struct Mcp {
     child: std::process::Child,
@@ -132,7 +144,19 @@ impl Mcp {
     }
 
     pub fn start_with(repo: &Path, extra: &[&str]) -> Mcp {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_onus"))
+        Mcp::start_env(repo, extra, &[])
+    }
+
+    /// With these environment variables, and none of Onus Cloud's others.
+    pub fn start_env(repo: &Path, extra: &[&str], env: &[(&str, &str)]) -> Mcp {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_onus"));
+        if !env.is_empty() {
+            for k in CLOUD_ENV {
+                cmd.env_remove(k);
+            }
+            cmd.envs(env.iter().copied());
+        }
+        let mut child = cmd
             .args(["mcp", "--no-server", "--repo"])
             .arg(repo)
             .args(extra)

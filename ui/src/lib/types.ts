@@ -522,9 +522,20 @@ export interface EscalationRequest {
 	at: number;
 }
 
+/** Where a request was filed in Onus Cloud (`<id>.cloud.json`). */
+export interface EscalationCloud {
+	url: string;
+	organisation: string | null;
+	repository: string;
+	escalationId: string;
+	webUrl: string | null;
+	filedAt: number;
+}
+
 export interface EscalationItem {
 	request: EscalationRequest;
 	decision: { action: string; decision: string; by: string; reason: string; at: number } | null;
+	cloud?: EscalationCloud | null;
 	file: string;
 }
 

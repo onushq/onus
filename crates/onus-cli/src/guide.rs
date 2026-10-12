@@ -72,7 +72,7 @@ pub const TOPICS: &[Topic] = &[
     },
     Topic {
         name: "cloud",
-        summary: "Onus Cloud from the CLI: onus login, hosted environments, evidence and agents",
+        summary: "Onus Cloud from the CLI: onus login, scoped tokens, hosted environments, evidence, escalations, maps and agents",
         text: include_str!("../guide/cloud.md"),
     },
     Topic {

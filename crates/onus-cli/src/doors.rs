@@ -368,25 +368,25 @@ impl From<KindArg> for onus_doors::escalation::EscalationKind {
 pub struct EscalateArgs {
     /// The task asking.
     #[arg(long)]
-    task: String,
+    pub(crate) task: String,
     #[arg(long, value_enum, default_value = "permission")]
-    kind: KindArg,
+    pub(crate) kind: KindArg,
     /// A right asked for, such as write:path:services/billing/src/** (repeatable).
     #[arg(long = "scope", value_name = "RIGHT")]
-    scopes: Vec<String>,
+    pub(crate) scopes: Vec<String>,
     /// Evidence, strongest first: failing-test:<file>, trace:<file>, map-path:<path>,
     /// draft-diff:<file>, rationale:<text> (repeatable).
     #[arg(long = "evidence", value_name = "KIND:REF")]
-    evidence: Vec<String>,
+    pub(crate) evidence: Vec<String>,
     /// Why the task needs it.
     #[arg(long)]
-    reason: String,
+    pub(crate) reason: String,
     /// The repository whose map gives the blast radius and labels.
     #[arg(long, default_value = ".", value_name = "DIR")]
-    repo: PathBuf,
+    pub(crate) repo: PathBuf,
     /// Write the request here instead of printing it.
     #[arg(long, value_name = "FILE")]
-    out: Option<PathBuf>,
+    pub(crate) out: Option<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -621,12 +621,18 @@ pub fn verify_escalations_with(
                 .and_then(|entries| {
                     entries.into_iter().rev().find(|e| {
                         e.subject == req.id
-                            && matches!(e.action.as_str(), "escalate" | "grant" | "deny")
+                            && matches!(e.action.as_str(), "escalate" | "grant" | "deny" | "answer")
                     })
                 });
             let state = match decision {
                 Some(e) if e.action == "deny" => format!("was denied: {}", e.reason),
                 Some(e) if e.decision == "needs-person" => "is waiting for a person".into(),
+                Some(e) if e.decision == "sent-to-onus-cloud" => {
+                    "is waiting for a person in Onus Cloud".into()
+                }
+                Some(e) if e.action == "answer" => {
+                    format!("was answered, not granted: {}", e.reason)
+                }
                 Some(e) if e.decision == "granted" => {
                     "was granted, but its token is not kept beside the request".into()
                 }
@@ -840,13 +846,40 @@ pub fn assess(
     max_blast_radius: u32,
 ) -> Result<serde_json::Value> {
     use onus_doors::escalation::Decision;
+    let has_test = req.evidence.iter().any(|e| e.grade == 1);
+    let (reproduce, why_not_run) =
+        trusted_reproduce(repo, reproduce_at, image, setup, test_command, has_test)?;
+    let (req, decision) = assess_request(req, reproduce.as_ref(), max_blast_radius)?;
+    let (label, mut reasons) = match decision {
+        Decision::Granted { reasons } => ("granted", reasons),
+        Decision::NeedsPerson { reasons } => ("needs-person", reasons),
+    };
+    reasons.extend(why_not_run);
+    Ok(serde_json::json!({
+        "request": req,
+        "decision": label,
+        "reasons": reasons,
+        "evidence": req.evidence,
+    }))
+}
+
+/// How failing tests are reproduced at `at` of `repo`, a trusted checkout: with the
+/// test command, image and setup given, else onus.yaml's `tests.command` and declared
+/// environment. `None` with the reason when they are not reproduced.
+pub fn trusted_reproduce(
+    repo: &Path,
+    at: Option<String>,
+    image: Option<String>,
+    setup: Option<String>,
+    test_command: Option<String>,
+    has_test: bool,
+) -> Result<(Option<Reproduce>, Option<String>)> {
     let config = onus_map::config::load_from_tree(repo)?.map(|c| c.config);
     let test_command = test_command
         .or_else(|| config.as_ref().and_then(|c| c.tests.command.clone()))
         .filter(|c| !c.trim().is_empty());
-    let has_test = req.evidence.iter().any(|e| e.grade == 1);
     let mut why_not_run = None;
-    let reproduce = match (&reproduce_at, &test_command) {
+    let reproduce = match (&at, &test_command) {
         (Some(at), Some(command)) if has_test => {
             let environment = config.as_ref().and_then(|c| c.environment.as_ref());
             let declared = match onus_env::spec::resolve(repo, environment) {
@@ -880,18 +913,7 @@ pub fn assess(
                 .into(),
         );
     }
-    let (req, decision) = assess_request(req, reproduce.as_ref(), max_blast_radius)?;
-    let (label, mut reasons) = match decision {
-        Decision::Granted { reasons } => ("granted", reasons),
-        Decision::NeedsPerson { reasons } => ("needs-person", reasons),
-    };
-    reasons.extend(why_not_run);
-    Ok(serde_json::json!({
-        "request": req,
-        "decision": label,
-        "reasons": reasons,
-        "evidence": req.evidence,
-    }))
+    Ok((reproduce, why_not_run))
 }
 
 /// Whether `repo` has a devcontainer, which declares an environment as

@@ -298,6 +298,26 @@ Examples:
         /// worktree). Put it where the agent cannot write.
         #[arg(long, value_name = "FILE")]
         audit: Option<PathBuf>,
+        /// The root private key, held by this door, never shown to the agent: grants
+        /// decided by policy or by a person in Onus Cloud are minted here.
+        #[arg(long, value_name = "FILE", requires = "token")]
+        key: Option<PathBuf>,
+        /// A scoped Onus Cloud token (default: $ONUS_CLOUD_TOKEN), used as it is for every
+        /// Onus Cloud call; neither the login nor ONUS_API_KEY is read.
+        #[arg(
+            long,
+            env = "ONUS_CLOUD_TOKEN",
+            value_name = "TOKEN",
+            hide_env_values = true
+        )]
+        cloud_token: Option<String>,
+        /// The repository the agent works on in Onus Cloud (default: $ONUS_CLOUD_REPO, else
+        /// the worktree's GitHub remote).
+        #[arg(long, env = "ONUS_CLOUD_REPO", value_name = "OWNER/NAME")]
+        cloud_repo: Option<String>,
+        /// How long the scoped token minted from a login lasts (at most 24h).
+        #[arg(long, default_value = "8h", value_name = "DURATION")]
+        cloud_ttl: String,
     },
     /// Ask the codebase map a question; the same answers as the MCP tools.
     #[command(after_long_help = "\
@@ -413,14 +433,18 @@ Examples:
     /// Sign the CLI out of Onus Cloud (its token is revoked).
     Logout,
     /// Onus Cloud: hosted environments that record evidence, governed pull requests and
-    /// their lanes. Needs `onus login`, or ONUS_API_KEY in CI.
+    /// their lanes, scoped tokens, escalations and the maps it keeps. Needs `onus login`,
+    /// a scoped token in ONUS_CLOUD_TOKEN, or ONUS_API_KEY in CI.
     #[command(after_long_help = "\
 Examples:
   onus cloud status
   onus cloud env create                       # this folder's repository at its pushed HEAD
   onus cloud env run web-3f2a1c -- npm test
   onus cloud evidence acme/web#42 --run <run id>
-  onus cloud pulls --attention")]
+  onus cloud pulls --attention
+  onus cloud token create --scope env:run --scope evidence:write --ttl 2h
+  onus cloud map dependents UserPreferences
+  onus cloud blocked --kind broken-test --evidence failing-test:src/a.test.ts --reason \"the fixture is in local time\"")]
     Cloud {
         /// The organisation (slug) to act in (default: $ONUS_CLOUD_ORG, else your login's).
         #[arg(long, global = true, value_name = "SLUG")]
@@ -441,7 +465,7 @@ Examples:
 }
 
 #[derive(Debug, Subcommand)]
-enum QueryCmd {
+pub(crate) enum QueryCmd {
     /// What the map holds.
     Status,
     /// Symbols whose names match some words, best first.
@@ -531,6 +555,17 @@ impl From<ChangeArg> for onus_index::Change {
 }
 
 impl QueryCmd {
+    /// The question for a map without a worktree (a file, or the one Onus Cloud keeps).
+    pub(crate) fn query(self) -> Result<onus_index::Query> {
+        match self.op() {
+            onus_cli::daemon::Op::Query { query } => Ok(query),
+            onus_cli::daemon::Op::Check { .. } => {
+                bail!("`check` needs a worktree: use onus query")
+            }
+            _ => bail!("`stats` needs a worktree: use onus query"),
+        }
+    }
+
     fn op(self) -> onus_cli::daemon::Op {
         use onus_cli::daemon::Op;
         use onus_index::Query;
@@ -596,6 +631,7 @@ fn backend(root: &std::path::Path, no_server: bool) -> std::sync::Arc<dyn onus_c
 mod agent;
 mod ci;
 mod cloud_cmd;
+mod cloud_doors;
 mod doors;
 mod envs;
 mod lanes;
@@ -818,9 +854,18 @@ fn run(cli: Cli) -> Result<i32> {
             key_public,
             no_actions,
             audit,
+            key,
+            cloud_token,
+            cloud_repo,
+            cloud_ttl,
         } => {
             let root = onus_cli::daemon::worktree_root(&repo);
             let canonical = onus_cli::daemon::canonical(&root).unwrap_or_else(|_| root.clone());
+            if let Some(k) = &key {
+                // Read now, so a wrong path fails at start rather than at a grant.
+                onus_doors::token::RootKey::from_hex(&doors::read_key(k)?)?;
+            }
+            let cloud_ttl = onus_cli::cloud::parse_ttl(&cloud_ttl)?;
             // One log for the door and for `onus ui`'s audit page.
             let audit = audit.unwrap_or_else(|| canonical.join(".onus").join("audit.jsonl"));
             let public = match &key_public {
@@ -833,6 +878,40 @@ fn run(cli: Cli) -> Result<i32> {
                 public,
                 token,
             )?);
+            // Every Onus Cloud call goes through one door: a login is narrowed to a scoped
+            // token for this repository and task; a token or an API key is used as it is.
+            let cloud_door = if no_actions {
+                None
+            } else {
+                let given = cloud_token.clone();
+                onus_cli::cloud::Client::discover_from(
+                    &|k| match k {
+                        "ONUS_CLOUD_TOKEN" => given.clone(),
+                        _ => std::env::var(k).ok(),
+                    },
+                    &onus_cli::cloud::load_credentials,
+                )
+                .ok()
+                .flatten()
+                .map(|client| {
+                    let repository =
+                        cloud_repo.or_else(|| onus_cli::cloud::repository_of(&canonical));
+                    std::sync::Arc::new(onus_cli::cloud::CloudDoor::new(
+                        client,
+                        onus_cli::cloud::Narrow {
+                            repositories: Some(repository.into_iter().collect()),
+                            scopes: onus_cli::cloud::AGENT_SCOPES
+                                .iter()
+                                .map(|s| s.to_string())
+                                .collect(),
+                            ttl_seconds: cloud_ttl,
+                            label: Some(door.task().unwrap_or_else(|| "onus mcp".into())),
+                        },
+                    ))
+                })
+            };
+            // The Onus Cloud tools, when this process is signed in (and may act).
+            let cloud = cloud_door.is_some();
             let actions: Option<std::sync::Arc<dyn onus_cli::mcp::Actions>> = if no_actions {
                 None
             } else {
@@ -848,11 +927,10 @@ fn run(cli: Cli) -> Result<i32> {
                         },
                     ),
                     door: door.clone(),
+                    key,
+                    cloud: cloud_door,
                 }))
             };
-            // The Onus Cloud tools, when this process is signed in (and may act).
-            let cloud =
-                actions.is_some() && matches!(onus_cli::cloud::Client::discover(), Ok(Some(_)));
             let tools = onus_cli::mcp::Tools {
                 door: Some(door),
                 actions,

@@ -91,6 +91,7 @@ fn mcp_serves_the_map_tools_over_stdio() {
     assert_eq!(
         names,
         [
+            "onus_blocked",
             "onus_check",
             "onus_component",
             "onus_dependencies",

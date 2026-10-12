@@ -98,6 +98,14 @@ Then the command prints a new token: the original rights plus exactly what was a
 
 Before running a failing test, Onus checks that its reference is a plain path in the repository (letters, digits and `._/@+-`, no `..`, not absolute), that the file exists at the commit, and that it is a test file (onus.yaml `tests.globs`). A reference that fails a check is not run. It counts as not reproduced and sends the request to a person, even when another failing test reproduced, and the reasons say why. Whether a test reproduced is only ever what this run saw: a request file that says so is not believed, and one changed after it was filed is refused.
 
+### Where a request goes
+
+`onus_escalate` (and `onus_blocked`, a report that the task is blocked) always keeps the request in `.onus/escalations/<id>.json`. Then, in this order:
+
+1. **Signed in to Onus Cloud** (a login, a scoped token with `escalation:write`, or an API key): it is filed there, and the local policy does not run. Onus Cloud assesses it on the repository's default branch with `onus escalation assess`, so an agent cannot weaken it by editing onus.yaml on its branch, and a person decides there. `onus_escalation` asks where it stands and writes the decision into the audit log. On a grant, the server mints the token with its root key (`onus mcp --key`): the old rights plus exactly the scopes of the request it kept. Onus Cloud never sees the task token or the root key. See `onus help cloud`.
+2. **Not signed in, the server holds the root key** (`onus mcp --token … --key root.key`): the policy above decides here, reproducing failing tests with onus.yaml's `tests.command`, and mints on a grant.
+3. **Neither:** the request waits in the folder for a person in `onus ui`, or `onus escalation grant`.
+
 ### Assessing without minting
 
 `onus escalation assess` applies the same policy and mints nothing, so it needs neither a token nor a key. Hosted services use it, and it records nothing in the audit log, because assessing is not deciding:

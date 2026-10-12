@@ -78,6 +78,8 @@ Serves the map of the current worktree to a coding agent as MCP tools, on stdin 
 
 - `--repo <dir>`: the worktree (default: the one containing the current directory).
 - `--no-server`: build the map in this process instead of the repository's shared map server.
+- `--token <token>` and `--key-public <file>`: the task token every call is checked against; `--key <file>`: the root private key, with which the server mints grants itself; `--audit <file>`: the log; `--no-actions`: only the map tools.
+- `--cloud-token`, `--cloud-repo`, `--cloud-ttl`: how the server signs in to Onus Cloud (`onus help cloud`).
 
 ## onus query <question>
 
@@ -128,7 +130,7 @@ What the GitHub Action runs to keep outcome records on a branch (`onus help ci`)
 
 ## onus login, onus logout, onus cloud
 
-Onus Cloud from the terminal (`onus help cloud`). `onus login` signs the CLI in as you (approve the code it shows in the browser); in CI, `ONUS_API_KEY` stands in for it.
+Onus Cloud from the terminal (`onus help cloud`). `onus login` signs the CLI in as you (approve the code it shows in the browser); in CI, `ONUS_API_KEY` stands in for it, and a scoped token in `ONUS_CLOUD_TOKEN` stands in for both.
 
     onus login [--org acme] [--no-browser]
     onus cloud status
@@ -136,11 +138,19 @@ Onus Cloud from the terminal (`onus help cloud`). `onus login` signs the CLI in 
     onus cloud env run sms -- npm test
     onus cloud evidence acme/shop#42 --run <run id>
     onus cloud pulls --attention
+    onus cloud token create --scope pulls:read [--repo acme/shop | --all-repos] [--ttl 2h] [--label sms]
+    onus cloud map dependents UserPreferences [--repo acme/shop] [--commit <sha> | --pull 42]
+    onus cloud escalate --task sms --scope 'write:path:services/billing/**' --evidence … --reason …
+    onus cloud blocked --kind broken-test --evidence failing-test:src/a.test.ts --reason … --task sms
+    onus cloud escalation <id> [--wait 600]
     onus logout
 
 - `cloud env create|run|list|show|log|destroy`: hosted environments; `create` and `run` wait unless `--no-wait`, and `run` exits 1 when the command failed. `--json` prints the API's answer.
 - `cloud pulls`, `cloud pull <owner/name#n>`: governed pull requests, their lanes, analyses and evidence.
 - `cloud evidence <owner/name#n> --run <id>`: a recorded run to a pull request, for the judge.
+- `cloud token create|list|revoke`: scoped tokens; `create` prints the token alone on stdout.
+- `cloud map <question> | --download <file>`: `onus query`'s questions asked of the map Onus Cloud keeps, answered here.
+- `cloud escalate`, `cloud blocked`, `cloud escalation <id>|list|withdraw`: escalations and blocked reports in Onus Cloud. `--token`, `--key-public` and `--key` are the door's; with `--key` a grant is minted here. Exit 0 when granted or answered, 1 when denied, withdrawn, expired or failed, 3 while waiting.
 - `--org <slug>` on any `cloud` command, or `ONUS_CLOUD_ORG`, picks the organisation; `ONUS_CLOUD_URL` the address.
 
 ## onus help [command | topic]
