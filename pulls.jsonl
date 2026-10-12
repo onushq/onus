@@ -6,3 +6,6 @@
 {"at":1791721449,"change":"onushq/onus#22","base":"09078bfd0aa16425e7ede7aee39432836102ca07","head":"ccd16d59ff9bb23b098219732061a4201d583735","agent":{"tool":"person","model":"mikiastilahun","config":"","team":""},"lane":"judge","judge":"a6e84d4f"}
 {"at":1791721564,"change":"onushq/onus#22","base":"09078bfd0aa16425e7ede7aee39432836102ca07","head":"633126247da710fbe32328befaae31d49b75b306","agent":{"tool":"person","model":"mikiastilahun","config":"","team":""},"lane":"judge","judge":"a6e84d4f"}
 {"at":1791796127,"change":"onushq/onus#23","base":"ec03912591562062274060a0d259f13d4896641b","head":"ae5a45a793cb535ef85726c4daf0d6998c0cd8e2","agent":{"tool":"dependabot","model":"","config":"","team":""},"lane":"judge","judge":"a6e84d4f"}
+{"pr":7,"at":1791818100}
+{"pr":7,"at":1791818130,"approvals":[{"by":"@lead"}]}
+{"pr":7,"at":1791818130,"approvals":[{"by":"@lead"}]}
