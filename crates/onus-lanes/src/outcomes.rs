@@ -286,7 +286,8 @@ pub fn summarize(outcomes: &[Outcome]) -> Summary {
             .entry(o.agent.clone())
             .or_default()
             .add(o, incident);
-        if let Some(j) = &o.judge {
+        // A judge configuration's record is the changes it decided: a verdict was recorded.
+        if let (Some(j), Some(_)) = (&o.judge, &o.verdict) {
             s.by_judge.entry(j.clone()).or_default().add(o, incident);
         }
         *s.by_lane.entry(o.lane.as_str().to_string()).or_default() += 1;
@@ -376,5 +377,22 @@ mod tests {
         assert_eq!(s.by_agent["codex/gpt/b"].reverted, 1);
         assert_eq!(s.human_share, Some(0.25));
         assert_eq!(s.audit_miss_rate, Some(0.5));
+    }
+
+    #[test]
+    fn by_judge_counts_only_judged_changes() {
+        let judged = o("a/b/c", Lane::Judge, "merged", false, false);
+        // Written before ci pr recorded a judge only when one decided.
+        let mut old = judged.clone();
+        old.change = "acme/shop#2".into();
+        old.verdict = None;
+        let mut unjudged = judged.clone();
+        unjudged.change = "acme/shop#3".into();
+        unjudged.judge = None;
+        unjudged.verdict = None;
+        let s = summarize(&[judged, old, unjudged]);
+        assert_eq!(s.by_judge.len(), 1);
+        assert_eq!(s.by_judge["j1"].changes, 1);
+        assert_eq!(s.total.changes, 3);
     }
 }

@@ -88,7 +88,7 @@ With `records: true`, the action keeps the track record lanes depend on without 
 
 What happens on each event:
 
-- **Opened or pushed:** the change is submitted with the report as its evidence, classified with the policy, the hard floors and its agent setup's record, and judged when the lane is `judge` and `judge: true`. The comment shows the lane, why, the agent setup's record and an `/onus approve` command for each row that needs a person. The latest classification is appended to `pulls.jsonl`.
+- **Opened or pushed:** the change is submitted with the report as its evidence, classified with the policy, the hard floors and its agent setup's record, and judged when the lane is `judge` and `judge: true`. The comment shows the lane, why, the agent setup's record and an `/onus approve` command for each row that needs a person. The latest classification is appended to `pulls.jsonl`, with the judge configuration and its verdict when the judge decided.
 - **Merged or closed:** the pull request's latest record becomes an outcome (`merged` or `closed`), with the commit it landed as. Running twice records it once.
 - **A push to the default branch:** commits that revert a merged change (`This reverts commit …`) are recorded against it; a reverted change no longer counts toward its agent setup's record.
 - **A `/onus` comment** from someone with write access (owner, member or collaborator); anyone else's is answered with a 😕 and ignored:

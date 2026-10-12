@@ -74,7 +74,7 @@ The GitHub Action keeps these records for you with `records: true`: outcomes whe
       --lane auto-merge --verdict approve --judge 1a2b3c4d --result merged --audited
     onus outcomes summary --file outcomes.jsonl
 
-The summary gives each agent setup and judge configuration its record (merged, reverted, incidents, audited, missed), the share of changes in the human lane (the review budget), and the miss rate of human audits of automatic approvals, the number that says whether the automatic lanes can be trusted.
+The summary gives each agent setup its record, and each judge configuration its record of the changes it decided (a verdict on record): merged, reverted, incidents, audited, missed. It also gives the share of changes in the human lane (the review budget), and the miss rate of human audits of automatic approvals, the number that says whether the automatic lanes can be trusted. A judge configuration id is a hash of the lane policy and the Onus version, so changing either starts a new record: that is how configurations are rotated and compared.
 
 ## The production loop
 

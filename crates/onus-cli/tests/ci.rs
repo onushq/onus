@@ -169,6 +169,8 @@ fn a_pull_request_is_recorded_from_open_to_revert() {
     assert_eq!(approved["rerun"], true);
     let pulls = lines(&rec.join("pulls.jsonl"));
     assert_eq!(pulls.last().unwrap()["approvals"][0]["by"], "@lead");
+    // No judge decided this change, so no judge configuration is recorded.
+    assert!(pulls[0].get("judge").is_none(), "{:?}", pulls[0]);
     assert_eq!(
         say("just a comment", "MEMBER")["command"],
         serde_json::Value::Null
@@ -278,6 +280,7 @@ fn a_pull_request_is_recorded_from_open_to_revert() {
     assert_eq!(outcomes[0]["result"], "merged");
     assert_eq!(outcomes[0]["agent"], "codex//");
     assert_eq!(outcomes[0]["lane"], "human");
+    assert!(outcomes[0]["judge"].is_null(), "{:?}", outcomes[0]);
 
     // Audited after the fact, and an incident.
     assert_eq!(
@@ -393,4 +396,87 @@ fn records_written_after_the_fact_keep_their_time() {
     );
     assert_eq!(lines(&rec.join("pulls.jsonl"))[0]["at"], 1_745_000_000);
     assert_eq!(lines(&rec.join("outcomes.jsonl"))[0]["at"], 1_745_090_000);
+}
+
+#[test]
+fn a_judged_pull_request_records_the_judge_that_decided() {
+    let tmp = tempfile::tempdir().unwrap();
+    let t = tmp.path();
+    let r = t.join("shop");
+    copy_dir(&fixture().join("base"), &r);
+    let mut yaml = std::fs::read_to_string(r.join("onus.yaml")).unwrap();
+    yaml.push_str("\nlanes:\n  default: judge\n  auditRate: 0\n  minRecord: 0\n");
+    std::fs::write(r.join("onus.yaml"), yaml).unwrap();
+    git(&r, &["init", "-q", "-b", "main"]);
+    git(&r, &["add", "-A"]);
+    git(&r, &["commit", "-q", "-m", "base"]);
+    git(&r, &["checkout", "-q", "-b", "codex/extra"]);
+    std::fs::write(
+        r.join("services/orders/src/extra.ts"),
+        "export const EXTRA = 1;\n",
+    )
+    .unwrap();
+    git(&r, &["add", "-A"]);
+    git(&r, &["commit", "-q", "-m", "An extra constant"]);
+    let rec = t.join("records");
+    let rs = rec.to_str().unwrap();
+    let out = t.join("out");
+    let change = "acme/shop#5";
+    // Without evidence the judge rejects, so no container engine is needed.
+    let summary: serde_json::Value = serde_json::from_str(&onus(
+        &r,
+        &[
+            "ci",
+            "pr",
+            "--base",
+            "main",
+            "--head",
+            "codex/extra",
+            "--change",
+            change,
+            "--branch",
+            "codex/extra",
+            "--judge",
+            "--records",
+            rs,
+            "--out",
+            out.to_str().unwrap(),
+        ],
+    ))
+    .unwrap();
+    assert_eq!(summary["lane"], "judge", "{summary}");
+    assert_eq!(summary["verdict"], "reject", "{summary}");
+    let judgment: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(out.join("judgment.json")).unwrap()).unwrap();
+    let pulls = lines(&rec.join("pulls.jsonl"));
+    assert_eq!(pulls[0]["verdict"], "reject");
+    assert_eq!(pulls[0]["judge"], judgment["judge"], "{:?}", pulls[0]);
+
+    // The outcome keeps it, and the judge configuration has a record.
+    onus(
+        &r,
+        &[
+            "ci",
+            "closed",
+            "--change",
+            change,
+            "--merged",
+            "--records",
+            rs,
+        ],
+    );
+    let outcomes = lines(&rec.join("outcomes.jsonl"));
+    assert_eq!(outcomes[0]["judge"], judgment["judge"]);
+    let s: serde_json::Value = serde_json::from_str(&onus(
+        &r,
+        &[
+            "outcomes",
+            "summary",
+            "--file",
+            rec.join("outcomes.jsonl").to_str().unwrap(),
+        ],
+    ))
+    .unwrap();
+    let id = judgment["judge"].as_str().unwrap();
+    assert_eq!(s["byJudge"][id]["changes"], 1, "{s}");
 }

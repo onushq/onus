@@ -391,7 +391,8 @@ fn pr(a: PrArgs) -> Result<i32> {
             verdict: judgment
                 .as_ref()
                 .map(|j| verdict_name(j.verdict).to_string()),
-            judge: Some(onus_lanes::judge::judge_id(&config)),
+            // The configuration that decided, only when it did.
+            judge: judgment.as_ref().map(|j| j.judge.clone()),
             approvals,
         },
     )?;
