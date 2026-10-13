@@ -4,7 +4,7 @@
 //! - A pull request is pushed: `onus ci pr` makes its submission (the pull
 //!   request body as intent, the agent from git and GitHub), classifies it
 //!   with the agent's track record, runs the judge when asked, and keeps a
-//!   pull request record.
+//!   pull request record and its provenance.
 //! - It closes: `onus ci closed` turns its last record into an outcome,
 //!   merged or closed.
 //! - Someone comments `/onus approve`, `/onus audit` or `/onus incident`:
@@ -21,8 +21,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::Subcommand;
+use onus_core::provenance::IntentSource;
 use onus_core::{Lane, SemanticReport};
 use onus_lanes::outcomes::{self, Outcome};
+use onus_lanes::provenance;
 use onus_lanes::pulls::{self, PullRecord};
 use onus_lanes::review::{self, Review, ReviewState};
 use onus_lanes::submission::Approval;
@@ -72,7 +74,7 @@ pub enum CiCmd {
         /// GitHub reviews of the pull request (JSON array; see `onus help ci`).
         #[arg(long, value_name = "FILE")]
         reviews: Option<PathBuf>,
-        /// Where to write the submission, classification, judgment and comment section.
+        /// Where to write the submission, classification, judgment, provenance and comment section.
         #[arg(long, value_name = "DIR")]
         out: PathBuf,
         /// When it happened, in seconds since 1970; now when left out. For records
@@ -90,6 +92,9 @@ pub enum CiCmd {
         /// The commit it landed as, to match reverts against.
         #[arg(long)]
         commit: Option<String>,
+        /// Who merged it (a GitHub login), kept on the outcome for its provenance.
+        #[arg(long, value_name = "LOGIN")]
+        merged_by: Option<String>,
         #[arg(long, value_name = "DIR")]
         records: PathBuf,
         /// When it happened, in seconds since 1970; now when left out. For records
@@ -232,9 +237,25 @@ pub fn run(cmd: CiCmd) -> Result<i32> {
             change,
             merged,
             commit,
+            merged_by,
             records,
             at,
-        } => closed(&change, merged, commit, &records, at.unwrap_or_else(now)),
+        } => {
+            // Only a merge has someone who merged it.
+            let merged_by = merged_by
+                .filter(|_| merged)
+                .map(|l| l.trim().trim_start_matches('@').to_string())
+                .filter(|l| !l.is_empty())
+                .map(|l| format!("@{l}"));
+            closed(
+                &change,
+                merged,
+                commit,
+                merged_by,
+                &records,
+                at.unwrap_or_else(now),
+            )
+        }
         CiCmd::Comment {
             change,
             body_file,
@@ -355,7 +376,7 @@ fn pr(a: PrArgs) -> Result<i32> {
     };
     let (base, head) = (sha(&a.base)?, sha(&a.head)?);
     let message = lanes::git_lines(&a.repo, &["log", "-1", "--format=%B", &head])?.join("\n");
-    let agent = pulls::detect_agent(&message, &a.branch, &a.author);
+    let (agent, agent_source) = pulls::detect_agent_source(&message, &a.branch, &a.author);
     let body = match &a.body_file {
         Some(p) => std::fs::read_to_string(p).unwrap_or_default(),
         None => String::new(),
@@ -462,6 +483,23 @@ fn pr(a: PrArgs) -> Result<i32> {
             // Recorded for `ci closed`; nothing shows it before the merge.
             audit_after_merge: Some(config.audit_after_merge),
         },
+    )?;
+    // The change's provenance while it is open: the facts from this run, with
+    // the records as they now stand.
+    let record_of = provenance::build(provenance::Inputs {
+        submission: Some(&sub),
+        intent_source: IntentSource::PullRequest,
+        agent_source: Some(agent_source),
+        classification: Some(&c),
+        judgment: judgment.as_ref(),
+        policy: Some(onus_lanes::judge::judge_id(&config)),
+        pulls: &pulls::load(&pulls_file(&a.records))?,
+        outcomes: &all_outcomes,
+        ..provenance::Inputs::new(&a.change, at)
+    });
+    std::fs::write(
+        a.out.join("provenance.json"),
+        serde_json::to_vec_pretty(&record_of)?,
     )?;
 
     // The section the comment shows under the report.
@@ -626,6 +664,7 @@ fn closed(
     change: &str,
     merged: bool,
     commit: Option<String>,
+    merged_by: Option<String>,
     records: &Path,
     at: u64,
 ) -> Result<i32> {
@@ -674,6 +713,7 @@ fn closed(
             reviewed_by: last.reviewed_by.clone(),
             sampled,
             audit: None,
+            merged_by,
         },
     )?;
     println!(

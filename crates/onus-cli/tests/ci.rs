@@ -138,6 +138,32 @@ fn a_pull_request_is_recorded_from_open_to_revert() {
         "{md}"
     );
     assert!(md.contains("0 merged on record"), "{md}");
+    // Its provenance while open: who made it and how Onus knew, the lane and
+    // the intent, and what this run could not vouch for.
+    let open: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(out.join("provenance.json")).unwrap())
+            .unwrap();
+    assert_eq!(open["stage"], "open", "{open}");
+    assert_eq!(open["approval"]["by"], "pending");
+    assert_eq!(open["agent"]["key"], "codex//");
+    assert_eq!(open["agent"]["detectedFrom"], "branch");
+    assert_eq!(open["lane"]["lane"], "human");
+    assert!(
+        open["intent"]["check"]["stated"]
+            .as_str()
+            .unwrap()
+            .contains("SMS"),
+        "{open}"
+    );
+    assert_eq!(open["intent"]["source"], "pull-request");
+    assert!(
+        open["gaps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|g| g["field"] == "token"),
+        "{open}"
+    );
 
     // Approving a row needs write access.
     let say = |text: &str, association: &str| -> serde_json::Value {
@@ -276,6 +302,8 @@ fn a_pull_request_is_recorded_from_open_to_revert() {
                 "--merged",
                 "--commit",
                 &merged,
+                "--merged-by",
+                "mike",
                 "--records",
                 rs,
             ],
@@ -284,6 +312,7 @@ fn a_pull_request_is_recorded_from_open_to_revert() {
     let outcomes = lines(&rec.join("outcomes.jsonl"));
     assert_eq!(outcomes.len(), 1, "{outcomes:?}");
     assert_eq!(outcomes[0]["result"], "merged");
+    assert_eq!(outcomes[0]["mergedBy"], "@mike");
     assert_eq!(outcomes[0]["agent"], "codex//");
     assert_eq!(outcomes[0]["lane"], "human");
     assert!(outcomes[0]["judge"].is_null(), "{:?}", outcomes[0]);
@@ -293,6 +322,44 @@ fn a_pull_request_is_recorded_from_open_to_revert() {
         outcomes[0]["components"],
         serde_json::json!(["notifications", "user-preferences"])
     );
+
+    // Its provenance once merged, rebuilt from the records: the facts from
+    // while it was open are kept.
+    let provenance = |file: &str| -> serde_json::Value {
+        let to = t.join(file);
+        onus(
+            &r,
+            &[
+                "provenance",
+                "--change",
+                change,
+                "--records",
+                rs,
+                "--from",
+                out.join("provenance.json").to_str().unwrap(),
+                "--out",
+                to.to_str().unwrap(),
+            ],
+        );
+        serde_json::from_str(&std::fs::read_to_string(to).unwrap()).unwrap()
+    };
+    let from: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(out.join("provenance.json")).unwrap())
+            .unwrap();
+    let p = provenance("merged.json");
+    assert_eq!(p["stage"], "merged", "{p}");
+    assert_eq!(p["approval"]["by"], "person");
+    assert_eq!(p["approval"]["mergedBy"], "@mike");
+    assert_eq!(
+        p["approval"]["people"],
+        serde_json::json!(["@lead", "@mike"])
+    );
+    assert_eq!(p["rollout"]["commit"], merged.as_str());
+    assert_eq!(p["commits"]["merge"], merged.as_str());
+    assert_eq!(p["lane"]["applied"], from["lane"]["applied"]);
+    assert!(!p["lane"]["applied"].as_array().unwrap().is_empty());
+    assert_eq!(p["intent"], from["intent"]);
+    assert_eq!(p["agent"]["detectedFrom"], "branch");
 
     // Audited after the fact, and an incident.
     assert_eq!(
@@ -334,6 +401,38 @@ fn a_pull_request_is_recorded_from_open_to_revert() {
     let reverted = outcomes.last().unwrap();
     assert_eq!(reverted["result"], "reverted");
     assert_eq!(reverted["components"], outcomes[0]["components"]);
+
+    // The rollout holds every outcome in order: merged, audited, the
+    // incident and the revert.
+    let p = provenance("reverted.json");
+    assert_eq!(p["stage"], "merged");
+    assert_eq!(p["rollout"]["result"], "reverted");
+    let history: Vec<&str> = p["rollout"]["history"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["result"].as_str().unwrap())
+        .collect();
+    assert_eq!(history, ["merged", "merged", "incident", "reverted"]);
+    assert_eq!(
+        (&p["rollout"]["audited"], &p["rollout"]["missed"]),
+        (&serde_json::json!(true), &serde_json::json!(true))
+    );
+    assert_eq!(p["approval"]["mergedBy"], "@mike");
+    // The digest says whether the record was changed.
+    let file = t.join("reverted.json");
+    let verify = || {
+        Command::new(env!("CARGO_BIN_EXE_onus"))
+            .args(["provenance", "--verify", file.to_str().unwrap()])
+            .output()
+            .unwrap()
+            .status
+            .code()
+    };
+    assert_eq!(verify(), Some(0));
+    let text = std::fs::read_to_string(&file).unwrap();
+    std::fs::write(&file, text.replace("\"@mike\"", "\"@someone\"")).unwrap();
+    assert_eq!(verify(), Some(1));
 
     // The next change to notifications carries that history.
     git(&r, &["checkout", "-q", "-b", "codex/sms-again"]);

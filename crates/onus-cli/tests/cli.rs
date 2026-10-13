@@ -284,6 +284,11 @@ fn help_prints_every_guide_topic() {
     }
     let (_, text, _) = stdout(&["help", "onus.yaml"]);
     assert!(text.starts_with("# Configuration"));
+    // A topic named like a command: the guide, which explains the record.
+    let (code, text, _) = stdout(&["help", "provenance"]);
+    assert_eq!(code, 0);
+    assert!(text.starts_with("# Risk lanes and the judge"));
+    assert!(text.contains("## Provenance"));
 }
 
 #[test]

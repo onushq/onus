@@ -86,6 +86,16 @@ pub fn latest<'a>(records: &'a [PullRecord], change: &str) -> Option<&'a PullRec
 /// `Co-authored-by` trailer naming an agent; else the person who opened
 /// the pull request.
 pub fn detect_agent(message: &str, branch: &str, author: &str) -> AgentSetup {
+    detect_agent_source(message, branch, author).0
+}
+
+/// [`detect_agent`], and what told: `trailer`, `branch`, `bot`,
+/// `co-author` or `person`.
+pub fn detect_agent_source(
+    message: &str,
+    branch: &str,
+    author: &str,
+) -> (AgentSetup, &'static str) {
     let setup = |tool: &str, model: &str, config: &str| AgentSetup {
         tool: tool.into(),
         model: model.into(),
@@ -97,7 +107,8 @@ pub fn detect_agent(message: &str, branch: &str, author: &str) -> AgentSetup {
             let mut parts = v.split('/').map(str::trim);
             let tool = parts.next().unwrap_or("");
             if !tool.is_empty() {
-                return setup(tool, parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+                let model = parts.next().unwrap_or("");
+                return (setup(tool, model, parts.next().unwrap_or("")), "trailer");
             }
         }
     }
@@ -113,7 +124,7 @@ pub fn detect_agent(message: &str, branch: &str, author: &str) -> AgentSetup {
         ("onus/", "onus-gateway"),
     ];
     if let Some((_, tool)) = BRANCHES.iter().find(|(p, _)| branch.starts_with(p)) {
-        return setup(tool, "", "");
+        return (setup(tool, "", ""), "branch");
     }
     let login = author.to_ascii_lowercase();
     const BOTS: &[(&str, &str)] = &[
@@ -128,10 +139,10 @@ pub fn detect_agent(message: &str, branch: &str, author: &str) -> AgentSetup {
     ];
     let bare = login.trim_end_matches("[bot]");
     if let Some((_, tool)) = BOTS.iter().find(|(b, _)| *b == bare) {
-        return setup(tool, "", "");
+        return (setup(tool, "", ""), "bot");
     }
     if login.ends_with("[bot]") {
-        return setup(bare, "", "");
+        return (setup(bare, "", ""), "bot");
     }
     for line in message.lines() {
         if let Some(v) = trailer(line, "co-authored-by") {
@@ -145,15 +156,18 @@ pub fn detect_agent(message: &str, branch: &str, author: &str) -> AgentSetup {
                 ("aider", "aider"),
             ] {
                 if who.contains(name) {
-                    return setup(tool, "", "");
+                    return (setup(tool, "", ""), "co-author");
                 }
             }
         }
     }
-    setup(
+    (
+        setup(
+            "person",
+            if author.is_empty() { "unknown" } else { author },
+            "",
+        ),
         "person",
-        if author.is_empty() { "unknown" } else { author },
-        "",
     )
 }
 
@@ -198,6 +212,23 @@ mod tests {
             key("x\n\nonus-agent: aider", "claude/x", "Copilot"),
             "aider//"
         );
+        // And what told.
+        let source = |m: &str, b: &str, a: &str| detect_agent_source(m, b, a).1;
+        assert_eq!(
+            source("x\n\nOnus-Agent: aider", "claude/x", "mike"),
+            "trailer"
+        );
+        assert_eq!(source("Fix", "codex/add-sms", "mike"), "branch");
+        assert_eq!(source("Fix", "feature", "renovate[bot]"), "bot");
+        assert_eq!(
+            source(
+                "Fix\n\nCo-authored-by: Claude <noreply@anthropic.com>",
+                "feature",
+                "mike"
+            ),
+            "co-author"
+        );
+        assert_eq!(source("Fix", "feature", "mike"), "person");
     }
 
     #[test]

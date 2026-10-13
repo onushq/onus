@@ -65,7 +65,7 @@ Writes a starter onus.yaml inferred from workspaces and CODEOWNERS. Sensitivity 
 
 ## onus schema
 
-Writes the JSON Schemas of the map, the report, onus.yaml, the plugins file and protocol, and the map overview (`onus query overview`).
+Writes the JSON Schemas of the map, the report, onus.yaml, the plugins file and protocol, the provenance record (`onus provenance`), and the map overview (`onus query overview`).
 
     onus schema --out schemas
     onus schema                         # print them all
@@ -119,14 +119,29 @@ What the GitHub Action runs to keep outcome records on a branch (`onus help ci`)
     onus ci pr --base "$BASE" --head "$HEAD" --change acme/shop#7 --branch codex/sms --author mike \
       --body-file body.md --report report.json --records records --out out
     onus ci comment --change acme/shop#7 --body-file comment.md --author lead --association MEMBER --records records
-    onus ci closed --change acme/shop#7 --merged --commit "$SHA" --records records
+    onus ci closed --change acme/shop#7 --merged --commit "$SHA" --merged-by mike --records records
     onus ci push --records records --since "$BEFORE"
     onus ci records push --dir records --message "acme/shop#7 closed"
 
-- `ci pr` submits, classifies and (with `--judge`) judges the change, appends to `pulls.jsonl`, writes `submission.json`, `classification.json`, `judgment.json` and the comment section `lane.md` to `--out`, and prints `{lane, verdict, agent, record, review}`. `--evidence <file>` adds test runs; `--reviews <file>` gives the pull request's GitHub reviews, for the human lane's review (`onus help ci`).
+- `ci pr` submits, classifies and (with `--judge`) judges the change, appends to `pulls.jsonl`, writes `submission.json`, `classification.json`, `judgment.json`, `provenance.json` and the comment section `lane.md` to `--out`, and prints `{lane, verdict, agent, record, review}`. `--evidence <file>` adds test runs; `--reviews <file>` gives the pull request's GitHub reviews, for the human lane's review (`onus help ci`).
 - `ci comment` acts on `/onus approve <row>`, `/onus audit ok|miss [note]` and `/onus incident <note> [involved: a, b]` from OWNER, MEMBER or COLLABORATOR, and prints `{command, ok, reply, rerun}`. It also answers `/onus caught <note>` (from anyone) and `/onus accuracy ok|wrong <row>|missed <note>` (write access) with what was said, `verdict`, `row`, `note` and `by`, and records neither. `--report <file>` (the report's JSON) checks `wrong <row>` against the report's rows and turns a row number into its id.
-- `ci closed` turns the pull request's latest record into an outcome, and samples a change approved without a person for an audit (`onus help lanes`); `ci push` records reverts.
+- `ci closed` turns the pull request's latest record into an outcome, and samples a change approved without a person for an audit (`onus help lanes`). `--merged-by <login>` keeps who merged it on the outcome, as `@login`, for its provenance. `ci push` records reverts.
 - `ci records` takes `--remote` (default `origin`) and `--branch` (default `onus/records`).
+
+## onus provenance
+
+One record of why a change was allowed through: the intent, the agent and model, the token it held, the evidence, any escalations, the lane and the judge's steps, who or what approved it, and how it rolled out (`onus help provenance`, schemas/provenance.schema.json).
+
+    onus provenance --change acme/shop#7 --records records --from out/provenance.json --out p.json
+    onus provenance --submission-id 4fa91c
+    onus provenance --verify p.json
+
+- `--change <id>`: the change, as the records name it. Default: the change of `--from`, else the submission's head commit.
+- `--records <dir>` (or `--outcomes <file>`): the pull and outcome records, for the stage, approver and rollout.
+- `--from <file>`: an earlier record of the change; its facts from while the change was open are kept.
+- `--submission <file>` or `--submission-id <id>`, `--classification <file>`, `--judgment <file>`: what was handed in and decided. `--submission-id` reads `.onus/submissions` of `--repo`, with the judgment, audit log, escalations and outcomes beside it.
+- `--token <token>` with `--key-public <file>`: a task token, verified (an error when it does not verify) and never kept; `--audit <file>`, `--escalations <dir>` and `--task <id>`: the door log, escalation requests, and whose door decisions to include.
+- `--out <file>`: write it instead of printing it. `--verify <file>`: check a record's digest and schema version; exit 1 when they do not match.
 
 ## onus login, onus logout, onus cloud
 

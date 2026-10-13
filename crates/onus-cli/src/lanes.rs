@@ -263,6 +263,8 @@ pub fn scope_and_agent(
             task: v.task.clone(),
             rights: v.rights.iter().map(|r| r.to_string()).collect(),
             attenuations: v.attenuations.clone(),
+            expires: Some(v.expires),
+            fingerprint: Some(onus_lanes::provenance::fingerprint(token)),
         },
         v.agent,
     ))
@@ -660,6 +662,7 @@ pub fn outcomes_cmd(cmd: OutcomesCmd) -> Result<i32> {
                     reviewed_by: vec![],
                     sampled: false,
                     audit: None,
+                    merged_by: None,
                 },
             )?;
             Ok(0)

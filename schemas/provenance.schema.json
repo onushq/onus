@@ -1,0 +1,946 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ProvenanceRecord",
+  "description": "Everything Onus knows about why one change was allowed through.",
+  "type": "object",
+  "properties": {
+    "agent": {
+      "$ref": "#/$defs/Agent"
+    },
+    "approval": {
+      "$ref": "#/$defs/Approval"
+    },
+    "change": {
+      "description": "`owner/repo#123`, or a head commit for a local change.",
+      "type": "string"
+    },
+    "commits": {
+      "$ref": "#/$defs/Commits"
+    },
+    "digest": {
+      "description": "sha256 (hex) of this record's compact JSON with `digest` empty.",
+      "type": "string"
+    },
+    "doors": {
+      "description": "Door decisions for the task, from the audit log.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Doors"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "escalations": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Escalation"
+      }
+    },
+    "evidence": {
+      "description": "Test runs handed in with the change.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Evidence"
+      }
+    },
+    "gaps": {
+      "description": "What this record could not establish, and why.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Gap"
+      }
+    },
+    "generatedAt": {
+      "description": "Unix seconds.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "intent": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Intent"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "judge": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Judge"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "lane": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/LaneFacts"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "onus": {
+      "description": "The Onus version that built the record.",
+      "type": "string"
+    },
+    "report": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ReportFacts"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "rollout": {
+      "$ref": "#/$defs/Rollout"
+    },
+    "schema": {
+      "description": "[`SCHEMA`].",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "stage": {
+      "$ref": "#/$defs/Stage"
+    },
+    "token": {
+      "description": "The task token the change was made under. Never the token itself.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Token"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "schema",
+    "change",
+    "stage",
+    "generatedAt",
+    "onus",
+    "commits",
+    "agent",
+    "approval",
+    "rollout",
+    "digest"
+  ],
+  "$defs": {
+    "Agent": {
+      "type": "object",
+      "properties": {
+        "config": {
+          "type": "string",
+          "default": ""
+        },
+        "detectedFrom": {
+          "description": "How it was known: `trailer`, `branch`, `bot`, `co-author`, `person`,\n`submission`, `record` (a pull record) or `outcome`.",
+          "type": "string"
+        },
+        "key": {
+          "description": "`tool/model/config`, the key outcomes are recorded under.",
+          "type": "string"
+        },
+        "model": {
+          "type": "string",
+          "default": ""
+        },
+        "record": {
+          "description": "Its track record when the record was built.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TrackRecord"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "team": {
+          "type": "string",
+          "default": ""
+        },
+        "tool": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "tool",
+        "key",
+        "detectedFrom"
+      ]
+    },
+    "Approval": {
+      "type": "object",
+      "properties": {
+        "by": {
+          "$ref": "#/$defs/ApprovedBy"
+        },
+        "judge": {
+          "description": "The judge configuration, when the judge approved.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mergedBy": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "people": {
+          "description": "Everyone who approved (`@login`): row approvers, approving reviewers\nand who merged it, each once, in that order.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "rows": {
+          "description": "Rows of the report a person approved.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RowApproval"
+          }
+        }
+      },
+      "required": [
+        "by"
+      ]
+    },
+    "ApprovedBy": {
+      "description": "Who or what let the change through.",
+      "oneOf": [
+        {
+          "description": "The lane policy: it was in the auto-merge lane.",
+          "type": "string",
+          "const": "policy"
+        },
+        {
+          "description": "The judge approved it.",
+          "type": "string",
+          "const": "judge"
+        },
+        {
+          "description": "A person.",
+          "type": "string",
+          "const": "person"
+        },
+        {
+          "description": "It merged although Onus blocked it.",
+          "type": "string",
+          "const": "override"
+        },
+        {
+          "description": "Still open.",
+          "type": "string",
+          "const": "pending"
+        },
+        {
+          "description": "Closed without merging.",
+          "type": "string",
+          "const": "none"
+        }
+      ]
+    },
+    "Commits": {
+      "type": "object",
+      "properties": {
+        "base": {
+          "type": "string"
+        },
+        "head": {
+          "type": "string"
+        },
+        "merge": {
+          "description": "The commit it landed as.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "base",
+        "head"
+      ]
+    },
+    "DoorEntry": {
+      "description": "One door decision, as the audit log holds it.",
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "actor": {
+          "type": "string"
+        },
+        "at": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "decision": {
+          "type": "string"
+        },
+        "hash": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "seq": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "subject": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "seq",
+        "at",
+        "actor",
+        "action",
+        "subject",
+        "decision",
+        "reason",
+        "hash"
+      ]
+    },
+    "Doors": {
+      "type": "object",
+      "properties": {
+        "entries": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/DoorEntry"
+          }
+        },
+        "intact": {
+          "description": "The audit log's hash chain verified.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "intact"
+      ]
+    },
+    "Escalation": {
+      "type": "object",
+      "properties": {
+        "at": {
+          "description": "Unix seconds.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "bestGrade": {
+          "description": "The strongest evidence grade (1 is strongest).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        },
+        "by": {
+          "description": "Who decided: a person, or `policy` for an automatic grant.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "decision": {
+          "description": "`granted`, `denied`, `needs-person`, `answered` or `open`.",
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "description": "`permission`, `broken-test`, `contradictory-spec` or `impossible-task`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scopes": {
+          "description": "The rights asked for.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "decision"
+      ]
+    },
+    "Evidence": {
+      "type": "object",
+      "properties": {
+        "atHead": {
+          "description": "It ran at the head commit.",
+          "type": "boolean"
+        },
+        "command": {
+          "type": "string"
+        },
+        "commit": {
+          "type": "string"
+        },
+        "exitCode": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "image": {
+          "type": "string"
+        },
+        "manifest": {
+          "description": "The evidence-store manifest, when it ran in an environment.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "command",
+        "commit",
+        "image",
+        "exitCode",
+        "atHead"
+      ]
+    },
+    "Gap": {
+      "description": "Something the record cannot vouch for.",
+      "type": "object",
+      "properties": {
+        "field": {
+          "type": "string"
+        },
+        "reason": {
+          "description": "Why, and how to fill it.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "field",
+        "reason"
+      ]
+    },
+    "Intent": {
+      "type": "object",
+      "properties": {
+        "check": {
+          "description": "The report's check of the intent against what changed.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IntentCheck"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sha256": {
+          "description": "sha256 (hex) of the intent text as given.",
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/IntentSource"
+        }
+      },
+      "required": [
+        "source",
+        "sha256"
+      ]
+    },
+    "IntentCheck": {
+      "type": "object",
+      "properties": {
+        "contracts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "externals": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "mismatches": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/IntentMismatch"
+          }
+        },
+        "stated": {
+          "type": "string"
+        },
+        "touches": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "stated",
+        "touches",
+        "contracts",
+        "externals",
+        "mismatches"
+      ]
+    },
+    "IntentMismatch": {
+      "type": "object",
+      "properties": {
+        "changeId": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "changeId",
+        "reason"
+      ]
+    },
+    "IntentSource": {
+      "oneOf": [
+        {
+          "description": "The pull request body.",
+          "type": "string",
+          "const": "pull-request"
+        },
+        {
+          "description": "A submission (`onus submit`, `onus_submit`).",
+          "type": "string",
+          "const": "submission"
+        }
+      ]
+    },
+    "Judge": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "The judge configuration that decided.",
+          "type": "string"
+        },
+        "reasons": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "steps": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/JudgeStep"
+          }
+        },
+        "verdict": {
+          "description": "`approve`, `reject` or `escalate`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "verdict"
+      ]
+    },
+    "JudgeStep": {
+      "type": "object",
+      "properties": {
+        "details": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "name": {
+          "type": "string"
+        },
+        "status": {
+          "description": "`passed`, `failed`, `skipped` or `concern`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "status"
+      ]
+    },
+    "Lane": {
+      "description": "What happens to a change, from least to most scrutiny.",
+      "oneOf": [
+        {
+          "description": "Merged once required checks pass.",
+          "type": "string",
+          "const": "auto-merge"
+        },
+        {
+          "description": "Verified by the judge (`onus judge`), then merged or escalated.",
+          "type": "string",
+          "const": "judge"
+        },
+        {
+          "description": "A person reviews it.",
+          "type": "string",
+          "const": "human"
+        },
+        {
+          "description": "It may not merge as it is.",
+          "type": "string",
+          "const": "blocked"
+        }
+      ]
+    },
+    "LaneFacts": {
+      "type": "object",
+      "properties": {
+        "applied": {
+          "description": "Every rule that applied, in order.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/LaneReason"
+          }
+        },
+        "lane": {
+          "description": "The final lane, after the judge.",
+          "$ref": "#/$defs/Lane"
+        },
+        "policy": {
+          "description": "The lane policy's hash (the judge configuration id).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "lane"
+      ]
+    },
+    "LaneReason": {
+      "type": "object",
+      "properties": {
+        "lane": {
+          "$ref": "#/$defs/Lane"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "rows": {
+          "description": "The ids of the report rows behind it.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "source": {
+          "description": "`default`, `policy`, `input`, `floor`, `record` or `audit`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "lane",
+        "source",
+        "reason"
+      ]
+    },
+    "ReportFacts": {
+      "type": "object",
+      "properties": {
+        "changedFiles": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "needsPerson": {
+          "description": "Ids of the rows that need a person.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "summary": {
+          "$ref": "#/$defs/ReportSummary"
+        }
+      },
+      "required": [
+        "summary",
+        "changedFiles"
+      ]
+    },
+    "ReportSummary": {
+      "type": "object",
+      "properties": {
+        "intentMismatches": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "meaningChanges": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "needsAttention": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "newRuleViolations": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "secrets": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "meaningChanges",
+        "needsAttention",
+        "secrets",
+        "newRuleViolations",
+        "intentMismatches"
+      ]
+    },
+    "Rollout": {
+      "type": "object",
+      "properties": {
+        "at": {
+          "description": "When it merged or closed (Unix seconds).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "audited": {
+          "description": "A person audited it after it merged.",
+          "type": "boolean",
+          "default": false
+        },
+        "commit": {
+          "description": "The commit it landed as.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "history": {
+          "description": "Every outcome of the change, in order.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RolloutEvent"
+          }
+        },
+        "missed": {
+          "description": "The audit found a problem the automatic path missed.",
+          "type": "boolean",
+          "default": false
+        },
+        "result": {
+          "description": "`open`, `merged`, `closed`, `reverted`, `rolled-back` or `incident`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "result"
+      ]
+    },
+    "RolloutEvent": {
+      "type": "object",
+      "properties": {
+        "at": {
+          "description": "Unix seconds.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "involved": {
+          "description": "For an incident: the components and symbols it involved.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "result": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "at",
+        "result"
+      ]
+    },
+    "RowApproval": {
+      "type": "object",
+      "properties": {
+        "by": {
+          "type": "string"
+        },
+        "row": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "row",
+        "by"
+      ]
+    },
+    "Stage": {
+      "description": "Where the change is: still open, merged, or closed without merging.",
+      "type": "string",
+      "enum": [
+        "open",
+        "merged",
+        "closed"
+      ]
+    },
+    "Token": {
+      "type": "object",
+      "properties": {
+        "attenuations": {
+          "description": "Attenuations, as Datalog.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "expires": {
+          "description": "Unix seconds.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "fingerprint": {
+          "description": "The first 16 hex digits of the token's sha256; never the token.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rights": {
+          "description": "The token's rights (`write:path:…`).",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "source": {
+          "$ref": "#/$defs/TokenSource"
+        },
+        "task": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "task",
+        "source"
+      ]
+    },
+    "TokenSource": {
+      "description": "Where the token facts come from.",
+      "oneOf": [
+        {
+          "description": "Verified by the run that built the record.",
+          "type": "string",
+          "const": "token"
+        },
+        {
+          "description": "Verified when the submission was made.",
+          "type": "string",
+          "const": "submission"
+        },
+        {
+          "description": "The door log's `mint` entry for the task, widened by its grants.",
+          "type": "string",
+          "const": "audit"
+        }
+      ]
+    },
+    "TrackRecord": {
+      "type": "object",
+      "properties": {
+        "merged": {
+          "description": "Changes still merged (not reverted, no incident).",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "recentIncidents": {
+          "description": "Incidents among its recent changes.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "merged",
+        "recentIncidents"
+      ]
+    }
+  }
+}

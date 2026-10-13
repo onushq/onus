@@ -142,6 +142,12 @@ outputs:
   lane:
     description: The change's risk lane when lanes is 'true'.
     value: ${{ steps.lane.outputs.lane }}
+  provenance:
+    description: >-
+      Path of the change's provenance record with records 'true'
+      (schemas/provenance.schema.json): written while the pull request is
+      open, and rebuilt when it closes.
+    value: ${{ steps.outcome.outputs.provenance || steps.lane.outputs.provenance }}
   metrics:
     description: >-
       One line of JSON about this report (sizes, counts, time taken), also
@@ -389,6 +395,7 @@ runs:
           cat "$out/lane.md" >> "$MD"
           cat "$out/lane.md" >> "$GITHUB_STEP_SUMMARY"
           echo "lane=$(jq -r .lane <<< "$summary")" >> "$GITHUB_OUTPUT"
+          if [ -f "$out/provenance.json" ]; then echo "provenance=$out/provenance.json" >> "$GITHUB_OUTPUT"; fi
           exit 0
         fi
         if ! "$ONUS" classify --help > /dev/null 2>&1; then
@@ -492,6 +499,7 @@ runs:
         exit 2
 
     - name: Record the outcome
+      id: outcome
       if: github.event_name == 'pull_request' && github.event.action == 'closed' && inputs.records == 'true'
       shell: bash
       working-directory: ${{ inputs.working-directory }}
@@ -501,15 +509,25 @@ runs:
         CHANGE: ${{ github.repository }}#${{ github.event.pull_request.number }}
         MERGED: ${{ github.event.pull_request.merged }}
         COMMIT: ${{ github.event.pull_request.merge_commit_sha }}
+        MERGED_BY: ${{ github.event.pull_request.merged_by.login }}
       run: |
         set -euo pipefail
         dir="$RUNNER_TEMP/onus-records"
         "$ONUS" ci records pull --dir "$dir" --branch "$RECORDS_BRANCH"
         args=(--change "$CHANGE" --records "$dir")
         if [ "$MERGED" = true ]; then args+=(--merged --commit "$COMMIT"); fi
+        # Releases with provenance also know who merged it.
+        provenance=false
+        if "$ONUS" provenance --help > /dev/null 2>&1; then provenance=true; fi
+        if [ "$provenance" = true ] && [ -n "$MERGED_BY" ]; then args+=(--merged-by "$MERGED_BY"); fi
         "$ONUS" ci closed "${args[@]}"
         "$ONUS" ci records push --dir "$dir" --branch "$RECORDS_BRANCH" --message "$CHANGE closed" ||
           echo "::warning::Cannot push the records to $RECORDS_BRANCH (a read-only token on a fork?)."
+        if [ "$provenance" = true ]; then
+          mkdir -p "$RUNNER_TEMP/onus"
+          "$ONUS" provenance --change "$CHANGE" --records "$dir" --out "$RUNNER_TEMP/onus/provenance.json"
+          echo "provenance=$RUNNER_TEMP/onus/provenance.json" >> "$GITHUB_OUTPUT"
+        fi
 
     - name: /onus commands
       if: >-

@@ -239,7 +239,7 @@ Examples:
         #[arg(long)]
         stdout: bool,
     },
-    /// Write the JSON Schemas of the map, report and config formats.
+    /// Write the JSON Schemas of the map, report, config and provenance formats.
     #[command(after_long_help = "\
 Examples:
   onus schema --out schemas
@@ -424,6 +424,14 @@ Examples:
         #[command(subcommand)]
         cmd: lanes::OutcomesCmd,
     },
+    /// One record of why a change was allowed through: intent, agent, token, evidence,
+    /// escalations, judge, approver, rollout.
+    #[command(after_long_help = "\
+Examples:
+  onus provenance --change acme/shop#7 --records rec --from out/provenance.json
+  onus provenance --submission-id 4fa91c
+  onus provenance --verify provenance.json")]
+    Provenance(provenance::ProvenanceArgs),
     /// Check an audit log's hash chain.
     Audit {
         /// The audit log (JSONL).
@@ -642,6 +650,7 @@ mod cloud_doors;
 mod doors;
 mod envs;
 mod lanes;
+mod provenance;
 mod records;
 mod ui;
 
@@ -842,6 +851,7 @@ fn run(cli: Cli) -> Result<i32> {
         Cmd::Classify(args) => lanes::classify_cmd(args),
         Cmd::Judge(args) => lanes::judge_cmd(args),
         Cmd::Outcomes { cmd } => lanes::outcomes_cmd(cmd),
+        Cmd::Provenance(args) => provenance::run(args),
         Cmd::Escalation { cmd } => doors::escalation(cmd),
         Cmd::RunTest(args) => doors::run_test(args),
         Cmd::Env { cmd } => envs::env_cmd(cmd),

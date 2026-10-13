@@ -4,6 +4,7 @@
 pub mod classify;
 pub mod judge;
 pub mod outcomes;
+pub mod provenance;
 pub mod pulls;
 pub mod review;
 pub mod submission;

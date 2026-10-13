@@ -14,6 +14,7 @@ pub mod map;
 pub mod paths;
 pub mod plugins;
 pub mod protocol;
+pub mod provenance;
 pub mod provider;
 pub mod rank;
 pub mod schema;

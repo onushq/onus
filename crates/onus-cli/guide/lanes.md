@@ -130,6 +130,49 @@ What happens after merging changes the record:
 
 Reverts are found from commit messages (`This reverts commit …`) and recorded against the change they undo; a reverted change no longer counts toward its agent setup's record. A change turned off by a feature flag or a rolled-back rollout is recorded with `onus outcomes record --result rolled-back` and counts the same way. An agent setup with an incident among its last 20 changes cannot auto-merge. `backlog` lists the components and symbols incidents involved, most often first: where the next held-out tests should go. Onus does not write tests.
 
+## Provenance
+
+Every change carries one record of why it was allowed through: the intent, the agent and model, the token it held, the evidence, any escalations, the lane and the judge's steps, who or what approved it, and how it rolled out. `onus ci pr` writes it as `provenance.json` beside the submission while the pull request is open. `onus provenance` rebuilds it from the records as outcomes arrive:
+
+    onus provenance --change acme/shop#7 --records rec --from out/provenance.json --out p.json
+    onus provenance --submission-id 4fa91c        # a submission kept by onus ui or onus mcp
+    onus provenance --submission sub.json --audit audit.jsonl --escalations escalations --task sms
+    onus provenance --verify p.json
+
+`--from` is an earlier record of the change. Its facts from while the change was open (intent, report, token, evidence, escalations, lane reasons, judge, doors) are kept unless fresh ones are given. The stage, merge commit, approver and rollout are worked out again from the records every time. `--submission-id` reads `.onus/submissions/<id>.json`, its judgment, and the repository's `.onus` audit log, escalations and outcomes.
+
+| Field | What it holds |
+|---|---|
+| `stage` | `open`, `merged` or `closed`. |
+| `intent` | Where the intent came from (`pull-request` or `submission`), its sha256, and the report's intent check. |
+| `agent` | The agent setup, how it was recognised (`trailer`, `branch`, `bot`, `co-author`, `person`, `submission`), and its track record. |
+| `token` | The task, rights, attenuations, expiry and a 16-digit fingerprint. Never the token itself. `source` says where it came from: `token` (verified by this run), `submission` (verified when the submission was made) or `audit` (the door log's `mint` entry, widened by grants). |
+| `evidence` | Each test run: command, commit, image, exit code, manifest, and whether it ran at the head commit. |
+| `escalations` | Each request: kind, scopes, best evidence grade, and the last decision in the door log, by whom (`policy` for an automatic grant). |
+| `lane`, `judge` | The final lane, every rule that applied, the lane policy's hash, and the judge's verdict, steps and reasons. |
+| `approval` | Who or what approved it (below), the people, the rows they approved, and who merged it. |
+| `rollout` | The result now, the merge commit and time, whether a person audited it, and every outcome in order. |
+| `doors` | The door log's decisions for the task, and whether its hash chain is intact. |
+| `gaps` | What the record cannot vouch for, and how to fill it. |
+
+Who or what approved it:
+
+| Stage | Final lane | Judge verdict | `approval.by` |
+|---|---|---|---|
+| open | any | any | `pending` |
+| closed | any | any | `none` |
+| merged | `auto-merge` | any | `policy` |
+| merged | `judge` | `approve` | `judge` |
+| merged | `judge` | `escalate`, `reject` or none | `person` |
+| merged | `human` | any | `person` |
+| merged | `blocked` | any | `override` (it merged although Onus blocked it) |
+
+`approval.people` lists the people who approved rows, the approving reviewers, then who merged it (`onus ci closed --merged-by`), each once. When a person approved and none is known, `gaps` says so.
+
+A gap is listed for each of `intent`, `token`, `evidence`, `escalations`, `judge` and `doors` that is empty. In CI no task token reaches the run, so `token` is a gap there.
+
+`digest` is the sha256 of the record's compact JSON with the digest left empty. `--verify` checks it and the schema version, and exits 1 when either does not match. The format is `schemas/provenance.schema.json`; new optional fields may be added under `schema: 1`.
+
 ## In CI
 
 In the human lane, `onus ci pr --reviews <file>` decides whether the change has the review it needs: an approval of the head commit from someone with write access who is not a bot and did not open the pull request, and no outstanding request for changes. It also names the owners of the rows that need a person (onus.yaml, else CODEOWNERS) for the host to ask, each once per pull request. Onus Cloud uses this to keep its check waiting until then; see `onus help ci`.

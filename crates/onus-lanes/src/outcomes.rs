@@ -61,6 +61,9 @@ pub struct Outcome {
     /// The latest audit by a person: who, when and what they found.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audit: Option<AuditMark>,
+    /// Who merged it (`@login`), when the host said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merged_by: Option<String>,
 }
 
 /// A person's audit of a merged change.
@@ -523,6 +526,7 @@ mod tests {
             reviewed_by: vec![],
             sampled: false,
             audit: None,
+            merged_by: None,
         }
     }
 
@@ -849,5 +853,28 @@ mod tests {
         }];
         let added = ingest_reverts(std::slice::from_ref(&s), &reverts, 5);
         assert!(added[0].sampled && added[0].audit.is_some());
+    }
+
+    #[test]
+    fn who_merged_is_kept_and_old_lines_stay_the_same() {
+        let old = r#"{"at":1,"change":"x","agent":"a//","judge":null,"lane":"human","verdict":null,"result":"merged","audited":false,"missed":false}"#;
+        let o: Outcome = serde_json::from_str(old).unwrap();
+        assert_eq!(o.merged_by, None);
+        // Written without it, a line keeps the same bytes.
+        assert_eq!(serde_json::to_string(&o).unwrap(), old);
+        let mut merged = o.clone();
+        merged.merged_by = Some("@mike".into());
+        merged.commit = Some("abc1234".into());
+        let line = serde_json::to_string(&merged).unwrap();
+        assert!(line.ends_with(r#","mergedBy":"@mike"}"#), "{line}");
+        assert_eq!(serde_json::from_str::<Outcome>(&line).unwrap(), merged);
+        // A revert carries it forward.
+        let reverts = [Revert {
+            revert: "f".repeat(40),
+            reverted: "abc1234".into(),
+            subject: "Revert".into(),
+        }];
+        let added = ingest_reverts(&[merged], &reverts, 5);
+        assert_eq!(added[0].merged_by.as_deref(), Some("@mike"));
     }
 }

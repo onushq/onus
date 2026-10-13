@@ -1022,6 +1022,7 @@ fn outcomes_record(state: &State, body: Value) -> Answer {
             reviewed_by: vec![],
             sampled: false,
             audit: None,
+            merged_by: None,
         },
     )?;
     outcomes(state)

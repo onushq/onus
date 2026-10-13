@@ -78,10 +78,33 @@ pub struct Places {
     pub public_key: Option<PathBuf>,
 }
 
+/// Where a repository keeps its records in `.onus/`: what `onus ui`, `onus mcp`
+/// and `onus provenance --submission-id` read and write.
+#[derive(Debug, Clone)]
+pub struct Kept {
+    pub outcomes: PathBuf,
+    pub audit: PathBuf,
+    pub escalations: PathBuf,
+    /// Submissions (`<id>.json`) and their judgments (`<id>.judgment.json`).
+    pub submissions: PathBuf,
+}
+
+/// The `.onus/` layout of the worktree `root`.
+pub fn places(root: &Path) -> Kept {
+    let dot = root.join(".onus");
+    Kept {
+        outcomes: dot.join("outcomes.jsonl"),
+        audit: dot.join("audit.jsonl"),
+        escalations: dot.join("escalations"),
+        submissions: dot.join("submissions"),
+    }
+}
+
 impl State {
     /// The state for the worktree `root`; records go to `.onus/` in it.
     pub fn new(root: PathBuf, token: String, port: u16, places: Places) -> State {
         let dot = root.join(".onus");
+        let kept = self::places(&root);
         let keys = places
             .keys
             .or_else(|| home().map(|h| h.join(".onus-keys")))
@@ -90,14 +113,10 @@ impl State {
             token,
             port,
             server: onus_cli::daemon::Server::new(),
-            outcomes: places
-                .outcomes
-                .unwrap_or_else(|| dot.join("outcomes.jsonl")),
-            audit: places.audit.unwrap_or_else(|| dot.join("audit.jsonl")),
-            escalations: places
-                .escalations
-                .unwrap_or_else(|| dot.join("escalations")),
-            submissions: dot.join("submissions"),
+            outcomes: places.outcomes.unwrap_or(kept.outcomes),
+            audit: places.audit.unwrap_or(kept.audit),
+            escalations: places.escalations.unwrap_or(kept.escalations),
+            submissions: kept.submissions,
             public_key: places.public_key.unwrap_or_else(|| keys.join("root.pub")),
             keys,
             root,

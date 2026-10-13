@@ -385,6 +385,185 @@ fn submissions_list_only_granted_escalations() {
 }
 
 #[test]
+fn a_local_change_has_its_token_escalations_and_doors_on_record() {
+    let dir = repo();
+    let r = dir.path();
+    change(
+        r,
+        "sms",
+        &[(
+            "services/notifications/src/sms.ts",
+            "export const SMS = 1;\n",
+        )],
+    );
+    let keys = out(r, "keys");
+    let (code, _, err) = onus(r, &["token", "keygen", "--out", &keys]);
+    assert_eq!(code, 0, "{err}");
+    let plan = out(r, "plan.yaml");
+    std::fs::write(
+        &plan,
+        "task: sms\nwrites: [\"services/notifications/**\"]\nagent: {tool: claude-code, model: opus}\n",
+    )
+    .unwrap();
+    let key = format!("{keys}/root.key");
+    let public = format!("{keys}/root.pub");
+    // The door log sits beside the escalation requests.
+    let audit = out(r, "audit.jsonl");
+    let (code, token, err) = onus(
+        r,
+        &[
+            "token", "mint", "--plan", &plan, "--key", &key, "--audit", &audit,
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    let (code, request, err) = onus(
+        r,
+        &[
+            "escalate",
+            "--task",
+            "sms",
+            "--scope",
+            "write:path:services/orders/src/**",
+            "--evidence",
+            "rationale:the event needs the phone",
+            "--reason",
+            "the event needs the phone",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    let id = serde_json::from_str::<serde_json::Value>(&request).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let escalations = out(r, "escalations");
+    std::fs::create_dir_all(&escalations).unwrap();
+    let file = format!("{escalations}/{id}.json");
+    std::fs::write(&file, &request).unwrap();
+    let with_token = |args: &[&str]| {
+        let mut all = args.to_vec();
+        all.extend_from_slice(&["--token", &token, "--key-public", &public]);
+        onus(r, &all)
+    };
+    // Policy leaves it to a person, who grants it.
+    let (code, _, err) = with_token(&[
+        "escalation",
+        "decide",
+        &file,
+        "--key",
+        &key,
+        "--audit",
+        &audit,
+    ]);
+    assert_eq!(code, 3, "{err}");
+    let (code, _, err) = with_token(&[
+        "escalation",
+        "grant",
+        &file,
+        "--key",
+        &key,
+        "--by",
+        "@lead",
+        "--audit",
+        &audit,
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let sub = out(r, "sub.json");
+    let (code, _, err) = with_token(&[
+        "submit",
+        "--base",
+        "main",
+        "--head",
+        "sms",
+        "--escalation",
+        &id,
+        "--escalations-dir",
+        &escalations,
+        "--out",
+        &sub,
+    ]);
+    assert_eq!(code, 0, "{err}");
+
+    let (code, text, err) = onus(
+        r,
+        &[
+            "provenance",
+            "--submission",
+            &sub,
+            "--audit",
+            &audit,
+            "--escalations",
+            &escalations,
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    let p: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(p["token"]["source"], "submission", "{p}");
+    assert_eq!(p["token"]["task"], "sms");
+    assert_eq!(
+        p["token"]["rights"][0], "write:path:services/notifications/**",
+        "{p}"
+    );
+    assert_eq!(p["token"]["fingerprint"].as_str().unwrap().len(), 16);
+    assert!(
+        !text.contains(token.trim()),
+        "the token itself is never kept"
+    );
+    assert_eq!(p["escalations"][0]["id"], id.as_str());
+    assert_eq!(p["escalations"][0]["decision"], "granted");
+    assert_eq!(p["escalations"][0]["by"], "@lead");
+    assert_eq!(p["agent"]["key"], "claude-code/opus/");
+    assert_eq!(p["agent"]["detectedFrom"], "submission");
+    assert_eq!(p["doors"]["intact"], true);
+    let actions: Vec<&str> = p["doors"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["action"].as_str().unwrap())
+        .collect();
+    assert_eq!(actions, ["mint", "escalate", "grant"]);
+    // The change is the submission's head; the record is local, so open.
+    assert_eq!(p["stage"], "open");
+    assert_eq!(p["change"], p["commits"]["head"]);
+    assert!(
+        !p["gaps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|g| g["field"] == "token" || g["field"] == "doors")
+    );
+
+    // The same from what onus ui and onus mcp keep in .onus.
+    let dot = r.join(".onus");
+    std::fs::create_dir_all(dot.join("submissions")).unwrap();
+    std::fs::create_dir_all(dot.join("escalations")).unwrap();
+    std::fs::copy(&sub, dot.join("submissions/4fa91c.json")).unwrap();
+    std::fs::copy(&audit, dot.join("audit.jsonl")).unwrap();
+    std::fs::copy(&file, dot.join(format!("escalations/{id}.json"))).unwrap();
+    let (code, text, err) = onus(r, &["provenance", "--submission-id", "4fa91c"]);
+    assert_eq!(code, 0, "{err}");
+    let kept: serde_json::Value = serde_json::from_str(&text).unwrap();
+    for field in ["token", "escalations", "doors", "change"] {
+        assert_eq!(kept[field], p[field], "{field}");
+    }
+
+    // A token that does not verify is an error, not a gap.
+    let (code, _, err) = onus(
+        r,
+        &[
+            "provenance",
+            "--submission",
+            &sub,
+            "--token",
+            "not-a-token",
+            "--key-public",
+            &public,
+        ],
+    );
+    assert_eq!(code, 1);
+    assert!(err.contains("does not verify"), "{err}");
+}
+
+#[test]
 fn risk_inputs_and_new_floors_raise_lanes() {
     let dir = repo();
     let r = dir.path();
