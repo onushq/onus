@@ -61,6 +61,9 @@ pub struct DiffOptions {
     /// calls are added to both maps (ADR 0010), so a traced call is a fact of
     /// both trees, not a change.
     pub traces: Vec<PathBuf>,
+    /// Coverage of the head tree (ADR 0017): line numbers belong to the
+    /// commit the tests ran at, so it never applies to the base.
+    pub coverage: Vec<onus_map::coverage::CoverageInput>,
 }
 
 /// Plugins and trusted mode (ADR 0006), the same for every tree.
@@ -528,6 +531,19 @@ pub fn diff_dirs(base: &Path, head: &Path, opts: &DiffOptions) -> Result<Outcome
             }
         ));
     }
+    if !opts.coverage.is_empty() {
+        let s = add_coverage(&mut head_map, &opts.coverage)?;
+        notes.push(format!("coverage: {}", s.summary()));
+        // Recorded files that are not coverage, left out.
+        notes.extend(
+            head_map
+                .coverage
+                .iter()
+                .flat_map(|c| &c.notes)
+                .filter(|n| !n.starts_with("coverage of `"))
+                .map(|n| format!("coverage: {n}")),
+        );
+    }
     let report = onus_diff::diff(&DiffInput {
         base_root: base,
         head_root: head,
@@ -554,6 +570,89 @@ pub fn add_traces(
     traces: &[PathBuf],
 ) -> Result<onus_map::traces::TraceStats> {
     onus_map::traces::add_traced_edges(map, traces).map_err(|e| anyhow::anyhow!(e))
+}
+
+/// Adds coverage to a map (see [`onus_map::coverage`]).
+pub fn add_coverage(
+    map: &mut CodebaseMap,
+    inputs: &[onus_map::coverage::CoverageInput],
+) -> Result<onus_map::coverage::CoverageStats> {
+    onus_map::coverage::add_coverage(map, None, inputs).map_err(|e| anyhow::anyhow!(e))
+}
+
+/// Coverage recorded by environment runs at `head_sha` (ADR 0017): the
+/// `coverage` artifacts of each run's manifest, checked against the store.
+/// Runs without a manifest (`onus run-test`) or without coverage record
+/// none; coverage from another commit, or not in the store, is skipped with
+/// a note. Each input keeps its run's command: an agent picks
+/// the commands it runs, so the lane policy counts only the commands it
+/// names (`lanes.inputs.coverage.commands`).
+pub fn recorded_coverage(
+    repo: &Path,
+    head_sha: &str,
+    runs: &[onus_doors::runner::TestRun],
+) -> Result<(Vec<onus_map::coverage::CoverageInput>, Vec<String>)> {
+    use onus_env::store::{ArtifactKind, Store};
+    let mut inputs = Vec::new();
+    let mut notes = Vec::new();
+    if runs.iter().all(|r| r.manifest.is_none()) {
+        return Ok((inputs, notes));
+    }
+    let short = |s: &str| s.chars().take(8).collect::<String>();
+    let store = Store::for_repo(repo)?;
+    for run in runs {
+        // A run without a manifest (onus run-test) records no coverage.
+        let Some(id) = &run.manifest else {
+            continue;
+        };
+        let (full, manifest) = match store.manifest(id) {
+            Ok(m) => m,
+            Err(e) => {
+                notes.push(format!(
+                    "run {}: {e:#}; its coverage is left out",
+                    short(id)
+                ));
+                continue;
+            }
+        };
+        let recorded = manifest
+            .artifacts
+            .iter()
+            .any(|a| a.kind == ArtifactKind::Coverage);
+        if !recorded {
+            continue;
+        }
+        if manifest.commit != head_sha {
+            notes.push(format!(
+                "run {} ran at {}, not the head commit; its coverage is left out",
+                short(&full),
+                short(&manifest.commit)
+            ));
+            continue;
+        }
+        for a in manifest
+            .artifacts
+            .iter()
+            .filter(|a| a.kind == ArtifactKind::Coverage)
+        {
+            match store.get(&a.sha256) {
+                Ok(bytes) => inputs.push(onus_map::coverage::CoverageInput {
+                    label: a.path.clone(),
+                    bytes,
+                    origin: onus_core::CoverageOrigin::Recorded,
+                    manifest: Some(full.clone()),
+                    command: Some(manifest.command.clone()),
+                    written: None,
+                }),
+                Err(e) => notes.push(format!(
+                    "run {}: {e:#}; `{}` is left out",
+                    short(&full),
+                    a.path
+                )),
+            }
+        }
+    }
+    Ok((inputs, notes))
 }
 
 pub fn read_intent(path: &Path) -> Result<Option<Intent>> {

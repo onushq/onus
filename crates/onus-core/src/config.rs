@@ -63,6 +63,11 @@ pub struct EnvironmentConfig {
     /// evidence.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub traces: Vec<String>,
+    /// Globs of coverage files (lcov, Cobertura XML, Istanbul JSON) a run
+    /// writes, kept as evidence. `onus report --evidence` reads them when
+    /// the run was at the head commit.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub coverage: Vec<String>,
     /// Files whose contents decide when the warm image is rebuilt. Default:
     /// the usual lockfiles.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -314,6 +319,10 @@ pub struct RiskInputs {
     /// from the outcome records.
     #[serde(default)]
     pub history: HistoryInput,
+    /// The share of changed lines tests must run for a change to stay in
+    /// the auto-merge lane, from coverage of the head. Off unless written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<CoveragePolicy>,
 }
 
 impl Default for RiskInputs {
@@ -323,8 +332,27 @@ impl Default for RiskInputs {
             tests: TestsInput::default(),
             confidence: ConfidenceInput::default(),
             history: HistoryInput::default(),
+            coverage: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CoveragePolicy {
+    /// The share (0 to 1) of changed executable lines tests must run for a
+    /// change to stay in the auto-merge lane. Default 0 (no minimum).
+    #[serde(default)]
+    pub min_changed: f64,
+    /// A change without coverage may not auto-merge. Default false.
+    #[serde(default)]
+    pub required: bool,
+    /// The environment commands (as `onus env run` ran them) whose recorded
+    /// coverage counts. An agent picks the commands it runs, so coverage
+    /// recorded by any other command sends the change to the judge. Default
+    /// none: only coverage given with `--coverage` counts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub commands: Vec<String>,
 }
 
 /// Counts at which a lane applies; the highest one met wins. A threshold of
@@ -629,6 +657,12 @@ pub struct TestsConfig {
     /// evidence of escalations. Unset: they are not reproduced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
+    /// Coverage files of the working tree (lcov, Cobertura XML, Istanbul
+    /// JSON), relative to the repository root, read by the map server for
+    /// agents (`onus mcp`, `onus query`). Files edited after a coverage file
+    /// was written are left out.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub coverage: Vec<String>,
 }
 
 /// The extractor settings handed to language adapters, with defaults and the

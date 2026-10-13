@@ -13,6 +13,17 @@
         "$ref": "#/$defs/SemanticChange"
       }
     },
+    "coverage": {
+      "description": "Which changed lines tests ran, when coverage of the head was given.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ReportCoverage"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "head": {
       "type": "string"
     },
@@ -123,6 +134,80 @@
         }
       ]
     },
+    "CoverageFormat": {
+      "type": "string",
+      "enum": [
+        "lcov",
+        "cobertura",
+        "istanbul"
+      ]
+    },
+    "CoverageOrigin": {
+      "oneOf": [
+        {
+          "description": "A file given on the command line or in onus.yaml.",
+          "type": "string",
+          "const": "supplied"
+        },
+        {
+          "description": "An artifact of a run an environment recorded at this commit.",
+          "type": "string",
+          "const": "recorded"
+        }
+      ]
+    },
+    "CoverageSource": {
+      "type": "object",
+      "properties": {
+        "command": {
+          "description": "The command of the run that recorded it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "files": {
+          "description": "Its files that matched a map file.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "format": {
+          "$ref": "#/$defs/CoverageFormat"
+        },
+        "manifest": {
+          "description": "The evidence manifest it was recorded in.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "origin": {
+          "$ref": "#/$defs/CoverageOrigin"
+        },
+        "path": {
+          "description": "The file as given, or the artifact's path in the environment.",
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string"
+        },
+        "unmatched": {
+          "description": "Its files that matched none.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "format",
+        "path",
+        "sha256",
+        "origin",
+        "files",
+        "unmatched"
+      ]
+    },
     "Hints": {
       "type": "object",
       "properties": {
@@ -134,6 +219,17 @@
         },
         "confidence": {
           "$ref": "#/$defs/Confidence"
+        },
+        "coverage": {
+          "description": "The row's changed executable lines and how many ran in tests; absent\nwithout coverage, or when the row changes no executable head line.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LineCoverage"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "dependentComponents": {
           "description": "Other components (not the row's own) that depend on what the row\nchanged in the head map (the base map for removed code): the subject,\nor for a component's internal row, the symbols its changed lines are\nin.",
@@ -257,6 +353,26 @@
         "reason"
       ]
     },
+    "LineCoverage": {
+      "description": "Changed executable lines of a row (or a report) and how many ran in tests.",
+      "type": "object",
+      "properties": {
+        "changed": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "ran": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "changed",
+        "ran"
+      ]
+    },
     "Location": {
       "type": "object",
       "properties": {
@@ -328,6 +444,56 @@
       "required": [
         "from",
         "to"
+      ]
+    },
+    "ReportCoverage": {
+      "description": "The changed lines tests ran, from coverage of the head (ADR 0017).",
+      "type": "object",
+      "properties": {
+        "changed": {
+          "description": "Added or edited head lines the coverage counts as executable.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "notMeasured": {
+          "description": "Changed source files with runtime code that the coverage does not\ninclude.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "notRun": {
+          "description": "Changed executable lines no test ran (head side), grouped into ranges.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Location"
+          }
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "ran": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CoverageSource"
+          }
+        }
+      },
+      "required": [
+        "sources",
+        "changed",
+        "ran",
+        "notRun",
+        "notMeasured"
       ]
     },
     "ReportSummary": {

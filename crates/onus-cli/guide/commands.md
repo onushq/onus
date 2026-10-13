@@ -14,6 +14,7 @@ Builds the map of a directory and prints a summary.
 - `--config <file>`: use this onus.yaml instead of `<dir>/onus.yaml`.
 - `--scip <file>`: import a SCIP index of the directory (repeatable). Runs nothing.
 - `--traces <file>`: add the calls in OpenTelemetry traces (OTLP JSON) as `traced` edges (repeatable). See `onus help environments`.
+- `--coverage <file>`: add line coverage of the directory (lcov, Cobertura XML or Istanbul JSON), measured at the same version of its files (repeatable). See `onus help environments`.
 - `--plugins <file>`, `--trusted`, `--allow-unsandboxed`: see "Plugins" below.
 
 ## onus diff <base> <head>
@@ -31,6 +32,7 @@ Reports the changes in meaning between two directories.
 - `--fail-on <what>`: exit with code 2 when `rule-violation` (a new boundary-rule violation) or `secrets` (a committed secret) is found. Repeat the flag or separate values with commas. `none` never fails.
 - `--base-scip <file>`, `--head-scip <file>`: import SCIP indexes of each tree (repeatable).
 - `--traces <file>`: add the calls in OpenTelemetry traces to both trees (repeatable), so they are facts of both and never changes.
+- `--coverage <file>`: line coverage of the head tree (lcov, Cobertura XML or Istanbul JSON), from tests run at the head (repeatable). The report then says which changed lines tests ran; see `onus help reports`.
 - `--plugins <file>`, `--trusted`, `--allow-unsandboxed`: see "Plugins" below.
 
 ## onus report --base <ref> --head <ref>
@@ -41,9 +43,10 @@ The same report for two git refs. Each ref is extracted with `git archive` into 
     onus report --repo ../shop --base origin/main --head feature/sms --format json
 
 - `--repo <dir>`: the repository (default: the current directory).
-- `--format`, `--markdown-out`, `--intent`, `--config`, `--fail-on`, `--traces`, `--plugins`, `--trusted`, `--allow-unsandboxed`: as for `onus diff`. SCIP indexes for `report` come from `scip` plugins, which index each ref in trusted mode.
+- `--format`, `--markdown-out`, `--intent`, `--config`, `--fail-on`, `--traces`, `--coverage`, `--plugins`, `--trusted`, `--allow-unsandboxed`: as for `onus diff`. SCIP indexes for `report` come from `scip` plugins, which index each ref in trusted mode.
+- `--evidence <file>`: a test run from `onus env run` (repeatable). The coverage it recorded is used when its manifest is intact and it ran at the head commit; otherwise a note says why not.
 - `--cache-dir <dir>`: keep the base ref's map in this folder and reuse it on the next report against the same base commit. The report is the same either way; see `onus help ci`.
-- `--head-map-out <file>`: also write the head ref's map (schemas/codebase-map.schema.json) to a file. It is the map the report was computed against, so `onus query --map <file>` answers questions about the head with no second build.
+- `--head-map-out <file>`: also write the head ref's map (schemas/codebase-map.schema.json) to a file. It is the map the report was computed against, so `onus query --map <file>` answers questions about the head with no second build. It holds the traces and coverage the report was given, so two reports of one commit with different evidence write different maps.
 
 Any ref git understands works: branches, tags, `HEAD~3`, commit hashes. In JSON, `base` and `head` read like `main (abc1234)`.
 

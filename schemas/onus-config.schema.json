@@ -184,10 +184,41 @@
         "symbol"
       ]
     },
+    "CoveragePolicy": {
+      "type": "object",
+      "properties": {
+        "commands": {
+          "description": "The environment commands (as `onus env run` ran them) whose recorded\ncoverage counts. An agent picks the commands it runs, so coverage\nrecorded by any other command sends the change to the judge. Default\nnone: only coverage given with `--coverage` counts.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "minChanged": {
+          "description": "The share (0 to 1) of changed executable lines tests must run for a\nchange to stay in the auto-merge lane. Default 0 (no minimum).",
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "required": {
+          "description": "A change without coverage may not auto-merge. Default false.",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false
+    },
     "EnvironmentConfig": {
       "description": "A disposable environment: a container built from the repository at a\ncommit. Read from the operator's working tree, never from the commit\nunder test, so a change cannot alter its own environment.",
       "type": "object",
       "properties": {
+        "coverage": {
+          "description": "Globs of coverage files (lcov, Cobertura XML, Istanbul JSON) a run\nwrites, kept as evidence. `onus report --evidence` reads them when\nthe run was at the head commit.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "egressImage": {
           "description": "The egress proxy image, started when a task's token names hosts.\nDefault `ubuntu/squid`.",
           "type": [
@@ -658,6 +689,17 @@
             "low": "judge"
           }
         },
+        "coverage": {
+          "description": "The share of changed lines tests must run for a change to stay in\nthe auto-merge lane, from coverage of the head. Off unless written.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CoveragePolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "history": {
           "description": "Reverts, rollbacks and incidents in the components a change touches,\nfrom the outcome records.",
           "$ref": "#/$defs/HistoryInput",
@@ -845,6 +887,13 @@
             "string",
             "null"
           ]
+        },
+        "coverage": {
+          "description": "Coverage files of the working tree (lcov, Cobertura XML, Istanbul\nJSON), relative to the repository root, read by the map server for\nagents (`onus mcp`, `onus query`). Files edited after a coverage file\nwas written are left out.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         },
         "globs": {
           "description": "Globs of test files. Defaults cover `*.test.*`, `*.spec.*` and\n`__tests__/`.",

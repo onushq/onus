@@ -59,6 +59,9 @@ pub struct Env {
     pub secrets: Vec<String>,
     pub evidence: Vec<String>,
     pub traces: Vec<String>,
+    /// Coverage file globs; environments made before coverage have none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub coverage: Vec<String>,
     pub created_at: u64,
     /// The task whose token made it; none when it was made without a token.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -279,6 +282,7 @@ pub fn create(
         secrets: grants.secrets.clone(),
         evidence: spec.evidence.clone(),
         traces: spec.traces.clone(),
+        coverage: spec.coverage.clone(),
         created_at: onus_doors::gateway::now(),
         task: grants.task.clone(),
     };
@@ -523,14 +527,14 @@ pub fn run(name: &str, command: &str, store: &Store) -> Result<(String, Manifest
             .map(|g| Ok(regex::Regex::new(&glob_regex(g))?))
             .collect()
     };
-    let (junit, traces) = (globs(&env.evidence)?, globs(&env.traces)?);
+    let declared = [
+        (ArtifactKind::Junit, globs(&env.evidence)?),
+        (ArtifactKind::Trace, globs(&env.traces)?),
+        (ArtifactKind::Coverage, globs(&env.coverage)?),
+    ];
     let mut tests: Option<TestCounts> = None;
     for path in &written {
-        let kind = if junit.iter().any(|r| r.is_match(path)) {
-            ArtifactKind::Junit
-        } else if traces.iter().any(|r| r.is_match(path)) {
-            ArtifactKind::Trace
-        } else {
+        let Some(kind) = artifact_kind(&declared, path) else {
             continue;
         };
         let bytes = Command::new(&engine)
@@ -661,9 +665,55 @@ pub fn destroy(name: &str) -> Result<bool> {
     Ok(existed)
 }
 
+/// The kind of a file a run wrote, by the first declared globs it matches:
+/// test results, then traces, then coverage. None when it is not evidence.
+fn artifact_kind(
+    declared: &[(ArtifactKind, Vec<regex::Regex>)],
+    path: &str,
+) -> Option<ArtifactKind> {
+    declared
+        .iter()
+        .find(|(_, globs)| globs.iter().any(|r| r.is_match(path)))
+        .map(|(kind, _)| *kind)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn written_files_are_classified_by_their_globs() {
+        let globs = |gs: &[&str]| -> Vec<regex::Regex> {
+            gs.iter()
+                .map(|g| regex::Regex::new(&glob_regex(g)).unwrap())
+                .collect()
+        };
+        let declared = [
+            (ArtifactKind::Junit, globs(&["reports/*.xml"])),
+            (ArtifactKind::Trace, globs(&["otel/*.json"])),
+            (
+                ArtifactKind::Coverage,
+                globs(&["coverage/lcov.info", "coverage/*.xml"]),
+            ),
+        ];
+        assert_eq!(
+            artifact_kind(&declared, "coverage/lcov.info"),
+            Some(ArtifactKind::Coverage)
+        );
+        assert_eq!(
+            artifact_kind(&declared, "coverage/cobertura.xml"),
+            Some(ArtifactKind::Coverage)
+        );
+        assert_eq!(
+            artifact_kind(&declared, "reports/junit.xml"),
+            Some(ArtifactKind::Junit)
+        );
+        assert_eq!(
+            artifact_kind(&declared, "otel/t.json"),
+            Some(ArtifactKind::Trace)
+        );
+        assert_eq!(artifact_kind(&declared, "src/a.ts"), None);
+    }
 
     #[test]
     fn names_hosts_and_secrets_are_checked() {

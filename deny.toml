@@ -13,6 +13,10 @@ ignore = [
   # cannot be turned off (biscuit-auth 6.0 does not build without them).
   # Revisit when biscuit-auth drops it.
   { id = "RUSTSEC-2026-0173", reason = "compile-time only, via biscuit-auth's required macros" },
+  # unsafe-libyaml is unmaintained (not vulnerable). It reaches us through
+  # serde_yaml_ng, which parses onus.yaml and the other YAML onus reads.
+  # Revisit by moving to a YAML parser in safe Rust.
+  { id = "RUSTSEC-2024-0449", reason = "unmaintained only, via serde_yaml_ng; swap the YAML crate to clear it" },
 ]
 
 [licenses]

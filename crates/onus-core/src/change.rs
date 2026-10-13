@@ -3,7 +3,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::map::{Confidence, MapDiagnostic};
+use crate::map::{Confidence, CoverageSource, MapDiagnostic};
 
 /// The manifesto's change kinds.
 #[derive(
@@ -108,6 +108,18 @@ pub struct Hints {
     /// routing a review. Sorted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub owners: Vec<String>,
+    /// The row's changed executable lines and how many ran in tests; absent
+    /// without coverage, or when the row changes no executable head line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<LineCoverage>,
+}
+
+/// Changed executable lines of a row (or a report) and how many ran in tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LineCoverage {
+    pub changed: u32,
+    pub ran: u32,
 }
 
 /// Whether tests or traces reach the files a row changes. File granularity:
@@ -178,6 +190,26 @@ pub struct SemanticReport {
     pub text_stats: TextStats,
     /// Diagnostics of the head map in files this change touches.
     pub map_diagnostics: Vec<MapDiagnostic>,
+    /// Which changed lines tests ran, when coverage of the head was given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<ReportCoverage>,
+}
+
+/// The changed lines tests ran, from coverage of the head (ADR 0017).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ReportCoverage {
+    pub sources: Vec<CoverageSource>,
+    /// Added or edited head lines the coverage counts as executable.
+    pub changed: u32,
+    pub ran: u32,
+    /// Changed executable lines no test ran (head side), grouped into ranges.
+    pub not_run: Vec<Location>,
+    /// Changed source files with runtime code that the coverage does not
+    /// include.
+    pub not_measured: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

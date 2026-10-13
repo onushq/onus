@@ -101,7 +101,16 @@ inputs:
   evidence:
     description: >-
       Test runs to submit as evidence, as a glob of JSON files from onus run-test or onus env run
-      made earlier in the job (with records).
+      made earlier in the job (with records). The report also reads the coverage that runs from
+      onus env run recorded at the head commit.
+    required: false
+    default: ''
+  coverage:
+    description: >-
+      Coverage of the head commit (lcov, Cobertura XML or Istanbul JSON) written by an earlier
+      step, as a glob. Check out the pull request's head commit for that step
+      (actions/checkout with ref: github.event.pull_request.head.sha); coverage measured at
+      another commit is left out.
     required: false
     default: ''
   rollout-percent:
@@ -311,6 +320,8 @@ runs:
         PLUGINS: ${{ inputs.plugins }}
         RECORDS: ${{ inputs.records }}
         RECORDS_BRANCH: ${{ inputs.records-branch }}
+        COVERAGE: ${{ inputs.coverage }}
+        EVIDENCE: ${{ inputs.evidence }}
         # Passed through the environment, never pasted into the script, so a
         # pull request body cannot inject commands.
         PR_BODY: ${{ github.event.pull_request.body }}
@@ -355,6 +366,23 @@ runs:
             args+=(--traces "$RUNNER_TEMP/onus-records/signals.jsonl")
           fi
         fi
+        # Coverage belongs to the commit the tests ran at: only the head's counts.
+        if [ -n "$COVERAGE" ] && "$ONUS" report --help | grep -q -- --coverage; then
+          checkout=$(git rev-parse HEAD)
+          if [ "$checkout" = "$(git rev-parse "$HEAD^{commit}")" ]; then
+            shopt -s nullglob globstar
+            for f in $COVERAGE; do args+=(--coverage "$f"); done
+            shopt -u nullglob globstar
+          else
+            echo "::warning::The checkout is $checkout, not the head commit $HEAD; coverage is left out."
+          fi
+        fi
+        # Runs from onus env run: the coverage they recorded at the head counts.
+        if [ -n "$EVIDENCE" ] && "$ONUS" report --help | grep -q -- --evidence; then
+          shopt -s nullglob globstar
+          for f in $EVIDENCE; do args+=(--evidence "$f"); done
+          shopt -u nullglob globstar
+        fi
         # Milliseconds; perl is on every GitHub runner, `date +%N` is not.
         ms() { perl -MTime::HiRes=time -e 'printf "%d\n", time * 1000'; }
         status=0
@@ -387,7 +415,8 @@ runs:
             needsAttention: .summary.needsAttention,
             secrets: .summary.secrets,
             ruleViolations: .summary.newRuleViolations,
-            intentMismatches: .summary.intentMismatches
+            intentMismatches: .summary.intentMismatches,
+            coverage: (.coverage | if . then {changed, ran} else null end)
           }' "$out/onus-report.json" > "$out/onus-metrics.json"
         {
           echo "report=$out/onus-report.json"

@@ -5,6 +5,7 @@
 	import ChevronsUpDown from '@lucide/svelte/icons/chevrons-up-down';
 	import Download from '@lucide/svelte/icons/download';
 	import FileDiff from '@lucide/svelte/icons/file-diff';
+	import FlaskConical from '@lucide/svelte/icons/flask-conical';
 	import KeyRound from '@lucide/svelte/icons/key-round';
 	import ShieldAlert from '@lucide/svelte/icons/shield-alert';
 	import Target from '@lucide/svelte/icons/target';
@@ -26,7 +27,7 @@
 </script>
 
 <div class="grid gap-4">
-	<div class="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5">
+	<div class="grid grid-cols-2 gap-3 md:grid-cols-3 {r.coverage ? 'xl:grid-cols-6' : 'xl:grid-cols-5'}">
 		<Stat
 			label="Changes in meaning"
 			value={r.summary.meaningChanges}
@@ -37,6 +38,19 @@
 		<Stat label="Secrets" value={r.summary.secrets} icon={KeyRound} tone={r.summary.secrets ? 'del' : undefined} />
 		<Stat label="New rule violations" value={r.summary.newRuleViolations} icon={ShieldAlert} tone={r.summary.newRuleViolations ? 'del' : undefined} />
 		<Stat label="Outside the intent" value={r.summary.intentMismatches} icon={Target} tone={r.summary.intentMismatches ? 'signal' : undefined} />
+		{#if r.coverage}
+			<Stat
+				label="Changed lines tests ran"
+				value="{r.coverage.ran} of {r.coverage.changed}"
+				icon={FlaskConical}
+				hint={r.coverage.notMeasured.length
+					? `${r.coverage.notMeasured.length} changed ${r.coverage.notMeasured.length === 1 ? 'file' : 'files'} not in the coverage`
+					: r.coverage.notRun.length
+						? `${r.coverage.notRun.length} ranges not run`
+						: 'every changed line ran'}
+				tone={r.coverage.ran < r.coverage.changed || r.coverage.notMeasured.length ? 'signal' : undefined}
+			/>
+		{/if}
 	</div>
 
 	<div class="grid gap-4 {answer.classification ? 'xl:grid-cols-[minmax(0,1fr)_340px]' : ''}">

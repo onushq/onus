@@ -2,7 +2,7 @@
 //! one manifest per run, named by the sha256 of its own contents.
 //!
 //! ```text
-//! <store>/objects/ab/cdef…   artifacts (output logs, JUnit XML, traces)
+//! <store>/objects/ab/cdef…   artifacts (output logs, JUnit XML, traces, coverage)
 //! <store>/runs/<id>.json     manifests
 //! ```
 
@@ -24,6 +24,9 @@ pub enum ArtifactKind {
     Junit,
     /// OpenTelemetry traces (OTLP JSON).
     Trace,
+    /// Line coverage (lcov, Cobertura XML or Istanbul JSON). Last, so the
+    /// order of the other kinds in a manifest is unchanged.
+    Coverage,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -291,6 +294,30 @@ mod tests {
         );
         std::fs::write(store.object_path(&sha), b"bye").unwrap();
         assert!(store.get(&sha).unwrap_err().to_string().contains("altered"));
+    }
+
+    #[test]
+    fn coverage_artifacts_sort_after_traces() {
+        let mut kinds = vec![
+            ArtifactKind::Coverage,
+            ArtifactKind::Trace,
+            ArtifactKind::Log,
+            ArtifactKind::Junit,
+        ];
+        kinds.sort();
+        assert_eq!(
+            kinds,
+            [
+                ArtifactKind::Log,
+                ArtifactKind::Junit,
+                ArtifactKind::Trace,
+                ArtifactKind::Coverage
+            ]
+        );
+        assert_eq!(
+            serde_json::to_string(&ArtifactKind::Coverage).unwrap(),
+            "\"coverage\""
+        );
     }
 
     #[test]

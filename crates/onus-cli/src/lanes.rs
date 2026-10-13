@@ -343,6 +343,12 @@ pub fn make_submission(
         None => None,
     };
     let pair = std::sync::Arc::new(onus_cli::materialize_pair(repo, base, head, false)?);
+    // The coverage environments recorded at the head. The lane counts it
+    // only from the commands its policy names (ADR 0017).
+    let (coverage, notes) = onus_cli::recorded_coverage(repo, &pair.head.sha, &parts.evidence)?;
+    for note in notes {
+        eprintln!("onus: {note}");
+    }
     let opts = onus_cli::DiffOptions {
         intent,
         base_label: onus_cli::ref_label(base, &pair.base.sha),
@@ -350,6 +356,7 @@ pub fn make_submission(
         base_commit: Some(pair.base.sha.clone()),
         head_commit: Some(pair.head.sha.clone()),
         changed_paths: Some(pair.changed.clone()),
+        coverage,
         ..Default::default()
     };
     let outcome = onus_cli::diff_dirs(pair.base.dir.path(), pair.head.dir.path(), &opts)?;

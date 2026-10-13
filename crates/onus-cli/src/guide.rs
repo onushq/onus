@@ -22,7 +22,7 @@ pub const TOPICS: &[Topic] = &[
     },
     Topic {
         name: "reports",
-        summary: "Reading a report: rows, ranking, evidence and the JSON",
+        summary: "Reading a report: rows, ranking, evidence, the changed lines tests ran and the JSON",
         text: include_str!("../guide/reports.md"),
     },
     Topic {
@@ -72,7 +72,7 @@ pub const TOPICS: &[Topic] = &[
     },
     Topic {
         name: "environments",
-        summary: "Environments built from a commit, the evidence store, and traces into the map",
+        summary: "Environments built from a commit, the evidence store, and traces and coverage into the map",
         text: include_str!("../guide/environments.md"),
     },
     Topic {

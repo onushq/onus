@@ -139,6 +139,19 @@ fn mcp_serves_the_map_tools_over_stdio() {
             > 0
     );
 
+    // Each test says how its link is known; without coverage, from the syntax.
+    let (failed, tests) = mcp.tool(
+        "onus_tests_for",
+        serde_json::json!({ "target": "applyDiscount" }),
+    );
+    assert!(!failed, "{tests}");
+    assert_eq!(
+        tests["result"]["tests"][0]["file"],
+        "services/billing/src/discount.test.ts"
+    );
+    assert_eq!(tests["result"]["tests"][0]["link"], "static");
+    assert!(tests["result"].get("coverage").is_none());
+
     let (failed, msg) = mcp.tool("onus_symbol", serde_json::json!({ "id": "nope" }));
     assert!(failed);
     assert!(msg.as_str().unwrap().contains("find"));

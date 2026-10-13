@@ -407,6 +407,7 @@ mod tests {
             structure: StructureNotes::default(),
             text_stats: TextStats::default(),
             map_diagnostics: vec![],
+            coverage: None,
         }
     }
 

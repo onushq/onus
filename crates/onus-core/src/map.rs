@@ -1,7 +1,7 @@
 //! The codebase map: components, symbols, edges and everything else Onus
 //! derives from a tree of source files.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -64,6 +64,10 @@ pub struct CodebaseMap {
     pub tests: Vec<TestNode>,
     pub rules: Vec<BoundaryRule>,
     pub diagnostics: Vec<MapDiagnostic>,
+    /// Line coverage of this tree from test runs (lcov, Cobertura, Istanbul),
+    /// when given. Added after the map is built (`onus_map::coverage`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<Coverage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -498,4 +502,164 @@ pub struct MapDiagnostic {
     pub line: u32,
     pub message: String,
     pub confidence: Confidence,
+}
+
+/// Line coverage of a tree, from the test runs that measured it (ADR 0017).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Coverage {
+    /// Sorted by path.
+    pub sources: Vec<CoverageSource>,
+    /// Map files the coverage measured, sorted by path.
+    pub files: Vec<FileCoverage>,
+    /// Tests the coverage names running a symbol (lcov `TN:` records),
+    /// sorted by test, then target.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<CoverageLink>,
+    /// What was left out and why (stale or mismatched files).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum CoverageFormat {
+    Lcov,
+    Cobertura,
+    Istanbul,
+}
+
+impl CoverageFormat {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CoverageFormat::Lcov => "lcov",
+            CoverageFormat::Cobertura => "cobertura",
+            CoverageFormat::Istanbul => "istanbul",
+        }
+    }
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum CoverageOrigin {
+    /// A file given on the command line or in onus.yaml.
+    Supplied,
+    /// An artifact of a run an environment recorded at this commit.
+    Recorded,
+}
+
+impl CoverageOrigin {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CoverageOrigin::Supplied => "supplied",
+            CoverageOrigin::Recorded => "recorded",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageSource {
+    pub format: CoverageFormat,
+    /// The file as given, or the artifact's path in the environment.
+    pub path: String,
+    pub sha256: String,
+    pub origin: CoverageOrigin,
+    /// The evidence manifest it was recorded in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest: Option<String>,
+    /// The command of the run that recorded it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// Its files that matched a map file.
+    pub files: u32,
+    /// Its files that matched none.
+    pub unmatched: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FileCoverage {
+    pub path: String,
+    /// Executable lines some test ran, as inclusive [first, last] ranges.
+    pub covered: Vec<[u32; 2]>,
+    /// Executable lines no test ran.
+    pub uncovered: Vec<[u32; 2]>,
+}
+
+impl FileCoverage {
+    /// The covered lines and the executable lines (covered or not).
+    pub fn lines(&self) -> (BTreeSet<u32>, BTreeSet<u32>) {
+        let expand = |rs: &[[u32; 2]]| -> BTreeSet<u32> {
+            rs.iter()
+                .flat_map(|[a, b]| *a..=*b)
+                .collect::<BTreeSet<u32>>()
+        };
+        let covered = expand(&self.covered);
+        let mut executable = expand(&self.uncovered);
+        executable.extend(covered.iter().copied());
+        (covered, executable)
+    }
+
+    /// The executable lines from `start` to `end` (inclusive), and how many
+    /// of them ran.
+    pub fn in_range(&self, start: u32, end: u32) -> (u32, u32) {
+        let count = |rs: &[[u32; 2]]| -> u32 {
+            rs.iter()
+                .map(|[a, b]| {
+                    let (a, b) = ((*a).max(start), (*b).min(end));
+                    if a <= b { b - a + 1 } else { 0 }
+                })
+                .sum()
+        };
+        let ran = count(&self.covered);
+        (ran + count(&self.uncovered), ran)
+    }
+}
+
+/// Collapses sorted line numbers into inclusive ranges.
+pub fn line_ranges(lines: &BTreeSet<u32>) -> Vec<[u32; 2]> {
+    let mut out: Vec<[u32; 2]> = Vec::new();
+    for &l in lines {
+        match out.last_mut() {
+            Some([_, end]) if *end + 1 == l => *end = l,
+            _ => out.push([l, l]),
+        }
+    }
+    out
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageLink {
+    /// A `TestNode` id.
+    pub test: String,
+    /// A symbol id.
+    pub target: String,
+    /// Lines of the target the test ran.
+    pub lines: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_coverage_counts_lines_in_ranges() {
+        let f = FileCoverage {
+            path: "a.ts".into(),
+            covered: vec![[1, 2], [15, 16]],
+            uncovered: vec![[3, 3], [20, 22]],
+        };
+        let (covered, executable) = f.lines();
+        assert_eq!(covered.len(), 4);
+        assert_eq!(executable.len(), 8);
+        assert_eq!(f.in_range(2, 21), (6, 3));
+        assert_eq!(f.in_range(4, 14), (0, 0));
+        assert_eq!(line_ranges(&executable), [[1, 3], [15, 16], [20, 22]]);
+    }
 }

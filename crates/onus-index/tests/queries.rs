@@ -112,6 +112,104 @@ fn tests_owners_components_and_files() {
     assert!(file.symbols.iter().any(|s| s.name == "placeOrder"));
 }
 
+/// The shop's map with coverage: lcov that names `discount.test.ts` running
+/// `noDiscount`, aggregate coverage of the rest of `discount.ts`, and
+/// `payments.ts` loaded but never run.
+fn index_with_coverage() -> MapIndex {
+    use onus_core::CoverageOrigin;
+    use onus_map::coverage::{CoverageInput, add_coverage};
+    let mut map = build_map(&shop(), &BuildOptions::default()).unwrap();
+    let lcov = "TN:services/billing/src/discount.test.ts\nSF:/work/services/billing/src/discount.ts\nDA:16,2\nend_of_record\n\
+                TN:\nSF:/work/services/billing/src/discount.ts\nDA:20,5\nDA:21,3\nDA:31,2\nend_of_record\n\
+                SF:/work/services/billing/src/payments.ts\nDA:13,0\nDA:28,0\nDA:29,0\nDA:36,0\nend_of_record\n";
+    add_coverage(
+        &mut map,
+        None,
+        &[CoverageInput {
+            label: "lcov.info".into(),
+            bytes: lcov.as_bytes().to_vec(),
+            origin: CoverageOrigin::Supplied,
+            manifest: None,
+            command: None,
+            written: None,
+        }],
+    )
+    .unwrap();
+    MapIndex::new(map)
+}
+
+#[test]
+fn coverage_says_how_each_test_link_is_known() {
+    use onus_index::{LinkStrength, TargetCoverage};
+    let idx = index_with_coverage();
+    // Referred to, and the measured run executed it.
+    let apply = idx.tests_for("applyDiscount", 10).unwrap();
+    assert_eq!(apply.tests[0].file, "services/billing/src/discount.test.ts");
+    assert_eq!(apply.tests[0].link, LinkStrength::StaticRan);
+    assert_eq!(
+        apply.coverage,
+        Some(TargetCoverage {
+            executable: 3,
+            ran: 3
+        })
+    );
+    // Only coverage links the private function to the test that ran it.
+    assert!(
+        index()
+            .tests_for("noDiscount", 10)
+            .unwrap()
+            .tests
+            .is_empty()
+    );
+    let private = idx.tests_for("noDiscount", 10).unwrap();
+    assert_eq!(private.tests.len(), 1);
+    assert_eq!(
+        private.tests[0].file,
+        "services/billing/src/discount.test.ts"
+    );
+    assert_eq!(private.tests[0].link, LinkStrength::Ran);
+    // Referred to, but never run.
+    let invoice = idx.tests_for("createInvoice", 10).unwrap();
+    assert_eq!(invoice.tests[0].link, LinkStrength::StaticNotRun);
+    assert_eq!(invoice.coverage.map(|c| c.ran), Some(0));
+    // A file counts all its measured lines, and a test coverage saw running
+    // code in it ran the file.
+    let file = idx
+        .tests_for("services/billing/src/discount.ts", 10)
+        .unwrap();
+    assert_eq!(
+        file.coverage,
+        Some(TargetCoverage {
+            executable: 4,
+            ran: 4
+        })
+    );
+    assert_eq!(file.tests[0].link, LinkStrength::Ran);
+    let json = serde_json::to_value(&private).unwrap();
+    assert_eq!(json["tests"][0]["link"], "ran");
+    assert_eq!(json["coverage"]["executable"], 1);
+    // A file the coverage does not measure: not measured, not "no code".
+    let unmeasured = idx.tests_for("placeOrder", 10).unwrap();
+    assert_eq!(unmeasured.coverage, None);
+    assert!(
+        unmeasured
+            .tests
+            .iter()
+            .all(|t| t.link == LinkStrength::Static)
+    );
+    // Without coverage: static links and no coverage field.
+    let plain = index().tests_for("applyDiscount", 10).unwrap();
+    assert_eq!(plain.tests[0].link, LinkStrength::Static);
+    let json = serde_json::to_value(&plain).unwrap();
+    assert_eq!(json["tests"][0]["link"], "static");
+    assert!(json.get("coverage").is_none());
+    // Impact lists the tests with their links too.
+    let impact = idx
+        .impact("noDiscount", onus_index::Change::ChangeBehavior, 10)
+        .unwrap();
+    assert_eq!(impact.tests[0].link, LinkStrength::Ran);
+}
+
 #[test]
 fn overview_matches_component_for_every_component() {
     let idx = index();

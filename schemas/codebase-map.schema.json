@@ -17,6 +17,17 @@
         "$ref": "#/$defs/Component"
       }
     },
+    "coverage": {
+      "description": "Line coverage of this tree from test runs (lcov, Cobertura, Istanbul),\nwhen given. Added after the map is built (`onus_map::coverage`).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Coverage"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "diagnostics": {
       "type": "array",
       "items": {
@@ -340,6 +351,142 @@
         "unverified"
       ]
     },
+    "Coverage": {
+      "description": "Line coverage of a tree, from the test runs that measured it (ADR 0017).",
+      "type": "object",
+      "properties": {
+        "files": {
+          "description": "Map files the coverage measured, sorted by path.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FileCoverage"
+          }
+        },
+        "links": {
+          "description": "Tests the coverage names running a symbol (lcov `TN:` records),\nsorted by test, then target.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CoverageLink"
+          }
+        },
+        "notes": {
+          "description": "What was left out and why (stale or mismatched files).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "sources": {
+          "description": "Sorted by path.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CoverageSource"
+          }
+        }
+      },
+      "required": [
+        "sources",
+        "files"
+      ]
+    },
+    "CoverageFormat": {
+      "type": "string",
+      "enum": [
+        "lcov",
+        "cobertura",
+        "istanbul"
+      ]
+    },
+    "CoverageLink": {
+      "type": "object",
+      "properties": {
+        "lines": {
+          "description": "Lines of the target the test ran.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "target": {
+          "description": "A symbol id.",
+          "type": "string"
+        },
+        "test": {
+          "description": "A `TestNode` id.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "test",
+        "target",
+        "lines"
+      ]
+    },
+    "CoverageOrigin": {
+      "oneOf": [
+        {
+          "description": "A file given on the command line or in onus.yaml.",
+          "type": "string",
+          "const": "supplied"
+        },
+        {
+          "description": "An artifact of a run an environment recorded at this commit.",
+          "type": "string",
+          "const": "recorded"
+        }
+      ]
+    },
+    "CoverageSource": {
+      "type": "object",
+      "properties": {
+        "command": {
+          "description": "The command of the run that recorded it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "files": {
+          "description": "Its files that matched a map file.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "format": {
+          "$ref": "#/$defs/CoverageFormat"
+        },
+        "manifest": {
+          "description": "The evidence manifest it was recorded in.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "origin": {
+          "$ref": "#/$defs/CoverageOrigin"
+        },
+        "path": {
+          "description": "The file as given, or the artifact's path in the environment.",
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string"
+        },
+        "unmatched": {
+          "description": "Its files that matched none.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "format",
+        "path",
+        "sha256",
+        "origin",
+        "files",
+        "unmatched"
+      ]
+    },
     "Edge": {
       "type": "object",
       "properties": {
@@ -472,6 +619,47 @@
       "required": [
         "text",
         "line"
+      ]
+    },
+    "FileCoverage": {
+      "type": "object",
+      "properties": {
+        "covered": {
+          "description": "Executable lines some test ran, as inclusive [first, last] ranges.",
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "maxItems": 2,
+            "minItems": 2
+          }
+        },
+        "path": {
+          "type": "string"
+        },
+        "uncovered": {
+          "description": "Executable lines no test ran.",
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "maxItems": 2,
+            "minItems": 2
+          }
+        }
+      },
+      "required": [
+        "path",
+        "covered",
+        "uncovered"
       ]
     },
     "Loc": {

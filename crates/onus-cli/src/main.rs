@@ -30,6 +30,7 @@ const DIFF_HELP: &str = concat!(
   onus diff old new
   onus diff old new --format json > report.json
   onus diff old new --intent pr-body.md --fail-on rule-violation,secrets
+  onus diff old new --coverage new-coverage.xml
 
 ",
     exit_codes!()
@@ -41,6 +42,8 @@ const REPORT_HELP: &str = concat!(
   onus report --repo ../shop --base origin/main --head feature/sms --format json
   onus report --base \"$BASE_SHA\" --head \"$HEAD_SHA\" --intent pr-body.md --fail-on secrets
   onus report --base \"$BASE_SHA\" --head \"$HEAD_SHA\" --cache-dir ~/.cache/onus
+  onus report --base main --head HEAD --coverage coverage/lcov.info
+  onus report --base main --head HEAD --evidence run.json
 
 ",
     exit_codes!()
@@ -102,7 +105,8 @@ enum Cmd {
 Examples:
   onus map .
   onus map path/to/repo --json > map.json
-  onus map . --config other/onus.yaml"
+  onus map . --config other/onus.yaml
+  onus map . --coverage coverage/lcov.info --json"
     )]
     Map {
         /// The repository or directory to map.
@@ -120,6 +124,10 @@ Examples:
         /// signals.jsonl) to the map (repeatable).
         #[arg(long, value_name = "FILE")]
         traces: Vec<PathBuf>,
+        /// Coverage of this directory (lcov, Cobertura XML or Istanbul JSON) (repeatable).
+        /// Tests must have run at the same version of the files.
+        #[arg(long, value_name = "FILE")]
+        coverage: Vec<PathBuf>,
         #[command(flatten)]
         providers: ProviderArgs,
     },
@@ -161,6 +169,10 @@ Examples:
         /// signals.jsonl) to both maps (repeatable).
         #[arg(long, value_name = "FILE")]
         traces: Vec<PathBuf>,
+        /// Coverage of the head directory (lcov, Cobertura XML or Istanbul JSON) (repeatable).
+        /// Head only: tests must have run at the head's version of the files.
+        #[arg(long, value_name = "FILE")]
+        coverage: Vec<PathBuf>,
         #[command(flatten)]
         providers: ProviderArgs,
     },
@@ -208,6 +220,14 @@ Examples:
         /// signals.jsonl) to both maps (repeatable).
         #[arg(long, value_name = "FILE")]
         traces: Vec<PathBuf>,
+        /// Coverage of the head ref (lcov, Cobertura XML or Istanbul JSON) (repeatable).
+        /// Head only: tests must have run at that commit.
+        #[arg(long, value_name = "FILE")]
+        coverage: Vec<PathBuf>,
+        /// Test runs (from onus env run): the coverage they recorded at the head commit is
+        /// used (repeatable).
+        #[arg(long = "evidence", value_name = "FILE")]
+        evidence: Vec<PathBuf>,
         /// Keep the base ref's map in this folder and reuse it on the next run against the
         /// same base commit. Safe to share between runs: the file name covers everything that
         /// shapes the map.
@@ -714,6 +734,7 @@ fn run(cli: Cli) -> Result<i32> {
             config,
             scip,
             traces,
+            coverage,
             providers,
         } => {
             if !dir.is_dir() {
@@ -743,6 +764,12 @@ fn run(cli: Cli) -> Result<i32> {
                     }
                 );
             }
+            if !coverage.is_empty() {
+                let inputs =
+                    onus_map::coverage::read_inputs(&coverage).map_err(anyhow::Error::msg)?;
+                let stats = onus_cli::add_coverage(&mut map, &inputs)?;
+                eprintln!("onus: coverage: {}", stats.summary());
+            }
             if json {
                 println!("{}", serde_json::to_string_pretty(&map)?);
             } else {
@@ -761,6 +788,7 @@ fn run(cli: Cli) -> Result<i32> {
             base_scip,
             head_scip,
             traces,
+            coverage,
             providers,
         } => {
             let opts = DiffOptions {
@@ -777,6 +805,7 @@ fn run(cli: Cli) -> Result<i32> {
                 changed_paths: None,
                 complete_base: None,
                 traces,
+                coverage: onus_map::coverage::read_inputs(&coverage).map_err(anyhow::Error::msg)?,
             };
             let outcome = onus_cli::diff_dirs(&base, &head, &opts)?;
             for note in &outcome.notes {
@@ -805,6 +834,8 @@ fn run(cli: Cli) -> Result<i32> {
             base_scip,
             head_scip,
             traces,
+            coverage,
+            evidence,
             cache_dir,
             head_map_out,
             providers,
@@ -818,6 +849,21 @@ fn run(cli: Cli) -> Result<i32> {
                 cache_dir.is_some(),
             )?);
             let (b, h) = (&pair.base, &pair.head);
+            let mut coverage =
+                onus_map::coverage::read_inputs(&coverage).map_err(anyhow::Error::msg)?;
+            let runs = evidence
+                .iter()
+                .map(|p| {
+                    serde_json::from_str(&std::fs::read_to_string(p)?).with_context(|| {
+                        format!("{} is not a test run from onus env run", p.display())
+                    })
+                })
+                .collect::<Result<Vec<onus_doors::runner::TestRun>>>()?;
+            let (recorded, notes) = onus_cli::recorded_coverage(&repo, &h.sha, &runs)?;
+            for note in notes {
+                eprintln!("onus: {note}");
+            }
+            coverage.extend(recorded);
             let completer = {
                 let pair = pair.clone();
                 onus_cli::BaseCompleter(std::sync::Arc::new(move || pair.complete_base()))
@@ -836,6 +882,7 @@ fn run(cli: Cli) -> Result<i32> {
                 changed_paths: Some(pair.changed.clone()),
                 complete_base: Some(completer),
                 traces,
+                coverage,
             };
             let outcome = onus_cli::diff_dirs(b.dir.path(), h.dir.path(), &opts)?;
             for note in &outcome.notes {
@@ -1168,6 +1215,21 @@ fn map_summary(map: &onus_core::CodebaseMap) -> String {
             e.category,
             e.egress.join(", ")
         );
+    }
+    if let Some(c) = &map.coverage {
+        let (ran, lines) = c.files.iter().fold((0, 0), |(r, l), f| {
+            let (covered, executable) = f.lines();
+            (r + covered.len(), l + executable.len())
+        });
+        let _ = writeln!(
+            out,
+            "  coverage: {} files, {ran} of {lines} lines ran, {} test links",
+            c.files.len(),
+            c.links.len()
+        );
+        for n in &c.notes {
+            let _ = writeln!(out, "  note: {n}");
+        }
     }
     for d in &map.diagnostics {
         let _ = writeln!(

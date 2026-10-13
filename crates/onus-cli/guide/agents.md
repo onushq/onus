@@ -26,12 +26,12 @@ The check:
 
 Navigation (experimental):
 
-- `onus_status`: what the map holds (components, files, symbols, edges, tests). Start here.
+- `onus_status`: what the map holds (components, files, symbols, edges, tests, and coverage with its notes when `tests.coverage` names files). Start here.
 - `onus_find`: symbols by name words, ranked by how many words match in the name, then in fields and parameters, then in the file path (`format phone` finds `formatPhoneNumber`; a field name finds the types that declare it). Every answer also lists matching files.
 - `onus_symbol`: one symbol: kind, location, contract shape, declared invariants, how many places use it.
 - `onus_dependents`: what depends on a symbol, file or component, up to `depth` steps (imports, calls, type references). Use it before changing something.
 - `onus_dependencies`: what a symbol, file or component depends on: code, external services, events, tables, config keys.
-- `onus_tests_for`: the test files that exercise a symbol, file or component.
+- `onus_tests_for`: the test files that exercise a symbol, file or component, strongest link first. Each says how the link is known: `ran` (coverage shows this test running it), `static-ran` (the test refers to it and the measured run executed it), `static` (it refers to it; no coverage was given), `static-not-run` (it refers to it, but the measured run never executed it). When the coverage measured the target's file, `coverage` gives its executable and ran lines; no tests with lines that ran means the target ran through other code. Coverage comes from the files `tests.coverage` in onus.yaml names (`onus help configuration`).
 - `onus_owners`: owners and sensitivity labels.
 - `onus_component`: a component's public surface, the components it uses and that use it, its external services and events.
 - `onus_file`: a file's symbols, imports and importers.
@@ -39,7 +39,7 @@ Navigation (experimental):
 Handing work in (leave these out with `onus mcp --no-actions`):
 
 - `onus_lanes`: the lane policy: what merges on its own, what goes to the judge or a person, and the floors no policy can lower.
-- `onus_env_create`, `onus_env_run`, `onus_envs`, `onus_env_destroy`: an environment built from a commit, and commands run in it. Each run is recorded as evidence (output, JUnit results, traces) under a run id. See `onus help environments`.
+- `onus_env_create`, `onus_env_run`, `onus_envs`, `onus_env_destroy`: an environment built from a commit, and commands run in it. Each run is recorded as evidence (output, JUnit results, traces, coverage) under a run id. See `onus help environments`.
 - `onus_evidence`: recorded runs, a run's manifest, or one of its artifacts.
 - `onus_run_test`: a test command once in a throwaway container, to reproduce a failure; nothing is recorded.
 - `onus_submit`: hands in a committed change with an intent, run ids as evidence and the ids of escalations granted during the task. Onus reports it, attaches the scope of the server's task token, classifies it, and keeps it in `.onus/submissions/` where people see it in `onus ui`. Returns the lane, every reason, and a submission id.

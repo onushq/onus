@@ -174,12 +174,16 @@ export interface TestRef {
 	component: string | null;
 	cases: number;
 	skipped: number;
+	/** How the link is known, strongest first: coverage saw the test run it, the test refers to it and it ran, no coverage, or it never ran. */
+	link?: 'ran' | 'static-ran' | 'static' | 'static-not-run';
 }
 
 export interface Tests {
 	target: string;
 	total: number;
 	truncated: boolean;
+	/** The target's lines in the coverage, when there is some. */
+	coverage?: { executable: number; ran: number } | null;
 	tests: TestRef[];
 }
 
@@ -249,6 +253,8 @@ export interface SemanticChange {
 		dependentComponents?: number;
 		/** Whether tests or traces reach the files the row changes. */
 		tested?: 'tested' | 'traced' | 'untested';
+		/** The row's changed executable lines and how many ran in tests. */
+		coverage?: { changed: number; ran: number } | null;
 	};
 	locations: Location[];
 	stats?: { linesAdded: number; linesRemoved: number; files: number } | null;
@@ -277,6 +283,16 @@ export interface SemanticReport {
 	structure: { movedFiles: { from: string; to: string }[]; formattingOnly: string[] };
 	textStats: { files: number; linesAdded: number; linesRemoved: number };
 	mapDiagnostics: { file?: string; message: string }[];
+	/** Which changed lines tests ran, when coverage of the head was given. */
+	coverage?: {
+		changed: number;
+		ran: number;
+		notRun: Location[];
+		notMeasured: string[];
+		/** `command` is the run's, for recorded coverage. */
+		sources: { format: string; path: string; origin: string; manifest?: string | null; command?: string | null }[];
+		notes?: string[];
+	} | null;
 }
 
 export interface Applied {

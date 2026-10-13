@@ -197,9 +197,9 @@ pub fn observed_calls(paths: &[impl AsRef<Path>]) -> Result<Vec<ObservedCall>, S
     Ok(calls)
 }
 
-/// Finds the map file a span's file path names: the same path, or the
-/// longest map path the span's (often absolute) path ends with.
-fn map_file<'a>(files: &'a BTreeSet<&str>, path: &str) -> Option<&'a str> {
+/// Finds the map file a span's (or a coverage file's) path names: the same
+/// path, or the longest map path the (often absolute) path ends with.
+pub(crate) fn map_file<'a>(files: &'a BTreeSet<&str>, path: &str) -> Option<&'a str> {
     let path = path.replace('\\', "/");
     if let Some(f) = files.get(path.as_str()) {
         return Some(f);

@@ -41,7 +41,7 @@ Every classification also carries the change's `rollout` plan for its lane: how 
 
 ## Risk inputs
 
-Four built-in inputs read facts Onus computes for every change. They are on by default, each can be tuned or turned off, and none can lower a lane:
+Four built-in inputs read facts Onus computes for every change. They are on by default, each can be tuned or turned off, and none can lower a lane. A fifth, `coverage`, is off unless written:
 
 | Input | Fires when | Default |
 |---|---|---|
@@ -49,6 +49,7 @@ Four built-in inputs read facts Onus computes for every change. They are on by d
 | `tests` | A row changes code no test exercises and no runtime trace has observed (`tested: untested`). | `judge` |
 | `confidence` | A row rests on parts of the map Onus could not resolve (`confidence: low`). | `judge` |
 | `history` | A component the change touches had reverts, rollbacks or incidents in the last `days` days, read from `--outcomes` and the production signals beside it (`signals.jsonl`). A planned rollback does not count. | a revert → `judge`, an incident → `human`, over 90 days |
+| `coverage` | Tests ran less than `minChanged` (0 to 1) of the change's changed executable lines, from coverage of the head (`onus help reports`), or the coverage leaves out a changed file with runtime code; with `required: true`, also a change without coverage. | off |
 
     lanes:
       inputs:
@@ -59,10 +60,11 @@ Four built-in inputs read facts Onus computes for every change. They are on by d
           days: 90
           reverts: { judge: 1 }
           incidents: { human: 1 }
+        coverage: { minChanged: 0.8, commands: ["npm test -- --coverage"] }   # off unless written
 
 Every classification also carries `features`: what the change looked like when it was classified, which the learned model trains on, and `learned` when `lanes.learned` is set.
 
-Test reach is per file: a file counts as tested when a test in the map exercises anything in it, and as traced when a runtime trace saw it (`onus help environments`). It is not line coverage. History counts each change once per component, from every record in the window, so a revert and an incident count at the time they were recorded. Code outside every component counts as `root`. A backfill (`onus ci pr --at`) sees only what was recorded by then. Records shared by several repositories are scoped with `--change owner/repo#N`: only that repository's changes count, and the change itself is left out. `onus ci pr` does this for you.
+Test reach is per file: a file counts as tested when a test in the map exercises anything in it, and as traced when a runtime trace saw it (`onus help environments`). It is not line coverage; `coverage` is. Coverage comes from `onus report --coverage` or `--evidence`, or, for a submission made without a report (`onus ci pr`, `onus_submit`), from the coverage its evidence runs recorded at the head commit (`onus help environments`). The `coverage` input runs only while a change would auto-merge. It counts recorded coverage only from the commands listed in `commands`, since an agent picks the commands it runs and one could write a coverage file; when the report holds recorded coverage from any other command, the change goes to the judge, required or not. Coverage given with `--coverage` counts. History counts each change once per component, from every record in the window, so a revert and an incident count at the time they were recorded. Code outside every component counts as `root`. A backfill (`onus ci pr --at`) sees only what was recorded by then. Records shared by several repositories are scoped with `--change owner/repo#N`: only that repository's changes count, and the change itself is left out. `onus ci pr` does this for you.
 
 ## A learned model that only raises
 

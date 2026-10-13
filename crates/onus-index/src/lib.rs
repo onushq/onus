@@ -47,8 +47,10 @@ pub struct MapIndex {
     file: HashMap<String, usize>,
     /// Repository path → symbols declared there.
     file_symbols: HashMap<String, Vec<usize>>,
-    /// Symbol or module id → tests that exercise it.
-    tested_by: HashMap<String, Vec<usize>>,
+    /// Symbol or module id → tests that exercise it, and how that is known.
+    tested_by: HashMap<String, Vec<(usize, Via)>>,
+    /// Repository path → index in `map.coverage.files`.
+    coverage_files: HashMap<String, usize>,
     /// The tree the map was built from, to read source text (`impact`).
     root: Option<std::path::PathBuf>,
 }
@@ -150,14 +152,37 @@ impl MapIndex {
             .map(|(i, f)| (f.path.clone(), i))
             .collect();
 
-        let mut tested_by: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut tested_by: HashMap<String, Vec<(usize, Via)>> = HashMap::new();
+        let mut link = |target: &str, ti: usize, via: Via| {
+            for key in [target, ids::module_of(target)] {
+                tested_by
+                    .entry(key.to_string())
+                    .or_default()
+                    .push((ti, via));
+            }
+        };
         for (ti, t) in map.tests.iter().enumerate() {
             for target in &t.exercises {
-                tested_by.entry(target.clone()).or_default().push(ti);
-                tested_by
-                    .entry(ids::module_of(target).to_string())
-                    .or_default()
-                    .push(ti);
+                link(target, ti, Via::Static);
+            }
+        }
+        // Tests coverage saw running a symbol (ADR 0017). A static link
+        // stays: coverage only adds.
+        let test_index: HashMap<&str, usize> = map
+            .tests
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (t.id.as_str(), i))
+            .collect();
+        let mut coverage_files = HashMap::new();
+        if let Some(cov) = &map.coverage {
+            for l in &cov.links {
+                if let Some(&ti) = test_index.get(l.test.as_str()) {
+                    link(&l.target, ti, Via::Coverage);
+                }
+            }
+            for (i, f) in cov.files.iter().enumerate() {
+                coverage_files.insert(f.path.clone(), i);
             }
         }
         for list in tested_by.values_mut() {
@@ -181,6 +206,7 @@ impl MapIndex {
             file,
             file_symbols,
             tested_by,
+            coverage_files,
         }
     }
 
@@ -436,6 +462,19 @@ impl MapIndex {
                     (c.id.clone(), dir)
                 })
                 .collect(),
+            coverage: self.map.coverage.as_ref().map(|c| {
+                let (ran, executable) = c.files.iter().fold((0, 0), |(r, e), f| {
+                    let (covered, lines) = f.lines();
+                    (r + covered.len() as u32, e + lines.len() as u32)
+                });
+                CoverageStatus {
+                    files: c.files.len(),
+                    executable,
+                    ran,
+                    links: c.links.len(),
+                    notes: c.notes.clone(),
+                }
+            }),
         }
     }
 
@@ -624,7 +663,9 @@ impl MapIndex {
             invariants: s.invariants.clone(),
             uses: count(Some(&self.out)),
             used_by: count(Some(&self.inc)),
-            tests: self.tested_by.get(id).map_or(0, Vec::len),
+            tests: self.tested_by.get(id).map_or(0, |list| {
+                list.iter().map(|(ti, _)| ti).collect::<BTreeSet<_>>().len()
+            }),
         })
     }
 
@@ -790,15 +831,29 @@ impl MapIndex {
                 }
             }
         }
-        let mut tests: BTreeSet<usize> = BTreeSet::new();
+        // Each test, and whether coverage saw it run the target.
+        let mut tests: BTreeMap<usize, bool> = BTreeMap::new();
         for k in &keys {
-            tests.extend(self.tested_by.get(k).into_iter().flatten().copied());
+            for &(ti, via) in self.tested_by.get(k).into_iter().flatten() {
+                *tests.entry(ti).or_default() |= via == Via::Coverage;
+            }
         }
+        let coverage = self.target_coverage(&keys);
+        let fallback = match coverage {
+            Some(c) if c.ran > 0 => LinkStrength::StaticRan,
+            Some(c) if c.executable > 0 => LinkStrength::StaticNotRun,
+            _ => LinkStrength::Static,
+        };
         let total = tests.len();
-        let list: Vec<TestRef> = tests
+        let mut ranked: Vec<(LinkStrength, usize)> = tests
+            .into_iter()
+            .map(|(ti, ran)| (if ran { LinkStrength::Ran } else { fallback }, ti))
+            .collect();
+        ranked.sort_unstable();
+        let list: Vec<TestRef> = ranked
             .into_iter()
             .take(limit)
-            .map(|ti| {
+            .map(|(link, ti)| {
                 let t = &self.map.tests[ti];
                 TestRef {
                     file: t.file.clone(),
@@ -809,6 +864,7 @@ impl MapIndex {
                         .iter()
                         .filter(|c| c.markers.iter().any(|m| m == "skip" || m == "todo"))
                         .count(),
+                    link,
                 }
             })
             .collect();
@@ -816,8 +872,52 @@ impl MapIndex {
             target: target.to_string(),
             total,
             truncated: total > limit,
+            coverage,
             tests: list,
         })
+    }
+
+    /// The executable lines of the targets' code and how many ran, from
+    /// coverage: a symbol's own lines, or a module's whole file, each file
+    /// line counted once. None without coverage, when no target is code in
+    /// a file, or when the coverage measured none of their files.
+    fn target_coverage(&self, keys: &BTreeSet<String>) -> Option<TargetCoverage> {
+        let cov = self.map.coverage.as_ref()?;
+        // File → the line span to count, or None for the whole file.
+        let mut spans: BTreeMap<&str, Vec<Option<(u32, u32)>>> = BTreeMap::new();
+        for k in keys {
+            if let Some(&i) = self.symbol.get(k.as_str()) {
+                if let Some(l) = &self.map.symbols[i].loc {
+                    spans
+                        .entry(l.file.as_str())
+                        .or_default()
+                        .push(Some((l.start, l.end)));
+                }
+            } else if let Some(f) = self.module_file.get(k.as_str()) {
+                spans.entry(f.as_str()).or_default().push(None);
+            }
+        }
+        if spans.is_empty() {
+            return None;
+        }
+        // None when the coverage measured none of the target's files: that
+        // is "not measured", not "no executable code".
+        let mut total = None::<TargetCoverage>;
+        for (file, spans) in spans {
+            let Some(&i) = self.coverage_files.get(file) else {
+                continue;
+            };
+            let total = total.get_or_insert_default();
+            let (covered, executable) = cov.files[i].lines();
+            let inside = |n: &u32| {
+                spans
+                    .iter()
+                    .any(|s| s.is_none_or(|(a, b)| a <= *n && *n <= b))
+            };
+            total.executable += executable.iter().filter(|n| inside(n)).count() as u32;
+            total.ran += covered.iter().filter(|n| inside(n)).count() as u32;
+        }
+        total
     }
 
     /// Who owns `target` (a component, file or symbol), from onus.yaml and
@@ -1227,6 +1327,23 @@ pub struct Status {
     pub diagnostics: usize,
     /// Each component's folder, which its symbol ids' paths are relative to.
     pub component_dirs: BTreeMap<String, String>,
+    /// The map's coverage, when it has some.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<CoverageStatus>,
+}
+
+/// What the map's coverage holds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageStatus {
+    /// Files with coverage.
+    pub files: usize,
+    pub executable: u32,
+    pub ran: u32,
+    /// Links from tests to the symbols they ran.
+    pub links: usize,
+    /// What was left out and why.
+    pub notes: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
@@ -1320,6 +1437,41 @@ pub struct TestRef {
     pub cases: usize,
     /// Cases marked skip or todo.
     pub skipped: usize,
+    /// How the link is known.
+    pub link: LinkStrength,
+}
+
+/// How a test is known to exercise its target, strongest first.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum LinkStrength {
+    /// Coverage shows this test running the target.
+    Ran,
+    /// The test refers to the target, and the measured run executed it.
+    StaticRan,
+    /// The test refers to the target; no coverage was given for it.
+    Static,
+    /// The test refers to the target, but the measured run never executed it.
+    StaticNotRun,
+}
+
+/// Where a test link comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum Via {
+    /// The test file refers to the target.
+    Static,
+    /// Coverage names the test running the target.
+    Coverage,
+}
+
+/// The target's executable lines and how many of them ran, from coverage.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetCoverage {
+    pub executable: u32,
+    pub ran: u32,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -1328,6 +1480,11 @@ pub struct Tests {
     pub target: String,
     pub total: usize,
     pub truncated: bool,
+    /// The target's lines in the coverage, when coverage was given. Tests
+    /// may be empty while some lines ran: the target ran through other code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<TargetCoverage>,
+    /// Strongest link first.
     pub tests: Vec<TestRef>,
 }
 

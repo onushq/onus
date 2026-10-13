@@ -6,7 +6,7 @@ The guide ships inside the `onus` binary: `onus help <topic>` prints any of thes
 | --- | --- |
 | [getting-started](../crates/onus-cli/guide/getting-started.md) | Install Onus, build a map and read your first report |
 | [commands](../crates/onus-cli/guide/commands.md) | Every command and flag, with examples and exit codes |
-| [reports](../crates/onus-cli/guide/reports.md) | Reading a report: rows, ranking, evidence and the JSON |
+| [reports](../crates/onus-cli/guide/reports.md) | Reading a report: rows, ranking, evidence, the changed lines tests ran and the JSON |
 | [changes](../crates/onus-cli/guide/changes.md) | Every kind and subkind of change Onus reports |
 | [configuration](../crates/onus-cli/guide/configuration.md) | The `onus.yaml` reference: components, rules, labels, extractors |
 | [intent](../crates/onus-cli/guide/intent.md) | Checking a change against its stated intent |
@@ -16,7 +16,7 @@ The guide ships inside the `onus` binary: `onus help <topic>` prints any of thes
 | [lanes](../crates/onus-cli/guide/lanes.md) | Risk lanes, change submissions, the learned model, the verifying judge, outcome records and provenance |
 | [production](../crates/onus-cli/guide/production.md) | Production signals, rollout plans per lane and automatic rollback |
 | [web-interface](../crates/onus-cli/guide/web-interface.md) | The web interface: onus ui opens all of it in your browser |
-| [environments](../crates/onus-cli/guide/environments.md) | Environments built from a commit, the evidence store, and traces into the map |
+| [environments](../crates/onus-cli/guide/environments.md) | Environments built from a commit, the evidence store, and traces and coverage into the map |
 | [cloud](../crates/onus-cli/guide/cloud.md) | Onus Cloud from the CLI: `onus login`, scoped tokens, hosted environments, evidence, escalations, the maps it keeps and agents |
 | [plugins](../crates/onus-cli/guide/plugins.md) | New languages and frameworks, SCIP indexes, language servers, trusted mode |
 | [how-it-works](../crates/onus-cli/guide/how-it-works.md) | How maps are built and compared |

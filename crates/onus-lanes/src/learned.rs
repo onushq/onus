@@ -954,6 +954,7 @@ mod tests {
                 dependents: vec![],
                 tested: None,
                 owners: vec![],
+                coverage: None,
             },
             locations: vec![],
             stats: None,
@@ -978,6 +979,7 @@ mod tests {
             structure: StructureNotes::default(),
             text_stats: Default::default(),
             map_diagnostics: vec![],
+            coverage: None,
         }
     }
 

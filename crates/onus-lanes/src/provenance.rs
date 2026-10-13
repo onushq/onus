@@ -804,6 +804,7 @@ mod tests {
                 structure: StructureNotes::default(),
                 text_stats: TextStats::default(),
                 map_diagnostics: vec![],
+                coverage: None,
             },
             changed_files: vec!["a.ts".into(), "b.ts".into()],
             evidence: vec![TestRun {

@@ -5,7 +5,10 @@
 //! 2. Raise it with every other rule that applies.
 //! 3. Raise it with the built-in risk inputs (`lanes.inputs`): blast
 //!    radius, untested code, low map confidence and the history of the
-//!    components the change touches. They only raise (ADR 0014).
+//!    components the change touches. They only raise (ADR 0014). When the
+//!    policy sets `lanes.inputs.coverage`, too few changed lines run in
+//!    tests, a changed runtime file the coverage leaves out, or no coverage
+//!    at all, sends the change to the judge (ADR 0017).
 //! 4. Raise it with the hard floors, which no policy can lower: sensitive
 //!    code, rules of the game and third-party code new to the repository go
 //!    to a person; a new dependency never auto-merges; committed secrets,
@@ -24,8 +27,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use onus_core::{
-    ChangeKind, Confidence, Lane, LaneRule, LanesConfig, LearnedConfig, RuleMatch, SemanticChange,
-    SemanticReport, TestReach, Thresholds,
+    ChangeKind, Confidence, CoverageOrigin, Lane, LaneRule, LanesConfig, LearnedConfig, RuleMatch,
+    SemanticChange, SemanticReport, TestReach, Thresholds,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -255,6 +258,12 @@ fn plural(n: u32, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
 
+/// Hundredths of a percent as a percentage: `9000` is `90`, `5550` `55.5`.
+fn percent(hundredths: u64) -> String {
+    let s = format!("{}.{:02}", hundredths / 100, hundredths % 100);
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
 /// The lane a threshold puts a count in, with the threshold.
 fn threshold_met(t: &Thresholds, n: u32) -> Option<(Lane, u32)> {
     let lane = t.lane_for(n)?;
@@ -448,6 +457,106 @@ pub fn classify(
             &mut applied,
             &mut lane,
         );
+    }
+    // Changed lines tests ran, when the policy asks (ADR 0017). A changed
+    // file with runtime code the coverage leaves out counts as not run, so
+    // giving coverage never lowers a lane. An agent picks the commands it
+    // runs in an environment, and one of them can write a coverage file, so
+    // recorded coverage counts only from the commands the policy names. The
+    // report's counts merge every source, so recorded coverage from any other
+    // command voids them, and the change goes to the judge: dropping it to
+    // "no coverage" would let an extra run hide an honest one.
+    if lane == Lane::AutoMerge
+        && let Some(policy) = &inputs.coverage
+    {
+        let uncounted: BTreeSet<String> = report
+            .coverage
+            .iter()
+            .flat_map(|c| &c.sources)
+            .filter(|s| {
+                s.origin == CoverageOrigin::Recorded
+                    && !s
+                        .command
+                        .as_ref()
+                        .is_some_and(|c| policy.commands.contains(c))
+            })
+            .map(|s| {
+                s.command
+                    .as_deref()
+                    .map_or("a command it does not name".into(), |c| format!("`{c}`"))
+            })
+            .collect();
+        let uncounted: Vec<String> = uncounted.into_iter().collect();
+        match &report.coverage {
+            _ if !uncounted.is_empty() => raise(
+                Lane::Judge,
+                "input",
+                format!(
+                    "coverage was recorded by {}, which lanes.inputs.coverage.commands does not name; auto-merge needs all recorded coverage from named commands",
+                    some(&uncounted)
+                ),
+                vec![],
+                &mut applied,
+                &mut lane,
+            ),
+            None if policy.required => raise(
+                Lane::Judge,
+                "input",
+                "no coverage was given; auto-merge needs it (lanes.inputs.coverage.required)"
+                    .into(),
+                vec![],
+                &mut applied,
+                &mut lane,
+            ),
+            None => {}
+            Some(c) => {
+                if !c.not_measured.is_empty() {
+                    let files: Vec<String> =
+                        c.not_measured.iter().map(|f| format!("`{f}`")).collect();
+                    raise(
+                        Lane::Judge,
+                        "input",
+                        format!(
+                            "the coverage leaves out {} with runtime code ({}); auto-merge needs every changed file measured",
+                            plural(files.len() as u32, "changed file", "changed files"),
+                            some(&files)
+                        ),
+                        rows.iter()
+                            .filter(|r| {
+                                r.locations.iter().any(|l| {
+                                    l.side == onus_core::Side::Head
+                                        && c.not_measured.contains(&l.file)
+                                })
+                            })
+                            .map(|r| r.id.clone())
+                            .collect(),
+                        &mut applied,
+                        &mut lane,
+                    );
+                }
+                // In hundredths of a percent, so a share met exactly is met.
+                let needed = (policy.min_changed * 10_000.0).round() as u64;
+                if c.changed > 0 && u64::from(c.ran) * 10_000 < needed * u64::from(c.changed) {
+                    raise(
+                        Lane::Judge,
+                        "input",
+                        format!(
+                            "tests ran {} of {} ({}%); auto-merge needs {}%",
+                            c.ran,
+                            plural(c.changed, "changed line", "changed lines"),
+                            100 * u64::from(c.ran) / u64::from(c.changed),
+                            percent(needed)
+                        ),
+                        rows.iter()
+                            .filter(|r| r.hints.coverage.is_some_and(|c| c.ran < c.changed))
+                            .map(|r| r.id.clone())
+                            .collect(),
+                        &mut applied,
+                        &mut lane,
+                    );
+                }
+            }
+        }
     }
     // 4. Hard floors.
     if report.summary.secrets > 0 {
@@ -773,6 +882,7 @@ mod tests {
                 dependents: vec![],
                 tested: None,
                 owners: vec![],
+                coverage: None,
             },
             locations: vec![],
             stats: None,
@@ -797,6 +907,7 @@ mod tests {
             structure: StructureNotes::default(),
             text_stats: TextStats::default(),
             map_diagnostics: vec![],
+            coverage: None,
         }
     }
 
@@ -1054,6 +1165,7 @@ mod tests {
                 incidents: Thresholds::default(),
                 ..Default::default()
             },
+            coverage: None,
         };
         let areas: AreaHistories = [(
             "docs".to_string(),
@@ -1091,6 +1203,170 @@ mod tests {
                 assert!(classify(r, None, &human, &ctx).lane >= Lane::Human);
             }
         }
+    }
+
+    #[test]
+    fn coverage_policy_raises_auto_merge() {
+        use onus_core::{CoveragePolicy, LineCoverage, Location, ReportCoverage};
+        let mut p = policy();
+        p.inputs.coverage = Some(CoveragePolicy {
+            min_changed: 0.8,
+            required: false,
+            commands: vec![],
+        });
+        let with_coverage = |changed, ran| {
+            let mut r = internal(|h| h.coverage = Some(LineCoverage { changed, ran }));
+            r.coverage = Some(ReportCoverage {
+                sources: vec![],
+                changed,
+                ran,
+                not_run: vec![],
+                not_measured: vec![],
+                notes: vec![],
+            });
+            r
+        };
+        let c = classify(&with_coverage(10, 3), None, &p, &with(VETERAN));
+        assert_eq!(c.lane, Lane::Judge);
+        let input = inputs(&c, "input");
+        assert_eq!(
+            input[0].reason,
+            "tests ran 3 of 10 changed lines (30%); auto-merge needs 80%"
+        );
+        assert_eq!(input[0].rows, ["internal-changes:x"]);
+        assert_eq!(lane_of(&with_coverage(10, 9), &p), Lane::AutoMerge);
+        // The share is rounded down, like the report's.
+        let mut strict = p.clone();
+        strict.inputs.coverage = Some(CoveragePolicy {
+            min_changed: 0.9,
+            required: false,
+            commands: vec![],
+        });
+        let c = classify(&with_coverage(500, 448), None, &strict, &with(VETERAN));
+        assert_eq!(
+            inputs(&c, "input")[0].reason,
+            "tests ran 448 of 500 changed lines (89%); auto-merge needs 90%"
+        );
+        // A share met exactly is met, despite floating point.
+        for (share, changed, ran) in [(0.55, 100, 55), (0.07, 100, 7), (0.14, 50, 7)] {
+            let mut exact = p.clone();
+            exact.inputs.coverage.as_mut().unwrap().min_changed = share;
+            assert_eq!(
+                lane_of(&with_coverage(changed, ran), &exact),
+                Lane::AutoMerge,
+                "{share}"
+            );
+        }
+        let mut half = p.clone();
+        half.inputs.coverage.as_mut().unwrap().min_changed = 0.555;
+        let c = classify(&with_coverage(1, 0), None, &half, &with(VETERAN));
+        assert_eq!(
+            inputs(&c, "input")[0].reason,
+            "tests ran 0 of 1 changed line (0%); auto-merge needs 55.5%"
+        );
+        // Recorded coverage counts only from the commands the policy names:
+        // an agent picks its commands, and one can write a coverage file.
+        let recorded = |command: &str| {
+            let mut r = with_coverage(10, 10);
+            r.coverage.as_mut().unwrap().sources = vec![onus_core::CoverageSource {
+                format: onus_core::CoverageFormat::Lcov,
+                path: "coverage/lcov.info".into(),
+                sha256: "0".repeat(64),
+                origin: CoverageOrigin::Recorded,
+                manifest: Some("1".repeat(64)),
+                command: Some(command.into()),
+                files: 1,
+                unmatched: 0,
+            }];
+            r
+        };
+        let mut named = p.clone();
+        named.inputs.coverage = Some(CoveragePolicy {
+            min_changed: 0.8,
+            required: true,
+            commands: vec!["npm test -- --coverage".into()],
+        });
+        assert_eq!(
+            lane_of(&recorded("npm test -- --coverage"), &named),
+            Lane::AutoMerge
+        );
+        let c = classify(
+            &recorded("sh -c 'cp lcov.info coverage/'"),
+            None,
+            &named,
+            &with(VETERAN),
+        );
+        assert_eq!(c.lane, Lane::Judge);
+        assert_eq!(
+            inputs(&c, "input")[0].reason,
+            "coverage was recorded by `sh -c 'cp lcov.info coverage/'`, which lanes.inputs.coverage.commands does not name; auto-merge needs all recorded coverage from named commands"
+        );
+        // Required or not: an extra run cannot hide an honest one. Named
+        // coverage that sends the change to the judge keeps it there when an
+        // unnamed run adds its own.
+        named.inputs.coverage.as_mut().unwrap().required = false;
+        assert_eq!(lane_of(&recorded("sh"), &named), Lane::Judge);
+        let mut low = recorded("npm test -- --coverage");
+        low.coverage.as_mut().unwrap().ran = 0;
+        low.changes[0].hints.coverage = Some(LineCoverage {
+            changed: 10,
+            ran: 0,
+        });
+        assert_eq!(lane_of(&low, &named), Lane::Judge);
+        let cov = low.coverage.as_mut().unwrap();
+        let mut forged = cov.sources[0].clone();
+        forged.command = Some("true".into());
+        cov.sources.push(forged);
+        cov.ran = 10;
+        let c = classify(&low, None, &named, &with(VETERAN));
+        assert_eq!(c.lane, Lane::Judge);
+        assert!(inputs(&c, "input")[0].reason.contains("`true`"));
+        // It runs only while the change would auto-merge.
+        let mut judged = p.clone();
+        judged.default = Lane::Judge;
+        judged.rules.clear();
+        let c = classify(&with_coverage(10, 3), None, &judged, &with(VETERAN));
+        assert!(inputs(&c, "input").is_empty(), "{:?}", c.applied);
+        // No changed executable lines, or no coverage, passes unless required.
+        assert_eq!(lane_of(&with_coverage(0, 0), &p), Lane::AutoMerge);
+        assert_eq!(lane_of(&internal(|_| {}), &p), Lane::AutoMerge);
+        // A changed runtime file the coverage leaves out counts as not run:
+        // coverage of other files cannot let it through.
+        let mut unmeasured = with_coverage(0, 0);
+        unmeasured.changes[0].locations = vec![Location::head("src/eta.ts", 1, 1)];
+        unmeasured.coverage.as_mut().unwrap().not_measured = vec!["src/eta.ts".into()];
+        let c = classify(&unmeasured, None, &p, &with(VETERAN));
+        assert_eq!(c.lane, Lane::Judge);
+        let input = inputs(&c, "input");
+        assert_eq!(
+            input[0].reason,
+            "the coverage leaves out 1 changed file with runtime code (`src/eta.ts`); auto-merge needs every changed file measured"
+        );
+        assert_eq!(input[0].rows, ["internal-changes:x"]);
+        p.inputs.coverage = Some(CoveragePolicy {
+            min_changed: 0.0,
+            required: true,
+            commands: vec![],
+        });
+        let c = classify(&internal(|_| {}), None, &p, &with(VETERAN));
+        assert_eq!(c.lane, Lane::Judge);
+        assert!(
+            inputs(&c, "input")[0]
+                .reason
+                .contains("no coverage was given")
+        );
+        assert_eq!(lane_of(&with_coverage(10, 0), &p), Lane::AutoMerge);
+        assert_eq!(lane_of(&unmeasured, &p), Lane::Judge);
+        // Off unless written.
+        assert_eq!(lane_of(&with_coverage(10, 0), &policy()), Lane::AutoMerge);
+        // It never lowers a lane.
+        let mut human = p.clone();
+        human.default = Lane::Human;
+        human.rules.clear();
+        assert_eq!(lane_of(&with_coverage(10, 10), &human), Lane::Human);
+        let mut secret = with_coverage(10, 10);
+        secret.summary.secrets = 1;
+        assert_eq!(lane_of(&secret, &p), Lane::Blocked);
     }
 
     fn model(bias: f64, weights: &[(&str, f64)]) -> Model {

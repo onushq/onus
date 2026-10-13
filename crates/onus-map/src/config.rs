@@ -136,6 +136,14 @@ pub fn validate(config: &OnusConfig) -> Result<(), MapError> {
                 inputs.history.days
             ));
         }
+        if let Some(c) = &inputs.coverage
+            && !(0.0..=1.0).contains(&c.min_changed)
+        {
+            problems.push(format!(
+                "lanes.inputs.coverage.minChanged is a share from 0 to 1, found {}",
+                c.min_changed
+            ));
+        }
         if let Some(learned) = &lanes.learned {
             let (judge, human) = (learned.judge, learned.human);
             if !(0.0 < judge && judge <= human && human <= 1.0) {
@@ -285,6 +293,29 @@ extractors:
         assert!(
             parse("version: 1\nlanes:\n  inputs: { blastRadius: {}, history: { days: 30 } }\n")
                 .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_coverage_policy_is_a_share_and_off_unless_written() {
+        let lanes = |inputs: &str| parse(&format!("version: 1\nlanes:\n  inputs: {inputs}\n"));
+        let err = lanes("{ coverage: { minChanged: 80 } }")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("lanes.inputs.coverage.minChanged is a share from 0 to 1, found 80"),
+            "{err}"
+        );
+        let on = lanes("{ coverage: { minChanged: 0.8, required: true } }").unwrap();
+        let policy = on.config.lanes.unwrap().inputs.coverage.unwrap();
+        assert_eq!((policy.min_changed, policy.required), (0.8, true));
+        let off = lanes("{}").unwrap();
+        assert_eq!(off.config.lanes.unwrap().inputs.coverage, None);
+        let full = parse("version: 1\ntests:\n  coverage: [coverage/lcov.info]\nenvironment:\n  coverage: [\"coverage/*.info\"]\n").unwrap();
+        assert_eq!(full.config.tests.coverage, ["coverage/lcov.info"]);
+        assert_eq!(
+            full.config.environment.unwrap().coverage,
+            ["coverage/*.info"]
         );
     }
 

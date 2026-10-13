@@ -342,6 +342,7 @@ pub fn change(
             dependents: vec![],
             tested: None,
             owners: vec![],
+            coverage: None,
         },
         locations,
         stats: None,

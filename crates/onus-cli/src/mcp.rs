@@ -719,7 +719,7 @@ impl OnusMcp {
 
     #[tool(
         name = "onus_tests_for",
-        description = "The test files that exercise a symbol, file or component, with their number of cases and skipped cases."
+        description = "The test files that exercise a symbol, file or component, with their number of cases and skipped cases, and how each link is known: `ran` (coverage shows this test running it), `static-ran` (the test refers to it and the measured run executed it), `static` (it refers to it; no coverage), `static-not-run` (it refers to the target but the measured run never executed it). Strongest first. `coverage` gives the target's executable and ran lines when the coverage measured its file; tests can be empty while lines ran, when the target ran through other code."
     )]
     async fn tests_for(
         &self,
@@ -862,7 +862,7 @@ impl OnusMcp {
 
     #[tool(
         name = "onus_env_run",
-        description = "Run a command (such as the tests) in an environment. The run is recorded as evidence: its output, JUnit results and traces, under a run id you can pass to onus_submit. Returns the exit code, test counts and the end of the output."
+        description = "Run a command (such as the tests) in an environment. The run is recorded as evidence: its output, JUnit results, traces and coverage, under a run id you can pass to onus_submit. Returns the exit code, test counts and the end of the output."
     )]
     async fn env_run(
         &self,

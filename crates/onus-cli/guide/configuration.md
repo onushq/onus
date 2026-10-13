@@ -30,6 +30,7 @@ Onus works without configuration. An `onus.yaml` at the repository root adds wha
     tests:
       globs: ["**/*.test.ts", "e2e/**"]
       command: "npx vitest run {test}"
+      coverage: ["coverage/lcov.info"]
     testData: ["fixtures/**"]
 
 Unknown keys are an error, so a typo never silently does nothing.
@@ -153,6 +154,8 @@ Packs are read from the base version of a change, like this file.
 
 `command`: how to run one test file, with `{test}` replaced by its path, such as `npx vitest run {test}`. `onus escalation assess` uses it to reproduce the failing test an escalation names, in a container built from `environment:` (`onus help scopes`). Without it, failing tests are not reproduced, so no escalation is granted by policy. A command without `{test}` would run every test, so it reproduces nothing either.
 
+`coverage`: coverage files of the working tree (lcov, Cobertura XML or Istanbul JSON), relative to the repository root, for the map agents query (`onus mcp`, `onus query`). Each rebuild reads the ones that exist, and leaves out any source file edited after the coverage file was written, with a note. With them, `onus_tests_for` says which tests ran a target, and finds tests that only reach it through other code (`onus help agents`). Reports read coverage only from `--coverage` and `--evidence` (`onus help environments`).
+
 ## testData
 
 Globs of files that are test data rather than code: fixture projects, sample apps, recorded responses.
@@ -187,6 +190,10 @@ What happens to a change after it is reported: the default lane, rules that set 
         tests: { untested: judge }             # code no test or trace reaches
         confidence: { low: judge }             # rows on parts of the map Onus could not resolve
         history: { days: 90, reverts: { judge: 1 }, incidents: { human: 1 } }
+        coverage:                              # off unless written
+          minChanged: 0.8
+          required: false
+          commands: ["npm test -- --coverage"] # whose recorded coverage counts
       learned:                                 # off unless written
         model: onus.lanes-model.json           # from onus lanes train, read at the base commit
         judge: 0.6                             # raise to the judge at or above this risk
@@ -202,6 +209,8 @@ What happens to a change after it is reported: the default lane, rules that set 
 
 Inputs only raise a lane. A threshold of N means N or more, and the highest lane whose threshold is met applies (`judge`, `human`, `blocked`). Writing a key replaces its default as a whole: `blastRadius: { human: 10 }` has no judge threshold, and `blastRadius: {}` turns the input off. A lane of `auto-merge` turns `tests` or `confidence` off. Thresholds are at least 1 and must not go down as the lane goes up; `history.days` is 1 to 3650.
 
+`coverage` reads the report's coverage of the head (`onus help reports`): when tests ran less than `minChanged` (a share from 0 to 1) of the changed executable lines, the change goes to the judge. So does a change to a file with runtime code that the coverage leaves out (`notMeasured`): coverage of other files cannot let it through. With `required: true`, a change without coverage goes to the judge too. A change with no changed executable lines, and no changed file the coverage leaves out, passes. Coverage given with `--coverage` counts. Coverage an environment recorded counts only when its run's command is one of `commands`, written exactly as `onus env run` ran it: an agent picks the commands it runs, and one could write a coverage file. When the report holds recorded coverage from another command, the change goes to the judge, whatever `required` says: an extra run must not hide an honest one. The input runs only while the change would auto-merge.
+
 The learned model also only raises a lane, and never to `blocked`. Its thresholds need `0 < judge <= human <= 1`, and the model file's name must end in `lanes-model.json`, so a change to it is a rule of the game and goes to a person.
 
 `rollout` sets the plan of `auto-merge`, `judge` and `human` changes; a lane left out keeps its built-in plan (`onus help production` has the table), and `blocked` has none. Steps go up strictly from 1 to 100 and end at 100, and `none` takes no steps. A guard names a `metric` and at least one of `max`, `min` (on the value), `maxRatio` and `minRatio` (on the value over its baseline).
@@ -216,5 +225,6 @@ The container `onus env create` builds from a commit: its image (default: the de
       seed: node scripts/seed-test-data.mjs
       evidence: ["reports/**/*.xml"]     # JUnit XML
       traces: ["otel/*.json"]            # OTLP JSON
+      coverage: ["coverage/lcov.info"]   # lcov, Cobertura XML or Istanbul JSON
       lockfiles: [package-lock.json]     # default: the usual lockfiles
       egressImage: ubuntu/squid          # the proxy for hosts a token names

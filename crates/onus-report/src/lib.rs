@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use onus_core::{SemanticChange, SemanticReport, Side, TestReach};
+use onus_core::{ReportCoverage, SemanticChange, SemanticReport, Side, TestReach};
 
 /// Hidden marker so a bot can find and update its own comment.
 pub const COMMENT_MARKER: &str = "<!-- onus-report -->";
@@ -88,6 +88,115 @@ fn rules_line(report: &SemanticReport, rules_declared: bool) -> String {
     }
 }
 
+/// ` · **Tests ran:** 34 of 40 changed lines (85%)`
+fn coverage_line(cov: &ReportCoverage) -> String {
+    let ran = if cov.changed > 0 {
+        format!(
+            "{} of {} ({}%)",
+            thousands(cov.ran),
+            plural(cov.changed, "changed line", "changed lines"),
+            // Rounded down, so 100% means every line ran.
+            u64::from(cov.ran) * 100 / u64::from(cov.changed)
+        )
+    } else if cov.not_measured.is_empty() {
+        "no changed executable lines".into()
+    } else {
+        "no measured changed lines".into()
+    };
+    if cov.not_measured.is_empty() {
+        format!(" · **Tests ran:** {ran}")
+    } else {
+        format!(
+            " · **Tests ran:** {ran}; {} not in the coverage",
+            plural(
+                cov.not_measured.len() as u32,
+                "changed file",
+                "changed files"
+            )
+        )
+    }
+}
+
+/// `3–5, 9`, and whether that is more than one line.
+fn line_list(lines: &[[u32; 2]]) -> (String, bool) {
+    let parts: Vec<String> = lines
+        .iter()
+        .map(|[a, b]| {
+            if a == b {
+                a.to_string()
+            } else {
+                format!("{a}–{b}")
+            }
+        })
+        .collect();
+    let many = lines.len() > 1 || lines.first().is_some_and(|[a, b]| a != b);
+    (parts.join(", "), many)
+}
+
+/// The changed lines no test ran, the changed files the coverage leaves
+/// out, and where the coverage came from.
+fn coverage_details(out: &mut String, cov: &ReportCoverage) {
+    if cov.not_run.is_empty() && cov.not_measured.is_empty() && cov.notes.is_empty() {
+        return;
+    }
+    let mut by_file: BTreeMap<&str, Vec<[u32; 2]>> = BTreeMap::new();
+    for l in &cov.not_run {
+        by_file.entry(l.file.as_str()).or_default().push(l.lines);
+    }
+    let lines: u32 = cov
+        .not_run
+        .iter()
+        .map(|l| l.lines[1] - l.lines[0] + 1)
+        .sum();
+    let _ = writeln!(
+        out,
+        "<details><summary>Changed lines no test ran: {}</summary>",
+        match (lines, cov.not_measured.len() as u32) {
+            (0, 0) => "none".to_string(),
+            (0, files) => format!("{} not in the coverage", plural(files, "file", "files")),
+            (lines, 0) => format!(
+                "{} in {}",
+                plural(lines, "line", "lines"),
+                plural(by_file.len() as u32, "file", "files")
+            ),
+            (lines, files) => format!(
+                "{} in {}; {} not in the coverage",
+                plural(lines, "line", "lines"),
+                plural(by_file.len() as u32, "file", "files"),
+                plural(files, "file", "files")
+            ),
+        }
+    );
+    let _ = writeln!(out);
+    for (file, ranges) in &by_file {
+        let (list, many) = line_list(ranges);
+        let _ = writeln!(
+            out,
+            "- `{file}` {} {list}",
+            if many { "lines" } else { "line" }
+        );
+    }
+    for f in &cov.not_measured {
+        let _ = writeln!(out, "- not in the coverage (no test loaded it): `{f}`");
+    }
+    for n in &cov.notes {
+        let _ = writeln!(out, "- {n}");
+    }
+    for s in &cov.sources {
+        let _ = writeln!(
+            out,
+            "- coverage: {} `{}` ({}, {})",
+            s.format.as_str(),
+            s.path,
+            s.origin.as_str(),
+            plural(s.files, "file", "files")
+        );
+    }
+    let _ = writeln!(out);
+    let _ = writeln!(out, "</details>");
+    let _ = writeln!(out);
+}
+
 fn kind_cell(c: &SemanticChange) -> String {
     if c.hints.intent_mismatch {
         format!("Outside stated intent · {}", c.kind_label)
@@ -108,26 +217,13 @@ fn evidence(c: &SemanticChange) -> Vec<String> {
     by_file
         .into_iter()
         .map(|((file, side), lines)| {
-            let parts: Vec<String> = lines
-                .iter()
-                .map(|[a, b]| {
-                    if a == b {
-                        a.to_string()
-                    } else {
-                        format!("{a}–{b}")
-                    }
-                })
-                .collect();
-            let word = if lines.len() == 1 && lines[0][0] == lines[0][1] {
-                "line"
-            } else {
-                "lines"
-            };
+            let (list, many) = line_list(&lines);
+            let word = if many { "lines" } else { "line" };
             let side = match side {
                 Side::Head => "",
                 Side::Base => " (before the change)",
             };
-            format!("`{file}` {word} {}{side}", parts.join(", "))
+            format!("`{file}` {word} {list}{side}")
         })
         .collect()
 }
@@ -161,9 +257,14 @@ pub fn to_markdown(report: &SemanticReport, rules_declared: bool) -> String {
     let _ = writeln!(out);
     let _ = writeln!(
         out,
-        "**Intent check:** {} · **Boundary rules:** {}",
+        "**Intent check:** {} · **Boundary rules:** {}{}",
         intent_line(report),
-        rules_line(report, rules_declared)
+        rules_line(report, rules_declared),
+        report
+            .coverage
+            .as_ref()
+            .map(coverage_line)
+            .unwrap_or_default()
     );
     if let Some(i) = &report.intent_check
         && !i.mismatches.is_empty()
@@ -191,6 +292,9 @@ pub fn to_markdown(report: &SemanticReport, rules_declared: bool) -> String {
         }
     }
     let _ = writeln!(out);
+    if let Some(cov) = &report.coverage {
+        coverage_details(&mut out, cov);
+    }
 
     if !report.changes.is_empty() {
         let _ = writeln!(
@@ -231,6 +335,13 @@ pub fn to_markdown(report: &SemanticReport, rules_declared: bool) -> String {
                     }
                     .into(),
                 );
+            }
+            if let Some(cov) = c.hints.coverage {
+                facts.push(format!(
+                    "tests ran {} of {}",
+                    thousands(cov.ran),
+                    plural(cov.changed, "changed line", "changed lines")
+                ));
             }
             if !c.hints.novelty.is_empty() {
                 facts.push(format!("novelty {}", c.hints.novelty.join(", ")));
@@ -303,4 +414,101 @@ pub fn to_markdown(report: &SemanticReport, rules_declared: bool) -> String {
     let _ = writeln!(out);
     let _ = writeln!(out, "</details>");
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use onus_core::{LineCoverage, Location};
+    use serde_json::json;
+
+    fn report() -> SemanticReport {
+        serde_json::from_value(json!({
+            "schemaVersion": 1, "base": "base", "head": "head",
+            "summary": { "meaningChanges": 1, "needsAttention": 0, "secrets": 0,
+                         "newRuleViolations": 0, "intentMismatches": 0 },
+            "changes": [{
+                "id": "internal-changes:billing", "kind": "internal",
+                "subkind": "internal-changes", "level": "behavior", "subject": "billing",
+                "component": "billing", "kindLabel": "Internal",
+                "title": "5 changed lines of code inside `billing`", "whyItMatters": "Stays inside",
+                "hints": { "labels": [], "blastRadius": 0, "novelty": [], "confidence": "static",
+                           "rulesOfTheGame": false, "intentMismatch": false, "needsPerson": false },
+                "locations": [{ "file": "src/discount.ts", "lines": [21, 28], "side": "head" }],
+            }],
+            "ruleViolations": [],
+            "structure": { "movedFiles": [], "formattingOnly": [] },
+            "textStats": { "files": 1, "linesAdded": 5, "linesRemoved": 0 },
+            "mapDiagnostics": [],
+        }))
+        .unwrap()
+    }
+
+    fn covered(r: &mut SemanticReport) {
+        r.changes[0].hints.coverage = Some(LineCoverage { changed: 5, ran: 3 });
+        r.coverage = Some(
+            serde_json::from_value(json!({
+                "sources": [{ "format": "lcov", "path": "coverage/lcov.info", "sha256": "ab",
+                              "origin": "supplied", "files": 41, "unmatched": 3 }],
+                "changed": 40, "ran": 34,
+                "notRun": [
+                    Location::head("src/eta.ts", 13, 13),
+                    Location::head("src/discount.ts", 21, 23),
+                    Location::head("src/discount.ts", 27, 28),
+                ],
+                "notMeasured": ["src/refunds.ts"],
+            }))
+            .unwrap(),
+        );
+    }
+
+    #[test]
+    fn coverage_shows_the_lines_no_test_ran() {
+        let mut r = report();
+        let before = to_markdown(&r, true);
+        covered(&mut r);
+        let md = to_markdown(&r, true);
+        assert!(md.contains(
+            "**Boundary rules:** no new violations · **Tests ran:** 34 of 40 changed lines (85%); 1 changed file not in the coverage\n"
+        ));
+        assert!(md.contains(
+            "<details><summary>Changed lines no test ran: 6 lines in 2 files; 1 file not in the coverage</summary>\n\n\
+             - `src/discount.ts` lines 21–23, 27–28\n\
+             - `src/eta.ts` line 13\n\
+             - not in the coverage (no test loaded it): `src/refunds.ts`\n\
+             - coverage: lcov `coverage/lcov.info` (supplied, 41 files)\n\n</details>\n\n\
+             <details><summary>Evidence per row"
+        ));
+        assert!(md.contains("· tests ran 3 of 5 changed lines\n"));
+        // The headline stays as it was.
+        assert_eq!(md.lines().nth(1), before.lines().nth(1));
+        // Without coverage, the report is as before.
+        r.coverage = None;
+        r.changes[0].hints.coverage = None;
+        assert_eq!(to_markdown(&r, true), before);
+        assert!(!before.contains("Tests ran") && !before.contains("tests ran"));
+    }
+
+    #[test]
+    fn no_changed_executable_lines() {
+        let mut r = report();
+        covered(&mut r);
+        let cov = r.coverage.as_mut().unwrap();
+        (cov.changed, cov.ran) = (0, 0);
+        cov.not_run.clear();
+        cov.not_measured.clear();
+        let md = to_markdown(&r, false);
+        assert!(md.contains("· **Tests ran:** no changed executable lines\n"));
+        assert!(!md.contains("Changed lines no test ran"));
+        // A changed file nothing measured is not "no changed lines".
+        let cov = r.coverage.as_mut().unwrap();
+        cov.not_measured = vec!["src/eta.ts".into()];
+        let md = to_markdown(&r, false);
+        assert!(md.contains(
+            "· **Tests ran:** no measured changed lines; 1 changed file not in the coverage\n"
+        ));
+        assert!(md.contains(
+            "<details><summary>Changed lines no test ran: 1 file not in the coverage</summary>"
+        ));
+    }
 }

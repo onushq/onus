@@ -411,6 +411,7 @@ mod tests {
                 structure: StructureNotes::default(),
                 text_stats: TextStats::default(),
                 map_diagnostics: vec![],
+                coverage: None,
             },
             changed_files: vec![],
             evidence: vec![run_ok(true)],

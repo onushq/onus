@@ -40,7 +40,7 @@ Rows are ranked so the one that deserves attention comes first. Changes outside 
 9. tests
 10. notable internal edits, then renames, then the internal rows
 
-Within a group, rows Onus is unsure about come first (unknowns count as higher risk), then rows in components with sensitivity labels, then rows with a larger blast radius (more dependent files).
+Within a group, rows Onus is unsure about come first (unknowns count as higher risk), then rows with changed lines no test ran (with coverage), then rows in components with sensitivity labels, then rows with a larger blast radius (more dependent files).
 
 ## Internal rows
 
@@ -53,7 +53,17 @@ Every row lists the lines it explains. The changed lines no row explains collaps
 
 ## Evidence
 
-The collapsed "Evidence per row" section lists, for each row, its kind and subkind, confidence, labels, blast radius, how many other components use what it changed ("used by 3 other components"), whether tests reach its code ("tested", "traced, not tested" or "untested"), novelty and line counts, and every file and line behind it. Lines marked "(before the change)" are in the base tree, for example a deleted assertion.
+The collapsed "Evidence per row" section lists, for each row, its kind and subkind, confidence, labels, blast radius, how many other components use what it changed ("used by 3 other components"), whether tests reach its code ("tested", "traced, not tested" or "untested"), with coverage how many of its changed lines tests ran ("tests ran 3 of 5 changed lines"), novelty and line counts, and every file and line behind it. Lines marked "(before the change)" are in the base tree, for example a deleted assertion.
+
+## Tests ran
+
+With coverage of the head (`--coverage`, or `--evidence` with runs an environment recorded at the head commit; `onus help environments`), the intent line gains a third part:
+
+    **Intent check:** matches stated intent · **Boundary rules:** no new violations · **Tests ran:** 34 of 40 changed lines (85%)
+
+A changed line is an added or edited head line the coverage counts as executable. "no changed executable lines" means the change touched none in the files the coverage measured, and no changed file with runtime code was left out of it. When one was, the line says so ("no measured changed lines; 1 changed file not in the coverage"), and so does the summary of the section below. A collapsed "Changed lines no test ran" section then lists those lines by file, the changed files with runtime code the coverage does not include ("not in the coverage (no test loaded it)"), what was left out and why, and each coverage file with its format and origin (`supplied` or `recorded`). The percentage is rounded down, so 100% means every changed line ran.
+
+Without coverage the report is exactly as before.
 
 ## Structure only
 
@@ -68,11 +78,12 @@ Code in the changed files that Onus could not resolve statically: dynamic import
 `--format json` gives everything in the Markdown and more (schemas/semantic-report.schema.json):
 
 - `summary`: counts of rows, rows needing attention, secrets, new rule violations and intent mismatches.
-- `changes`: the ranked rows. Each has an `id`, `kind`, `subkind`, `level` (relationship, behavior or structure), `subject` (the map id it is about), `component`, `title`, `whyItMatters`, `hints` (labels, blastRadius, novelty, confidence, rulesOfTheGame, intentMismatch, needsPerson, dependentComponents, `dependents` when there are any, `tested` for rows that change code, and `owners` when the component has owners), `locations` (file, lines, side) and, for internal rows, `stats`.
+- `changes`: the ranked rows. Each has an `id`, `kind`, `subkind`, `level` (relationship, behavior or structure), `subject` (the map id it is about), `component`, `title`, `whyItMatters`, `hints` (labels, blastRadius, novelty, confidence, rulesOfTheGame, intentMismatch, needsPerson, dependentComponents, `dependents` when there are any, `tested` for rows that change code, `owners` when the component has owners, and `coverage` `{changed, ran}` when coverage was given and the row changes executable lines), `locations` (file, lines, side) and, for internal rows, `stats`.
 - `intentCheck`, `ruleViolations`, `structure`, `textStats` and `mapDiagnostics`.
+- `coverage`, only with coverage: `sources` (format, path, sha256, origin, the evidence `manifest` and its run's `command` when recorded, files matched and not), `changed`, `ran`, `notRun` (head-side locations), `notMeasured` (changed files) and `notes`.
 
-Output is deterministic: the same two trees always give byte-identical Markdown and JSON, with no timestamps or absolute paths.
+Output is deterministic: the same two trees always give byte-identical Markdown and JSON, with no timestamps or absolute paths. A coverage file is named by its path relative to the working directory, or as given when it is outside it.
 
 ## The head's map
 
-`onus report --head-map-out <file>` also writes the head ref's map (schemas/codebase-map.schema.json), built with the same onus.yaml as the report. It is the map every row was computed against, so the two always agree. Ask it questions with `onus query --map <file>`, such as what depends on a contract a row names. Onus Cloud keeps this map for the newest head of each pull request it analyses (`onus help cloud`).
+`onus report --head-map-out <file>` also writes the head ref's map (schemas/codebase-map.schema.json), built with the same onus.yaml as the report. It is the map every row was computed against, so the two always agree, and it holds the traces and coverage the report was given. Ask it questions with `onus query --map <file>`, such as what depends on a contract a row names. Onus Cloud keeps this map for the newest head of each pull request it analyses (`onus help cloud`).

@@ -41,11 +41,12 @@ Inputs, all optional:
 - `auto-merge`: `true` (with `lanes`) to enable GitHub's auto-merge (squash) for the `auto-merge` lane. Required checks still apply. Needs `contents: write`.
 - `plugins`: a plugins file's contents (YAML), written outside the repository and passed with `--plugins`. For Svelte components: `plugins: [{ name: svelte, kind: language, command: [onus-plugin-svelte], files: ["**/*.svelte"] }]` (the plugin ships in every release archive).
 - `working-directory`: the repository, if not the workspace root.
+- `coverage`: coverage of the head commit (lcov, Cobertura XML or Istanbul JSON) written by an earlier step, as a glob. Passed only when the checkout is the head commit (see "Which changed lines tests ran" below).
 - `cache`: `true` (the default) keeps the base commit's map in the Actions cache, so later pushes to the same pull request skip mapping the base again. `false` maps it every time.
 - `feedback`: `true` (the default) ends the comment with a line asking for a 👍 or 👎 reaction and for `/onus caught` replies (see below).
 - `github-token`: the token for the download and the comment. Default: the workflow's token.
 
-Outputs: `report` (path of the JSON report), `markdown` (path of the Markdown report), `meaning-changes` and `needs-attention` (counts from the report's summary), and `metrics` (one line of JSON: changed files and lines, rows, findings and the time the report took). With `records: true` also `lane`, `provenance`, `rollout-strategy` (`none`, `canary` or `flag`) and `rollout-plan` (the path of `rollout.json`), and with `rollout-percent`, `rollout-decision` (see "Rollouts" below).
+Outputs: `report` (path of the JSON report), `markdown` (path of the Markdown report), `meaning-changes` and `needs-attention` (counts from the report's summary), and `metrics` (one line of JSON: changed files and lines, rows, findings, the time the report took and, with coverage, `coverage: {changed, ran}`). With `records: true` also `lane`, `provenance`, `rollout-strategy` (`none`, `canary` or `flag`) and `rollout-plan` (the path of `rollout.json`), and with `rollout-percent`, `rollout-decision` (see "Rollouts" below).
 
 Notes:
 
@@ -173,6 +174,22 @@ Each outcome is kept against an agent setup. Onus reads it from what git and Git
 - Pull requests from forks get a read-only token on `pull_request` events, so they are classified but not recorded.
 - Concurrent runs merge their records by taking every line from both sides, each as many times as the side that holds it most, and retry the push when another run pushed first. So a line one run wrote twice is kept twice, and a line two runs each wrote once is kept once.
 - The `onus ci` commands the action runs work in any CI system: `onus ci pr`, `onus ci closed`, `onus ci comment`, `onus ci push`, `onus ci rollout`, `onus ci rollback` and `onus ci records pull|push` (see `onus help commands` and `onus ci --help`).
+
+## Which changed lines tests ran
+
+With coverage of the head commit, the report says how many changed lines tests ran and lists those no test ran (`onus help reports`). The tests must run at the pull request's head commit, not the merge commit `pull_request` checks out, so check it out for them:
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - run: npm ci && npx vitest run --coverage --coverage.reporter=lcov
+      - uses: onushq/onus/action@v0.10.0
+        with:
+          coverage: coverage/lcov.info
+
+When the checkout is another commit, the action leaves the coverage out with a warning. Coverage that environments recorded comes in through `evidence` (with records): the action passes those runs to `onus report --evidence` too, and only runs at the head commit count (`onus help environments`). With `lanes.inputs.coverage`, too few changed lines run sends the change to the judge, and recorded coverage counts only from the commands it names in `commands`: recorded coverage from any other run sends the change to the judge too, so name the run that records it (`onus help lanes`).
 
 ## Caching the base map
 

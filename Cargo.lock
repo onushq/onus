@@ -1599,6 +1599,7 @@ dependencies = [
  "onus-lang-lsp",
  "onus-lang-scip",
  "onus-lang-ts",
+ "regex",
  "schemars",
  "serde",
  "serde_json",

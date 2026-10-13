@@ -460,6 +460,7 @@ pub fn build_map(root: &Path, opts: &BuildOptions) -> Result<CodebaseMap, MapErr
         tests: tests_out,
         rules,
         diagnostics,
+        coverage: None,
     })
 }
 

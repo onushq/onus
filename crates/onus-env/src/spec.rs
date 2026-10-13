@@ -41,6 +41,8 @@ pub struct Spec {
     pub evidence: Vec<String>,
     #[serde(default)]
     pub traces: Vec<String>,
+    #[serde(default)]
+    pub coverage: Vec<String>,
     pub lockfiles: Vec<String>,
     pub egress_image: String,
 }
@@ -66,6 +68,7 @@ pub fn resolve(root: &Path, config: Option<&EnvironmentConfig>) -> Result<Spec> 
         seed: c.seed,
         evidence: c.evidence,
         traces: c.traces,
+        coverage: c.coverage,
         lockfiles: if c.lockfiles.is_empty() {
             LOCKFILES.iter().map(|s| s.to_string()).collect()
         } else {

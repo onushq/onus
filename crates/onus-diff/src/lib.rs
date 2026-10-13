@@ -9,6 +9,7 @@ mod apis;
 mod collapse;
 pub mod config_files;
 mod contracts;
+mod coverage;
 mod ctx;
 mod declared;
 mod generated;
@@ -135,6 +136,8 @@ pub fn diff(input: &DiffInput) -> SemanticReport {
             r.hints.needs_person = true;
         }
     }
+    // After the locations are sorted, so rows count each line once.
+    let coverage = coverage::attach(&ctx, &mut rows);
     // Unique ids.
     rows.sort_by(|a, b| a.id.cmp(&b.id));
     let mut seen: BTreeMap<String, u32> = BTreeMap::new();
@@ -191,6 +194,7 @@ pub fn diff(input: &DiffInput) -> SemanticReport {
             lines_removed: text.lines_removed(),
         },
         map_diagnostics,
+        coverage,
     }
 }
 
