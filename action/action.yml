@@ -50,7 +50,9 @@ inputs:
     required: false
     default: "true"
   fail-on:
-    description: Fail the job when this is found, comma separated (rule-violation, secrets).
+    description: >-
+      Fail the job when this is found, comma separated (rule-violation, secrets, behavior;
+      behavior needs the behavior input).
     required: false
     default: none
   comment:
@@ -119,6 +121,17 @@ inputs:
       step, as a glob. Check out the pull request's head commit for that step
       (actions/checkout with ref: github.event.pull_request.head.sha); coverage measured at
       another commit is left out.
+    required: false
+    default: ''
+  behavior:
+    description: >-
+      Run the behavior diff: the tests that reach the change run at the base and at the head in
+      containers (environment.behavior in the base commit's onus.yaml), and what changed becomes
+      rows. Needs Docker, which GitHub's Linux runners have.
+    required: false
+    default: 'false'
+  behavior-budget:
+    description: Seconds for the behavior diff, environments included. Default the config's, else 600.
     required: false
     default: ''
   rollout-percent:
@@ -330,6 +343,8 @@ runs:
         RECORDS_BRANCH: ${{ inputs.records-branch }}
         COVERAGE: ${{ inputs.coverage }}
         EVIDENCE: ${{ inputs.evidence }}
+        BEHAVIOR: ${{ inputs.behavior }}
+        BEHAVIOR_BUDGET: ${{ inputs.behavior-budget }}
         # Passed through the environment, never pasted into the script, so a
         # pull request body cannot inject commands.
         PR_BODY: ${{ github.event.pull_request.body }}
@@ -390,6 +405,15 @@ runs:
           shopt -s nullglob globstar
           for f in $EVIDENCE; do args+=(--evidence "$f"); done
           shopt -u nullglob globstar
+        fi
+        # The tests that reach the change, run at both commits; older releases skip it.
+        if [ "$BEHAVIOR" = true ]; then
+          if "$ONUS" report --help | grep -q -- --behavior; then
+            args+=(--behavior)
+            [ -n "$BEHAVIOR_BUDGET" ] && args+=(--behavior-budget "$BEHAVIOR_BUDGET")
+          else
+            echo "::warning::This onus has no --behavior; the behavior diff is skipped."
+          fi
         fi
         # Milliseconds; perl is on every GitHub runner, `date +%N` is not.
         ms() { perl -MTime::HiRes=time -e 'printf "%d\n", time * 1000'; }

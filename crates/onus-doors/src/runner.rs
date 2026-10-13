@@ -267,7 +267,7 @@ fn run_inner(
 
 /// Runs `c` to the end with `input` on its stdin, and collects its output;
 /// `None`, with the process killed, when `deadline` passes first.
-fn output_until(
+pub fn output_until(
     c: &mut Command,
     input: Option<Vec<u8>>,
     deadline: Option<Instant>,

@@ -65,6 +65,27 @@ A changed line is an added or edited head line the coverage counts as executable
 
 Without coverage the report is exactly as before.
 
+## Behavior
+
+With `onus report --behavior`, the tests that reach the change run at the base and at the head (`onus help environments`). A line under the intent line says what ran:
+
+    **Behavior:** 3 test files run at base and head (selected from the map) · 1 changed, 0 newly failing · 48s of 600s
+
+It says "no tests reach the changed code" when the maps link no test to it, `**partial:**` with the reason when the budget ran out or a run failed, and `skipped:` with the reason when nothing ran. A collapsed "Behavior runs" section lists each run with its cases, failures and manifest, the selected test files and why each was chosen, and the cases already failing at the base or found flaky.
+
+What the runs showed becomes rows, one per kind and component, with `level` `behavior` and confidence `traced` (observed at runtime):
+
+| Subkind | When | Kind | Effect |
+|---|---|---|---|
+| `behavior-newly-failing` | A case passes at the base and fails at the head, and again when run once more; or a new case fails at the head | Behavior change, tests fail | ●; **blocked** until a person approves the row (`/onus approve <row id>`) |
+| `behavior-changed` | The base version of an edited test passes at the base but fails against the head's code, and the head's version passes: the test was edited to match new behavior | Behavior change, tests updated | ●; rules of the game, so a person reviews it |
+| `behavior-newly-passing` | A case fails at the base and passes at the head | Behavior change, fix | none |
+| `behavior-output-changed` | A case fails at both, with a different message | Behavior change, output | none |
+
+Messages are compared without colours, durations, addresses or the environment's `/work/` path, and the row quotes the failure. A newly failing case that was not run again (the budget ran out) has confidence `inferred` and says so. A case that disappears at the head is left to "Tests weakened".
+
+Without `--behavior` the report is exactly as before.
+
 ## Structure only
 
 Files that moved without changes, and files whose only changes are formatting, comments or updated import paths, are listed here instead of as rows.
@@ -80,6 +101,7 @@ Code in the changed files that Onus could not resolve statically: dynamic import
 - `summary`: counts of rows, rows needing attention, secrets, new rule violations and intent mismatches.
 - `changes`: the ranked rows. Each has an `id`, `kind`, `subkind`, `level` (relationship, behavior or structure), `subject` (the map id it is about), `component`, `title`, `whyItMatters`, `hints` (labels, blastRadius, novelty, confidence, rulesOfTheGame, intentMismatch, needsPerson, dependentComponents, `dependents` when there are any, `tested` for rows that change code, `owners` when the component has owners, and `coverage` `{changed, ran}` when coverage was given and the row changes executable lines), `locations` (file, lines, side) and, for internal rows, `stats`.
 - `intentCheck`, `ruleViolations`, `structure`, `textStats` and `mapDiagnostics`.
+- `behavior`, only with `--behavior`: `status` (`complete`, `partial` or `skipped`), `reason`, the `command` template, `budgetSecs` and `elapsedSecs`, `selected` (each test file with `changed`, `depth`, `via`, and whether it exists at the `base` and `head`), `truncated`, `runs` (`side` `base`, `head`, `retry` or `cross`, `commit`, `files`, the evidence `manifest`, `exitCode`, `timedOut`, `cases`, `failed`, `skipped`), `flaky` and `alreadyFailing` (`file › case`).
 - `coverage`, only with coverage: `sources` (format, path, sha256, origin, the evidence `manifest` and its run's `command` when recorded, files matched and not), `changed`, `ran`, `notRun` (head-side locations), `notMeasured` (changed files) and `notes`.
 
 Output is deterministic: the same two trees always give byte-identical Markdown and JSON, with no timestamps or absolute paths. A coverage file is named by its path relative to the working directory, or as given when it is outside it.

@@ -42,6 +42,25 @@ pub struct Ctx<'a> {
     pub declared: BTreeMap<String, String>,
 }
 
+/// The labels that make a component sensitive: medium or high in
+/// onus.yaml, else the defaults.
+pub fn sensitive_labels(config: Option<&OnusConfig>) -> BTreeSet<String> {
+    let mut sensitive: BTreeSet<String> = DEFAULT_SENSITIVE_LABELS
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    if let Some(cfg) = config {
+        for (label, l) in &cfg.labels {
+            if l.sensitivity >= Sensitivity::Medium {
+                sensitive.insert(label.clone());
+            } else {
+                sensitive.remove(label);
+            }
+        }
+    }
+    sensitive
+}
+
 impl std::fmt::Debug for Ctx<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Ctx").finish_non_exhaustive()
@@ -64,19 +83,7 @@ impl<'a> Ctx<'a> {
         for c in &head.components {
             components.insert(c.id.clone(), c);
         }
-        let mut sensitive: BTreeSet<String> = DEFAULT_SENSITIVE_LABELS
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        if let Some(cfg) = config {
-            for (label, l) in &cfg.labels {
-                if l.sensitivity >= Sensitivity::Medium {
-                    sensitive.insert(label.clone());
-                } else {
-                    sensitive.remove(label);
-                }
-            }
-        }
+        let sensitive = sensitive_labels(config);
         let all: Vec<Component> = components.values().map(|c| (*c).clone()).collect();
         Ctx {
             base,

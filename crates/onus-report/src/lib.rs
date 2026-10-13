@@ -5,7 +5,10 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use onus_core::{ReportCoverage, SemanticChange, SemanticReport, Side, TestReach};
+use onus_core::{
+    BehaviorRun, BehaviorStatus, ReportCoverage, RunSide, SemanticChange, SemanticReport, Side,
+    TestReach,
+};
 
 /// Hidden marker so a bot can find and update its own comment.
 pub const COMMENT_MARKER: &str = "<!-- onus-report -->";
@@ -197,6 +200,146 @@ fn coverage_details(out: &mut String, cov: &ReportCoverage) {
     let _ = writeln!(out);
 }
 
+/// `**Behavior:** 3 test files run at base and head (selected from the
+/// map) · 1 changed, 0 newly failing · 48s of 600s`
+fn behavior_line(report: &SemanticReport, b: &BehaviorRun) -> String {
+    let time = format!(
+        "{}s of {}s",
+        thousands(b.elapsed_secs),
+        thousands(b.budget_secs)
+    );
+    if b.status == BehaviorStatus::Skipped {
+        return format!(
+            "**Behavior:** skipped: {}",
+            b.reason.as_deref().unwrap_or("nothing ran")
+        );
+    }
+    let count = |subkind: &str| {
+        report
+            .changes
+            .iter()
+            .filter(|c| c.subkind == subkind)
+            .count() as u32
+    };
+    let what = if b.selected.is_empty() {
+        "no tests reach the changed code".to_string()
+    } else {
+        let mut found = format!(
+            "{} changed, {} newly failing",
+            count("behavior-changed"),
+            count("behavior-newly-failing")
+        );
+        for (subkind, word) in [
+            ("behavior-newly-passing", "newly passing"),
+            ("behavior-output-changed", "failing differently"),
+        ] {
+            let n = count(subkind);
+            if n > 0 {
+                let _ = write!(found, ", {n} {word}");
+            }
+        }
+        format!(
+            "{} run at base and head (selected from the map) · {found}",
+            plural(b.selected.len() as u32, "test file", "test files")
+        )
+    };
+    let partial = match (b.status, &b.reason) {
+        (BehaviorStatus::Partial, Some(r)) => format!(" · **partial:** {r}"),
+        (BehaviorStatus::Partial, None) => " · **partial**".into(),
+        _ => String::new(),
+    };
+    format!("**Behavior:** {what}{partial} · {time}")
+}
+
+fn short(sha: &str) -> &str {
+    &sha[..sha.len().min(12)]
+}
+
+/// What each behavior run did, and which tests were chosen.
+fn behavior_details(out: &mut String, b: &BehaviorRun) {
+    if b.runs.is_empty() && b.selected.is_empty() {
+        return;
+    }
+    let _ = writeln!(out, "<details><summary>Behavior runs</summary>");
+    let _ = writeln!(out);
+    for r in &b.runs {
+        let files = plural(r.files, "file", "files");
+        let side = match r.side {
+            RunSide::Base | RunSide::Head => format!("{} `{}`", r.side.as_str(), short(&r.commit)),
+            RunSide::Retry => format!("retry (head again, {files})"),
+            RunSide::Cross => format!("cross (base tests on head code, {files})"),
+        };
+        let result = if r.timed_out {
+            "timed out".to_string()
+        } else {
+            let mut text = format!(
+                "{}, {} failed",
+                plural(r.cases, "case", "cases"),
+                thousands(r.failed)
+            );
+            if r.skipped > 0 {
+                let _ = write!(text, ", {} skipped", thousands(r.skipped));
+            }
+            text
+        };
+        let manifest = r
+            .manifest
+            .as_deref()
+            .map(|m| format!(" (manifest `{}`)", short(m)))
+            .unwrap_or_default();
+        let _ = writeln!(out, "- {side}: {result}{manifest}");
+    }
+    if !b.selected.is_empty() {
+        let list: Vec<String> = b
+            .selected
+            .iter()
+            .map(|s| {
+                let mut why = Vec::new();
+                if s.changed {
+                    why.push("changed".to_string());
+                }
+                if let Some(via) = &s.via {
+                    why.push(match s.depth {
+                        0 => format!("exercises `{via}`"),
+                        d => format!("{} from `{via}`", plural(d, "hop", "hops")),
+                    });
+                }
+                match (s.base, s.head) {
+                    (false, true) => why.push("head only".into()),
+                    (true, false) => why.push("base only".into()),
+                    _ => {}
+                }
+                format!("`{}` ({})", s.file, why.join("; "))
+            })
+            .collect();
+        let more = if b.truncated > 0 {
+            format!(
+                ", and {} left out (maxFiles)",
+                plural(b.truncated, "test file", "test files")
+            )
+        } else {
+            String::new()
+        };
+        let _ = writeln!(out, "- selected: {}{more}", list.join(", "));
+    }
+    let listed = |items: &[String]| {
+        if items.is_empty() {
+            "none".to_string()
+        } else {
+            items.join(", ")
+        }
+    };
+    let _ = writeln!(
+        out,
+        "- already failing at base: {} · flaky: {}",
+        listed(&b.already_failing),
+        listed(&b.flaky)
+    );
+    let _ = writeln!(out);
+    let _ = writeln!(out, "</details>");
+    let _ = writeln!(out);
+}
+
 fn kind_cell(c: &SemanticChange) -> String {
     if c.hints.intent_mismatch {
         format!("Outside stated intent · {}", c.kind_label)
@@ -266,6 +409,9 @@ pub fn to_markdown(report: &SemanticReport, rules_declared: bool) -> String {
             .map(coverage_line)
             .unwrap_or_default()
     );
+    if let Some(b) = &report.behavior {
+        let _ = writeln!(out, "{}", behavior_line(report, b));
+    }
     if let Some(i) = &report.intent_check
         && !i.mismatches.is_empty()
     {
@@ -365,6 +511,9 @@ pub fn to_markdown(report: &SemanticReport, rules_declared: bool) -> String {
         let _ = writeln!(out);
         let _ = writeln!(out, "</details>");
         let _ = writeln!(out);
+    }
+    if let Some(b) = &report.behavior {
+        behavior_details(&mut out, b);
     }
 
     let s = &report.structure;
@@ -510,5 +659,87 @@ mod tests {
         assert!(md.contains(
             "<details><summary>Changed lines no test ran: 1 file not in the coverage</summary>"
         ));
+    }
+
+    fn behavior(status: &str, reason: Option<&str>, selected: bool) -> BehaviorRun {
+        serde_json::from_value(json!({
+            "status": status, "reason": reason,
+            "command": "npx vitest run {files}", "budgetSecs": 600, "elapsedSecs": 48,
+            "selected": if selected { json!([
+                { "file": "src/discount.test.mjs", "changed": true, "depth": 0, "base": true, "head": true },
+                { "file": "src/cart.test.mjs", "changed": false, "depth": 0,
+                  "via": "src/discount.mjs", "base": true, "head": true },
+                { "file": "src/new.test.mjs", "changed": true, "depth": 0, "base": false, "head": true },
+            ]) } else { json!([]) },
+            "truncated": 0,
+            "runs": if selected { json!([
+                { "side": "base", "commit": "1a2b3c4d5e6f7a8b", "files": 2, "manifest": "9f8e7d6c5b4a3210",
+                  "exitCode": 0, "timedOut": false, "cases": 6, "failed": 0, "skipped": 0 },
+                { "side": "head", "commit": "abcdef0123456789", "files": 3, "manifest": "0011223344556677",
+                  "exitCode": 0, "timedOut": false, "cases": 6, "failed": 0, "skipped": 0 },
+                { "side": "cross", "commit": "abcdef0123456789", "files": 1, "manifest": "8899aabbccddeeff",
+                  "exitCode": 1, "timedOut": false, "cases": 2, "failed": 1, "skipped": 0 },
+            ]) } else { json!([]) },
+            "flaky": [], "alreadyFailing": [],
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn behavior_line_and_details() {
+        let mut r = report();
+        let before = to_markdown(&r, true);
+        r.changes[0].subkind = "behavior-changed".into();
+        r.behavior = Some(behavior("complete", None, true));
+        let md = to_markdown(&r, true);
+        assert!(md.contains(
+            "**Boundary rules:** no new violations\n**Behavior:** 3 test files run at base and head (selected from the map) · 1 changed, 0 newly failing · 48s of 600s\n"
+        ), "{md}");
+        assert!(md.contains(
+            "<details><summary>Behavior runs</summary>\n\n\
+             - base `1a2b3c4d5e6f`: 6 cases, 0 failed (manifest `9f8e7d6c5b4a`)\n\
+             - head `abcdef012345`: 6 cases, 0 failed (manifest `001122334455`)\n\
+             - cross (base tests on head code, 1 file): 2 cases, 1 failed (manifest `8899aabbccdd`)\n\
+             - selected: `src/discount.test.mjs` (changed), `src/cart.test.mjs` (exercises `src/discount.mjs`), `src/new.test.mjs` (changed; head only)\n\
+             - already failing at base: none · flaky: none\n\n</details>\n"
+        ), "{md}");
+        // After the evidence per row.
+        assert!(md.find("Behavior runs").unwrap() > md.find("Evidence per row").unwrap());
+        // The headline stays as it was.
+        assert_eq!(md.lines().nth(1), before.lines().nth(1));
+
+        // Partial, with its reason.
+        r.behavior = Some(behavior(
+            "partial",
+            Some("the budget of 600s ran out before the cross run"),
+            true,
+        ));
+        let md = to_markdown(&r, true);
+        assert!(md.contains(
+            "· 1 changed, 0 newly failing · **partial:** the budget of 600s ran out before the cross run · 48s of 600s\n"
+        ), "{md}");
+
+        // Nothing reaches the change.
+        r.behavior = Some(behavior("complete", None, false));
+        let md = to_markdown(&r, true);
+        assert!(md.contains("**Behavior:** no tests reach the changed code · 48s of 600s\n"));
+        assert!(!md.contains("Behavior runs"));
+
+        // Skipped.
+        r.behavior = Some(behavior(
+            "skipped",
+            Some("no container engine (docker or podman) is running"),
+            false,
+        ));
+        let md = to_markdown(&r, true);
+        assert!(md.contains(
+            "**Behavior:** skipped: no container engine (docker or podman) is running\n"
+        ));
+
+        // Without the block, the report is as before.
+        r.behavior = None;
+        r.changes[0].subkind = "internal-changes".into();
+        assert_eq!(to_markdown(&r, true), before);
+        assert!(!before.contains("Behavior"));
     }
 }

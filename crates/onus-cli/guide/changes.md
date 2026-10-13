@@ -9,7 +9,7 @@ Every row has a **kind** (one of seven), a **subkind** (the specific change) and
 | dependency | Third-party code changed: a new, upgraded or removed npm package, a lockfile, or a patched package (which needs a person). |
 | config | Configuration changed. CI, policies, onus.yaml and CODEOWNERS are also rules of the game. Migrations, root build config and infrastructure need a person. |
 | additive | Something new that existing callers do not notice: an optional field, a new export, a new event consumer, a new read; also a contract change whose users were all updated in the same change. |
-| test | Tests were weakened (rules of the game), or removed together with the code they tested. |
+| test | Tests were weakened (rules of the game), removed together with the code they tested, or edited to match behavior that changed (`--behavior`). |
 | internal | Everything else, collapsed into one row per component, plus renames, generated code and notable edits outside sensitive components. |
 
 "Sensitive component" means a component with a label of medium or high sensitivity in onus.yaml; `payments`, `auth` and `pii` are high unless onus.yaml says otherwise.
@@ -145,6 +145,15 @@ Rows for a changed config file name what changed: the top-level keys of JSON and
 | tests-removed-with-code | test | Removed test cases or assertions that used code this change deletes. They covered nothing that still exists, so they do not weaken the tests and do not need a person. |
 
 A removed case that reappears among the change's new cases (the same body, or the same title in a file of the same name, as when tests move with their code) is neither. New test cases are not a row; the component's internal row counts them.
+
+With `onus report --behavior`, the tests that reach the change also run at the base and at the head (`onus help environments`). What they showed is one row per component, at confidence `traced`:
+
+| Subkind | Kind | When |
+|---|---|---|
+| behavior-newly-failing | internal | A case passes at the base and fails at the head, and again when run once more; or a new case fails at the head. Needs a person, and blocks the change until one approves the row. |
+| behavior-changed | test | The base version of a test the change edited fails against the head's code, while the head's version passes: the behavior it pinned changed, and the test was edited to match. Snapshot mismatches land here. Rules of the game. |
+| behavior-newly-passing | internal | A case fails at the base and passes at the head. |
+| behavior-output-changed | internal | A case fails at both, with a different message. |
 
 ## Notable edits inside functions
 

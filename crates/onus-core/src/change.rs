@@ -3,6 +3,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::behavior::BehaviorRun;
 use crate::map::{Confidence, CoverageSource, MapDiagnostic};
 
 /// The manifesto's change kinds.
@@ -193,6 +194,10 @@ pub struct SemanticReport {
     /// Which changed lines tests ran, when coverage of the head was given.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coverage: Option<ReportCoverage>,
+    /// What the behavior diff ran (`onus report --behavior`, ADR 0019);
+    /// absent without the flag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub behavior: Option<BehaviorRun>,
 }
 
 /// The changed lines tests ran, from coverage of the head (ADR 0017).

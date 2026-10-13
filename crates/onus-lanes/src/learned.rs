@@ -980,6 +980,7 @@ mod tests {
             text_stats: Default::default(),
             map_diagnostics: vec![],
             coverage: None,
+            behavior: None,
         }
     }
 

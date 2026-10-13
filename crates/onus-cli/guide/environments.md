@@ -90,3 +90,34 @@ A run in an environment keeps the files that match `environment.coverage` as `co
 An intact manifest proves what a run recorded, not who picked the command. An agent picks its own commands (`onus_env_run`), and one of them could write a coverage file. So the coverage lane policy counts recorded coverage only from the commands it names in `lanes.inputs.coverage.commands`, such as `npm test -- --coverage`, and sends a change with recorded coverage from any other command to the judge (`onus help lanes`). The command still runs the change's own code, so coverage is evidence that tests ran the lines, not proof.
 
 For agents, `tests.coverage` in onus.yaml lists coverage files of the worktree (`onus help configuration`). The map server reads them on each rebuild and leaves out any source file edited after the coverage was written, with a note in `onus_status`.
+
+## Behavior diff
+
+`onus report --behavior` runs the tests that reach a change at the base and at the head, and reports which cases now behave differently (ADR 0019). It is off unless asked for, and needs a container engine. Declare the command in onus.yaml:
+
+    environment:
+      image: node:22-alpine
+      setup: npm ci
+      behavior:
+        command: "mkdir -p reports && npx vitest run --reporter=junit --outputFile=reports/onus-behavior.xml {files}"
+        junit: ["reports/onus-behavior*.xml"]   # the default
+        budget: 600     # seconds for everything, environments included (default 600)
+        maxFiles: 40    # most test files run (default 40)
+        depth: 1        # code-dependency hops from changed code to tests, 0 to 2 (default 1)
+
+`{files}` is replaced with the selected test files, shell-quoted and relative to the repository root. The command must write JUnit XML to a file `junit` matches. Like the rest of the report's config, it comes from the base commit (or `--config`), so a pull request cannot change the command that checks it.
+
+    onus report --base main --head HEAD --behavior
+    onus report --base main --head HEAD --behavior --behavior-budget 300 --fail-on behavior
+
+1. **Selection.** From the maps: changed test files first, then the tests that exercise a changed file, then those that exercise code depending on it, up to `depth` hops. Both maps are asked, so code deleted at the head still selects its base tests. At most `maxFiles` run; the rest are counted as `truncated`. When nothing is selected, the report says "no tests reach the changed code", which is a fact worth knowing too.
+2. **Base and head.** One environment per commit, made in parallel, each running the selected files that exist on its side.
+3. **Retry.** Files with cases that fail at the head, and passed or did not exist at the base, run once more at the head. A case that passes then is flaky: no row, and it is listed in `behavior.flaky`.
+4. **Cross.** The base versions of selected test files the change edited (and their changed `__snapshots__` files) are written over the head's tree and run against the head's code. Its manifest records this as `overlay: {fromCommit, paths}`, and the judge never accepts such a run as evidence of the head.
+5. Both environments are destroyed, also after an error or a timeout.
+
+Each case is compared, and becomes one of four rows, grouped per component (`onus help reports`): `behavior-newly-failing`, `behavior-changed`, `behavior-newly-passing` and `behavior-output-changed`. A case whose name and file are unknown to the maps counts under `root`. Cases failing at both sides with the same message are listed in `behavior.alreadyFailing`.
+
+Every run is an ordinary evidence manifest, so `onus evidence show <id>` shows its log and JUnit. Each step gets what is left of the budget; one that would start after it is skipped, a run still going when it ends is stopped, and the status becomes `partial` with the reason. A newly failing case whose retry did not run still gives a row, at confidence `inferred`. Creating an environment is not stopped part way, so a slow setup can take the time past the budget. A problem never fails the report: without `environment.behavior`, `{files}` in the command, a container engine or an image, the status is `skipped` with the reason, and one `onus: behavior: …` line goes to stderr.
+
+Limits: only runners that write JUnit and take test files as arguments; the cross run uses the head's versions of helpers and fixtures; a case renamed at the head pairs only by name, so its base and head runs are not compared (its cross run still counts); flakiness is ruled out with one re-run; and traces from these runs are not added to the map.

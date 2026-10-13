@@ -1,5 +1,6 @@
 //! The pieces behind the `onus` command, shared by the binary and its tests.
 
+pub mod behavior;
 pub mod cloud;
 pub mod daemon;
 pub mod door;
@@ -32,6 +33,8 @@ pub enum FailOn {
     RuleViolation,
     /// Committed secrets.
     Secrets,
+    /// Tests that passed at the base fail at the head (needs --behavior).
+    Behavior,
     /// Never fail (the default).
     None,
 }
@@ -309,7 +312,9 @@ pub fn checklist(report: &SemanticReport) -> Vec<String> {
                 "{}: remove it and load it from a secret store.",
                 c.title
             )),
-            "rule-violation" => items.push(format!("{}: {}", c.title, c.why_it_matters)),
+            "rule-violation" | "behavior-newly-failing" => {
+                items.push(format!("{}: {}", c.title, c.why_it_matters))
+            }
             s if s.starts_with("contract-") && c.kind == onus_core::ChangeKind::Breaking => {
                 if let Some((_, users)) = c.why_it_matters.split_once("not changed yet: ") {
                     items.push(format!(
@@ -709,6 +714,10 @@ pub fn should_fail(report: &SemanticReport, fail_on: &[FailOn]) -> bool {
     fail_on.iter().any(|f| match f {
         FailOn::RuleViolation => report.summary.new_rule_violations > 0,
         FailOn::Secrets => report.summary.secrets > 0,
+        FailOn::Behavior => report
+            .changes
+            .iter()
+            .any(|c| c.subkind == "behavior-newly-failing"),
         FailOn::None => false,
     })
 }

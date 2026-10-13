@@ -877,6 +877,93 @@ impl MapIndex {
         })
     }
 
+    /// Test files that reach the changed files: changed test files first,
+    /// then tests that exercise a changed file's module or symbols, or
+    /// something that depends on them up to `depth` code-dependency hops
+    /// (clamped to 2; the edges [`MapIndex::dependents`] follows). Sorted by
+    /// (changed first, depth, file). The behavior diff runs these (ADR 0019).
+    pub fn tests_reaching(&self, changed: &[String], depth: u32) -> Vec<Reach> {
+        let depth = depth.min(2);
+        let test_files: BTreeSet<&str> = self.map.tests.iter().map(|t| t.file.as_str()).collect();
+        let mut best: BTreeMap<String, Reach> = BTreeMap::new();
+        // The closest reach of each file; a changed test keeps the changed
+        // file it also exercises, for the report.
+        let mut offer = |mut r: Reach| match best.get_mut(&r.file) {
+            Some(b) if (!b.changed, b.depth, &b.via) <= (!r.changed, r.depth, &r.via) => {
+                if b.via.is_none() {
+                    b.via = r.via;
+                }
+            }
+            Some(b) => {
+                r.via = r.via.or(b.via.take());
+                *b = r;
+            }
+            None => {
+                best.insert(r.file.clone(), r);
+            }
+        };
+        let mut paths: Vec<&String> = changed.iter().collect();
+        paths.sort();
+        paths.dedup();
+        for path in paths {
+            if test_files.contains(path.as_str()) {
+                offer(Reach {
+                    file: path.clone(),
+                    changed: true,
+                    depth: 0,
+                    via: None,
+                });
+                continue;
+            }
+            // The file's symbols and module, as a walk from the file starts.
+            let mut ids: BTreeSet<String> = self
+                .file_symbols
+                .get(path.as_str())
+                .into_iter()
+                .flatten()
+                .map(|&si| self.map.symbols[si].id.clone())
+                .collect();
+            ids.extend(self.file_module.get(path.as_str()).cloned());
+            let mut reached: BTreeMap<String, u32> = ids.iter().map(|id| (id.clone(), 0)).collect();
+            let mut queue: VecDeque<(u32, u32)> = ids
+                .iter()
+                .filter_map(|id| self.node.get(id).map(|&n| (n, 0)))
+                .collect();
+            let mut seen: BTreeSet<u32> = queue.iter().map(|&(n, _)| n).collect();
+            while let Some((n, d)) = queue.pop_front() {
+                if d >= depth {
+                    continue;
+                }
+                for &ei in &self.inc[n as usize] {
+                    let e = &self.map.edges[ei as usize];
+                    if !e.kind.is_code_dependency() || ids::is_global(&e.from) {
+                        continue;
+                    }
+                    let Some(&m) = self.node.get(&e.from) else {
+                        continue;
+                    };
+                    if seen.insert(m) {
+                        reached.entry(e.from.clone()).or_insert(d + 1);
+                        queue.push_back((m, d + 1));
+                    }
+                }
+            }
+            for (id, d) in &reached {
+                for &(ti, _) in self.tested_by.get(id).into_iter().flatten() {
+                    offer(Reach {
+                        file: self.map.tests[ti].file.clone(),
+                        changed: false,
+                        depth: *d,
+                        via: Some(path.clone()),
+                    });
+                }
+            }
+        }
+        let mut all: Vec<Reach> = best.into_values().collect();
+        all.sort_by(|a, b| (!a.changed, a.depth, &a.file).cmp(&(!b.changed, b.depth, &b.file)));
+        all
+    }
+
     /// The executable lines of the targets' code and how many ran, from
     /// coverage: a symbol's own lines, or a module's whole file, each file
     /// line counted once. None without coverage, when no target is code in
@@ -1486,6 +1573,21 @@ pub struct Tests {
     pub coverage: Option<TargetCoverage>,
     /// Strongest link first.
     pub tests: Vec<TestRef>,
+}
+
+/// A test file that reaches changed code (`tests_reaching`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Reach {
+    /// The test file.
+    pub file: String,
+    /// The test file itself changed.
+    pub changed: bool,
+    /// Code-dependency hops from a changed file (0: it exercises one).
+    pub depth: u32,
+    /// The changed file it reaches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]

@@ -12,8 +12,9 @@
 //! 4. Raise it with the hard floors, which no policy can lower: sensitive
 //!    code, rules of the game and third-party code new to the repository go
 //!    to a person; a new dependency never auto-merges; committed secrets,
-//!    writes outside the token's scope and weakened tests without an
-//!    approval are blocked.
+//!    writes outside the token's scope, and weakened tests or tests that
+//!    pass at the base and fail at the head (`onus report --behavior`, ADR
+//!    0019) without an approval are blocked.
 //! 5. Raise it with the learned model, when `lanes.learned` is set: at or
 //!    above its thresholds a change goes to the judge or a person. It never
 //!    lowers a lane and never blocks (ADR 0015).
@@ -605,6 +606,24 @@ pub fn classify(
             );
         }
     }
+    for row in rows
+        .iter()
+        .filter(|r| r.subkind == "behavior-newly-failing")
+    {
+        if !submission.is_some_and(|s| s.approved(&row.id)) {
+            raise(
+                Lane::Blocked,
+                "floor",
+                format!(
+                    "“{}”: tests that pass at the base fail at the head",
+                    row.title
+                ),
+                vec![row.id.clone()],
+                &mut applied,
+                &mut lane,
+            );
+        }
+    }
     if let Some(row) = rows.iter().find(|r| !r.hints.labels.is_empty()) {
         raise(
             Lane::Human,
@@ -908,6 +927,7 @@ mod tests {
             text_stats: TextStats::default(),
             map_diagnostics: vec![],
             coverage: None,
+            behavior: None,
         }
     }
 
@@ -996,6 +1016,60 @@ mod tests {
         assert_eq!(lane_of(&secret, &p), Lane::Blocked);
         let weakened = report(vec![row(ChangeKind::Test, "test-weakened", &[])]);
         assert_eq!(lane_of(&weakened, &p), Lane::Blocked);
+    }
+
+    #[test]
+    fn newly_failing_tests_block_unless_approved() {
+        use crate::submission::{AgentSetup, Approval};
+        let p = policy();
+        let failing = report(vec![row(
+            ChangeKind::Internal,
+            "behavior-newly-failing",
+            &[],
+        )]);
+        let c = classify(&failing, None, &p, &with(VETERAN));
+        assert_eq!(c.lane, Lane::Blocked);
+        let floor = inputs(&c, "floor");
+        assert_eq!(floor[0].rows, ["behavior-newly-failing:x"]);
+        assert!(
+            floor[0]
+                .reason
+                .contains("tests that pass at the base fail at the head"),
+            "{}",
+            floor[0].reason
+        );
+        // A person's approval of the row lifts the block: the lane falls back
+        // to the policy's (internal rows in `docs` auto-merge).
+        let sub = Submission {
+            schema: 1,
+            base: "b".into(),
+            head: "h".into(),
+            intent: None,
+            report: failing.clone(),
+            changed_files: vec![],
+            evidence: vec![],
+            scope: None,
+            escalations: vec![],
+            approvals: vec![Approval {
+                row: "behavior-newly-failing:x".into(),
+                by: "@lead".into(),
+            }],
+            agent: AgentSetup::default(),
+        };
+        let c = classify(&failing, Some(&sub), &p, &with(VETERAN));
+        assert_eq!(c.lane, Lane::AutoMerge);
+        assert!(inputs(&c, "floor").is_empty());
+        // Behavior pinned by an edited test goes to a person, through the
+        // rules of the game.
+        let mut changed = row(ChangeKind::Test, "behavior-changed", &[]);
+        changed.hints.rules_of_the_game = true;
+        let c = classify(&report(vec![changed]), None, &p, &with(VETERAN));
+        assert_eq!(c.lane, Lane::Human);
+        assert!(
+            inputs(&c, "floor")[0]
+                .reason
+                .contains("changes the rules of the game")
+        );
     }
 
     #[test]

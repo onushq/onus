@@ -6,6 +6,7 @@
 //! templates; nothing is generated.
 
 mod apis;
+pub mod behavior;
 mod collapse;
 pub mod config_files;
 mod contracts;
@@ -159,16 +160,7 @@ pub fn diff(input: &DiffInput) -> SemanticReport {
         .filter(|r| r.subkind == "rule-violation")
         .cloned()
         .collect();
-    let summary = ReportSummary {
-        meaning_changes: rows.len() as u32,
-        needs_attention: rows.iter().filter(|r| r.hints.needs_person).count() as u32,
-        secrets: rows
-            .iter()
-            .filter(|r| r.subkind == "secret-committed")
-            .count() as u32,
-        new_rule_violations: rule_violations.len() as u32,
-        intent_mismatches: rows.iter().filter(|r| r.hints.intent_mismatch).count() as u32,
-    };
+    let summary = summarize(&rows);
     let mut map_diagnostics: Vec<_> = input
         .head_map
         .diagnostics
@@ -195,6 +187,24 @@ pub fn diff(input: &DiffInput) -> SemanticReport {
         },
         map_diagnostics,
         coverage,
+        behavior: None,
+    }
+}
+
+/// The report's counts, from its rows.
+pub(crate) fn summarize(rows: &[SemanticChange]) -> ReportSummary {
+    ReportSummary {
+        meaning_changes: rows.len() as u32,
+        needs_attention: rows.iter().filter(|r| r.hints.needs_person).count() as u32,
+        secrets: rows
+            .iter()
+            .filter(|r| r.subkind == "secret-committed")
+            .count() as u32,
+        new_rule_violations: rows
+            .iter()
+            .filter(|r| r.subkind == "rule-violation")
+            .count() as u32,
+        intent_mismatches: rows.iter().filter(|r| r.hints.intent_mismatch).count() as u32,
     }
 }
 

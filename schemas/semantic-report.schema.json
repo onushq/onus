@@ -6,6 +6,17 @@
     "base": {
       "type": "string"
     },
+    "behavior": {
+      "description": "What the behavior diff ran (`onus report --behavior`, ADR 0019);\nabsent without the flag.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/BehaviorRun"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "changes": {
       "description": "Ranked, most important first.",
       "type": "array",
@@ -78,6 +89,160 @@
     "mapDiagnostics"
   ],
   "$defs": {
+    "BehaviorRun": {
+      "description": "What `onus report --behavior` ran and how far it got.",
+      "type": "object",
+      "properties": {
+        "alreadyFailing": {
+          "description": "Cases that fail at the base and at the head with the same message.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "budgetSecs": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "command": {
+          "description": "The command template, as configured (`environment.behavior.command`).",
+          "type": "string"
+        },
+        "elapsedSecs": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "flaky": {
+          "description": "Cases that failed at the head and passed when run again: `file › case`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "reason": {
+          "description": "Why it is partial or skipped.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BehaviorSideRun"
+          }
+        },
+        "selected": {
+          "description": "The test files that reach the change, changed tests first.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SelectedTest"
+          }
+        },
+        "status": {
+          "$ref": "#/$defs/BehaviorStatus"
+        },
+        "truncated": {
+          "description": "Test files that reach the change but were left out by `maxFiles`.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "status",
+        "command",
+        "budgetSecs",
+        "elapsedSecs",
+        "selected",
+        "truncated",
+        "runs",
+        "flaky",
+        "alreadyFailing"
+      ]
+    },
+    "BehaviorSideRun": {
+      "description": "One run of the behavior command.",
+      "type": "object",
+      "properties": {
+        "cases": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "commit": {
+          "description": "The commit whose code ran.",
+          "type": "string"
+        },
+        "exitCode": {
+          "description": "None when it timed out.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        },
+        "failed": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "files": {
+          "description": "Test files given to the command.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "manifest": {
+          "description": "The run's id in the evidence store (`onus evidence show <id>`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "side": {
+          "$ref": "#/$defs/RunSide"
+        },
+        "skipped": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "timedOut": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "side",
+        "commit",
+        "files",
+        "timedOut",
+        "cases",
+        "failed",
+        "skipped"
+      ]
+    },
+    "BehaviorStatus": {
+      "oneOf": [
+        {
+          "description": "Every run it needed ran.",
+          "type": "string",
+          "const": "complete"
+        },
+        {
+          "description": "Some runs ran; `reason` says which did not.",
+          "type": "string",
+          "const": "partial"
+        },
+        {
+          "description": "Nothing was compared; `reason` says why.",
+          "type": "string",
+          "const": "skipped"
+        }
+      ]
+    },
     "ChangeKind": {
       "description": "The manifesto's change kinds.",
       "type": "string",
@@ -531,6 +696,72 @@
         "secrets",
         "newRuleViolations",
         "intentMismatches"
+      ]
+    },
+    "RunSide": {
+      "description": "Which run.",
+      "oneOf": [
+        {
+          "description": "The base's tests on the base's code.",
+          "type": "string",
+          "const": "base"
+        },
+        {
+          "description": "The head's tests on the head's code.",
+          "type": "string",
+          "const": "head"
+        },
+        {
+          "description": "The head's files with failing cases, run once more at the head.",
+          "type": "string",
+          "const": "retry"
+        },
+        {
+          "description": "The base versions of edited tests on the head's code.",
+          "type": "string",
+          "const": "cross"
+        }
+      ]
+    },
+    "SelectedTest": {
+      "description": "A test file chosen from the maps.",
+      "type": "object",
+      "properties": {
+        "base": {
+          "description": "It exists at the base, and so ran there.",
+          "type": "boolean"
+        },
+        "changed": {
+          "description": "The test file itself changed.",
+          "type": "boolean"
+        },
+        "depth": {
+          "description": "Code-dependency hops from a changed file (0: it exercises one).",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "file": {
+          "type": "string"
+        },
+        "head": {
+          "description": "It exists at the head.",
+          "type": "boolean"
+        },
+        "via": {
+          "description": "The changed file it reaches.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "file",
+        "changed",
+        "depth",
+        "base",
+        "head"
       ]
     },
     "SemanticChange": {

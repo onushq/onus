@@ -76,6 +76,36 @@ pub struct EnvironmentConfig {
     /// Default `ubuntu/squid`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub egress_image: Option<String>,
+    /// The behavior diff (`onus report --behavior`, ADR 0019): the tests
+    /// that reach a change, run at the base and at the head.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub behavior: Option<BehaviorConfig>,
+}
+
+/// How `onus report --behavior` runs tests. Read from the base commit (or
+/// `--config`), so a change cannot alter the command that checks it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct BehaviorConfig {
+    /// Runs the selected test files and writes JUnit XML. `{files}` is
+    /// replaced with the selected test files, shell-quoted and relative to
+    /// the repository root.
+    pub command: String,
+    /// Globs of the JUnit files the command writes. Default:
+    /// `reports/onus-behavior*.xml`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub junit: Vec<String>,
+    /// Seconds for the whole behavior diff, environments included. Default
+    /// 600.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<u32>,
+    /// The most test files selected. Default 40.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_files: Option<u32>,
+    /// Code-dependency hops from changed code to the tests (0 to 2).
+    /// Default 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depth: Option<u32>,
 }
 
 /// What happens to a change, from least to most scrutiny.

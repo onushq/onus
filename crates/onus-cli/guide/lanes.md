@@ -31,7 +31,7 @@ The answer is the lane and every rule that applied, in order. Each entry has a `
 2. Rules that raise the lane when any row matches.
 3. Risk inputs (`lanes.inputs`, below). They can only raise the lane.
 4. Hard floors:
-   - **Blocked:** a committed secret, a write outside the token's scope, or weakened tests without a person's approval.
+   - **Blocked:** a committed secret, a write outside the token's scope, weakened tests without a person's approval, or tests that pass at the base and fail at the head (`behavior-newly-failing`, from `onus report --behavior`) without a person's approval of that row.
    - **Human:** rows in sensitive code (`auth`, `payments`, `pii`, or any label of medium or high sensitivity), security-sensitive rows, rules of the game (tests, CI, policies, `onus.yaml`, and edits to the code of a declared contract), rows outside the stated intent, and third-party code new to the repository (an npm package no component used before).
    - **Judge:** a new dependency never auto-merges: a package new to a component, or a new dependency between components.
 5. The learned model (`lanes.learned`, below), read from the base commit: at or above its thresholds it raises a lower lane to `judge` or `human`. It never lowers a lane and never blocks.
@@ -136,11 +136,13 @@ It verifies first and judges taste last, and stops at the first failure:
 1. **Evidence:** each test run in the submission is run again at the head commit in a fresh container; a run that passed for the author must pass again. A run made in an environment (`onus env run`) names its manifest, and must match it: recorded at the head commit, with the same command and exit code (`onus help environments`). The first run that fails stops the step; the rest are not re-run.
 2. **Intent:** an intent must be stated, and no row may fall outside it.
 3. **Contracts:** no breaking contract changes and no boundary-rule violations.
-4. **Tests:** no weakened tests without a person's approval.
+4. **Tests:** no weakened tests without a person's approval. With a report made with `--behavior`, a test edited to match changed behavior (`behavior-changed`) is a rule of the game, so it reaches a person instead.
 5. **Held-out checks:** checks the author never saw, from a suite outside the repository, chosen from the map for this change (below). They run in order, most relevant first, up to the first failure. The author sees only counts and `a held-out check failed (exit N)`: never a check's id, command or output.
 6. **Taste (optional):** `taste.command` gets the submission as JSON on stdin and prints `concern: …` lines. Concerns send the change to a person; taste can never approve, and it runs only when everything else passed. Onus itself calls no model.
 
 Once a step fails, every later step is `skipped` with `not reached: <step> failed`, and no more containers start. So `reasons` holds one failing step's reasons: the first thing to fix. Run `onus_check` (or `onus query check`) before submitting for the whole checklist.
+
+The judge's evidence step and the behavior diff are separate. The first re-checks what the author claims to have run; the second is Onus's own observation of the tests that reach the change, at both commits (`onus help environments`). A run whose manifest records files written over the head's tree (the behavior diff's cross run) is never accepted as evidence.
 
 The verdict is `approve`, `reject` with reasons the agent can act on, or `escalate` to a person. A change in the `human` lane is escalated even when every check passes; a `blocked` change is rejected.
 

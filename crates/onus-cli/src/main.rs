@@ -44,6 +44,7 @@ const REPORT_HELP: &str = concat!(
   onus report --base \"$BASE_SHA\" --head \"$HEAD_SHA\" --cache-dir ~/.cache/onus
   onus report --base main --head HEAD --coverage coverage/lcov.info
   onus report --base main --head HEAD --evidence run.json
+  onus report --base main --head HEAD --behavior
 
 ",
     exit_codes!()
@@ -181,7 +182,9 @@ Examples:
         long_about = "Report the changes in meaning between two git refs. Each ref is extracted \
                       with `git archive` into a temporary directory that is removed afterwards; \
                       the repository itself is never modified. Only the paths git reports as \
-                      different are compared line by line.",
+                      different are compared line by line. With --behavior, the tests that reach \
+                      the change also run at both refs in environments, and what they show \
+                      becomes rows (onus help environments).",
         after_long_help = REPORT_HELP
     )]
     Report {
@@ -237,6 +240,15 @@ Examples:
         /// map the report was computed against.
         #[arg(long, value_name = "FILE")]
         head_map_out: Option<PathBuf>,
+        /// Run the tests that reach the change at the base and at the head, each in an
+        /// environment (environment.behavior in onus.yaml), and add what changed as rows.
+        /// Needs a container engine; a problem never fails the report.
+        #[arg(long)]
+        behavior: bool,
+        /// Seconds for the whole behavior diff, environments included (default:
+        /// environment.behavior.budget, else 600).
+        #[arg(long, value_name = "SECS", requires = "behavior")]
+        behavior_budget: Option<u32>,
         #[command(flatten)]
         providers: ProviderArgs,
     },
@@ -854,6 +866,8 @@ fn run(cli: Cli) -> Result<i32> {
             evidence,
             cache_dir,
             head_map_out,
+            behavior,
+            behavior_budget,
             providers,
         } => {
             let providers = providers.load()?;
@@ -885,7 +899,7 @@ fn run(cli: Cli) -> Result<i32> {
                 onus_cli::BaseCompleter(std::sync::Arc::new(move || pair.complete_base()))
             };
             let opts = DiffOptions {
-                config,
+                config: config.clone(),
                 intent: intent(intent_path.as_ref())?,
                 base_label: onus_cli::ref_label(&base, &b.sha),
                 head_label: onus_cli::ref_label(&head, &h.sha),
@@ -900,9 +914,31 @@ fn run(cli: Cli) -> Result<i32> {
                 traces,
                 coverage,
             };
-            let outcome = onus_cli::diff_dirs(b.dir.path(), h.dir.path(), &opts)?;
+            let mut outcome = onus_cli::diff_dirs(b.dir.path(), h.dir.path(), &opts)?;
             for note in &outcome.notes {
                 eprintln!("onus: {note}");
+            }
+            if behavior {
+                // The config the diff used: the base tree's, or --config.
+                let loaded = onus_cli::diff_config(b.dir.path(), config.as_deref())?;
+                let block = onus_cli::behavior::run(&onus_cli::behavior::Input {
+                    repo: &repo,
+                    base_sha: &b.sha,
+                    head_sha: &h.sha,
+                    pair: &pair,
+                    config: loaded.as_ref(),
+                    base_map: &outcome.base_map,
+                    head_map: &outcome.head_map,
+                    budget_override: behavior_budget,
+                });
+                onus_diff::behavior::apply(
+                    &mut outcome.report,
+                    block.rows,
+                    block.run,
+                    &outcome.head_map,
+                    loaded.as_ref().map(|l| &l.config),
+                );
+                eprintln!("onus: behavior: {}", block.note);
             }
             if let Some(path) = &head_map_out {
                 std::fs::write(path, serde_json::to_string(&outcome.head_map)?)

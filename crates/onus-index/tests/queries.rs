@@ -396,3 +396,70 @@ fn invariants_come_from_declared_contracts() {
     );
     assert!(idx.invariants("billing").unwrap().contracts.is_empty());
 }
+
+#[test]
+fn tests_reaching_follows_dependents_to_depth() {
+    // a.ts ← b.ts ← c.ts, a test on b and one on c, and a changed test file.
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    let files = [
+        ("a.ts", "export function a(n: number) { return n + 1 }\n"),
+        (
+            "b.ts",
+            "import { a } from './a'\nexport function b(n: number) { return a(n) * 2 }\n",
+        ),
+        (
+            "c.ts",
+            "import { b } from './b'\nexport function c(n: number) { return b(n) - 3 }\n",
+        ),
+        (
+            "b.test.ts",
+            "import { b } from './b'\ntest('b doubles', () => { expect(b(1)).toBe(4) })\n",
+        ),
+        (
+            "c.test.ts",
+            "import { c } from './c'\ntest('c subtracts', () => { expect(c(1)).toBe(1) })\n",
+        ),
+        (
+            "z.test.ts",
+            "import { c } from './c'\ntest('z', () => { expect(c(2)).toBe(3) })\n",
+        ),
+    ];
+    for (name, text) in files {
+        std::fs::write(src.join(name), text).unwrap();
+    }
+    let idx = MapIndex::new(build_map(dir.path(), &BuildOptions::default()).unwrap());
+    let changed = vec!["src/a.ts".to_string(), "src/z.test.ts".to_string()];
+    let files = |depth: u32| -> Vec<(String, bool, u32)> {
+        idx.tests_reaching(&changed, depth)
+            .into_iter()
+            .map(|r| (r.file, r.changed, r.depth))
+            .collect()
+    };
+    // Changed tests first; a changed test file is not walked from.
+    assert_eq!(files(0), [("src/z.test.ts".to_string(), true, 0)]);
+    assert_eq!(
+        files(1),
+        [
+            ("src/z.test.ts".to_string(), true, 0),
+            ("src/b.test.ts".to_string(), false, 1)
+        ]
+    );
+    let two = idx.tests_reaching(&changed, 2);
+    assert_eq!(
+        two.iter().map(|r| r.file.as_str()).collect::<Vec<_>>(),
+        ["src/z.test.ts", "src/b.test.ts", "src/c.test.ts"]
+    );
+    assert_eq!(two[2].depth, 2);
+    assert_eq!(two[2].via.as_deref(), Some("src/a.ts"));
+    // Deeper than 2 is clamped.
+    assert_eq!(idx.tests_reaching(&changed, 9), two);
+    // A file the change edits directly selects its own tests at depth 0.
+    let direct = idx.tests_reaching(&["src/b.ts".to_string()], 0);
+    assert_eq!(direct.len(), 1);
+    assert_eq!(
+        (direct[0].file.as_str(), direct[0].depth),
+        ("src/b.test.ts", 0)
+    );
+}

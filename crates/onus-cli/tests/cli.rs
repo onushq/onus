@@ -38,6 +38,42 @@ fn fail_on_secrets_exits_2() {
 }
 
 #[test]
+fn fail_on_behavior_needs_a_newly_failing_row() {
+    assert_eq!(diff_exit("s1-sms-alerts", "behavior"), 0);
+    let mut report = Scenario::new("s1-sms-alerts").run().report;
+    assert!(!onus_cli::should_fail(
+        &report,
+        &[onus_cli::FailOn::Behavior]
+    ));
+    let mut row = report.changes[0].clone();
+    row.subkind = "behavior-newly-failing".into();
+    row.id = "behavior-newly-failing:api".into();
+    report.changes.push(row);
+    assert!(onus_cli::should_fail(
+        &report,
+        &[onus_cli::FailOn::Behavior]
+    ));
+    assert!(!onus_cli::should_fail(
+        &report,
+        &[onus_cli::FailOn::Secrets]
+    ));
+    // The agent's checklist names it.
+    assert!(
+        onus_cli::checklist(&report)
+            .iter()
+            .any(|i| i.starts_with(&report.changes.last().unwrap().title))
+    );
+    let (code, help, _) = stdout(&["report", "--help"]);
+    assert_eq!(code, 0);
+    assert!(help.contains("--behavior"));
+    assert!(help.contains("--behavior-budget <SECS>"));
+    assert!(help.contains("onus report --base main --head HEAD --behavior"));
+    // `onus diff` has no commits to run tests at.
+    let (_, help, _) = stdout(&["diff", "--help"]);
+    assert!(!help.contains("--behavior "));
+}
+
+#[test]
 fn usage_errors_exit_1_and_version_exits_0() {
     let out = onus().args(["diff", "only-one-arg"]).output().unwrap();
     assert_eq!(out.status.code(), Some(1));
@@ -111,6 +147,8 @@ fn report_works_on_a_real_git_repository() {
     assert!(json["base"].as_str().unwrap().starts_with("main~1 ("));
     assert!(json["head"].as_str().unwrap().starts_with("main ("));
     assert_eq!(json["summary"]["meaningChanges"], 4);
+    // Without --behavior there is no behavior block.
+    assert!(json.get("behavior").is_none());
 
     let out = onus()
         .args([

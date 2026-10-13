@@ -585,6 +585,7 @@ mod tests {
             text_stats: TextStats::default(),
             map_diagnostics: vec![],
             coverage: None,
+            behavior: None,
         }
     }
 

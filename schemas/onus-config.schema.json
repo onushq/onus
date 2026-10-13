@@ -76,6 +76,54 @@
     "version"
   ],
   "$defs": {
+    "BehaviorConfig": {
+      "description": "How `onus report --behavior` runs tests. Read from the base commit (or\n`--config`), so a change cannot alter the command that checks it.",
+      "type": "object",
+      "properties": {
+        "budget": {
+          "description": "Seconds for the whole behavior diff, environments included. Default\n600.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "command": {
+          "description": "Runs the selected test files and writes JUnit XML. `{files}` is\nreplaced with the selected test files, shell-quoted and relative to\nthe repository root.",
+          "type": "string"
+        },
+        "depth": {
+          "description": "Code-dependency hops from changed code to the tests (0 to 2).\nDefault 1.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "junit": {
+          "description": "Globs of the JUnit files the command writes. Default:\n`reports/onus-behavior*.xml`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "maxFiles": {
+          "description": "The most test files selected. Default 40.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "command"
+      ]
+    },
     "CheckCommand": {
       "description": "A command run in a container against the change.",
       "type": "object",
@@ -212,6 +260,17 @@
       "description": "A disposable environment: a container built from the repository at a\ncommit. Read from the operator's working tree, never from the commit\nunder test, so a change cannot alter its own environment.",
       "type": "object",
       "properties": {
+        "behavior": {
+          "description": "The behavior diff (`onus report --behavior`, ADR 0019): the tests\nthat reach a change, run at the base and at the head.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BehaviorConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "coverage": {
           "description": "Globs of coverage files (lcov, Cobertura XML, Istanbul JSON) a run\nwrites, kept as evidence. `onus report --evidence` reads them when\nthe run was at the head commit.",
           "type": "array",

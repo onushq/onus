@@ -315,6 +315,7 @@ fn recorded_run(r: &Path, commit: &str, name: &str) -> (PathBuf, String) {
             },
         ],
         tests: None,
+        overlay: None,
     };
     let id = store.record(&manifest).unwrap();
     let run = onus_doors::runner::TestRun {

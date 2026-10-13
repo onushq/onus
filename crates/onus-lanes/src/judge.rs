@@ -210,6 +210,13 @@ fn manifest_problem(e: &TestRun, head: &str, store: Option<&Store>) -> Option<St
             e.command,
             &m.commit[..m.commit.len().min(12)]
         ))
+    } else if let Some(o) = &m.overlay {
+        // The behavior diff's cross run: base files over the head's tree.
+        Some(format!(
+            "`{}`: manifest {short} ran the head commit with files of {} written over it, not the head as committed",
+            e.command,
+            &o.from_commit[..o.from_commit.len().min(12)]
+        ))
     } else if m.command != e.command || m.exit_code != e.exit_code || m.commit != e.commit {
         Some(format!(
             "`{}`: the run does not match manifest {short} (it recorded `{}`, exit {})",
@@ -658,6 +665,7 @@ mod tests {
                 text_stats: TextStats::default(),
                 map_diagnostics: vec![],
                 coverage: None,
+                behavior: None,
             },
             changed_files: vec![],
             evidence: vec![run_ok(true)],
@@ -1277,6 +1285,7 @@ mod tests {
             },
             artifacts: vec![],
             tests: None,
+            overlay: None,
         };
         let passing = |_: &Path, _: &str, _: &str, _: Option<&str>, _: &str, _: Option<&Path>| {
             Ok(run_ok(true))
@@ -1325,6 +1334,15 @@ mod tests {
         assert!(j.reasons[0].contains("not at the head commit"), "{j:?}");
         let j = judged(&with("0".repeat(64)), Some(&store));
         assert!(j.reasons[0].contains("not in the evidence store"), "{j:?}");
+        // A run with another commit's files written over the head's.
+        let mut overlaid = manifest(&head, 0);
+        overlaid.overlay = Some(onus_env::store::Overlay {
+            from_commit: "b".into(),
+            paths: vec!["src/a.test.ts".into()],
+        });
+        let overlaid = store.record(&overlaid).unwrap();
+        let j = judged(&with(overlaid), Some(&store));
+        assert!(j.reasons[0].contains("not the head as committed"), "{j:?}");
         let j = judged(&with(good), None);
         assert!(j.reasons[0].contains("no evidence store"), "{j:?}");
     }

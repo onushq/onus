@@ -5,6 +5,7 @@
 //! Every type serializes to the JSON shapes described in `PLAN.md` section 4
 //! and has a generated JSON Schema under `schemas/`.
 
+pub mod behavior;
 pub mod change;
 pub mod config;
 pub mod hash;
@@ -22,6 +23,7 @@ pub mod schema;
 pub mod secrets;
 pub mod signal;
 
+pub use behavior::*;
 pub use change::*;
 pub use config::*;
 pub use held_out::*;

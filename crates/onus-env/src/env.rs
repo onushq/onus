@@ -16,18 +16,19 @@
 
 use std::collections::BTreeSet;
 use std::path::Path;
-use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::process::Command;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use onus_doors::runner::{RootTar, checkout, copy_in, engine, tail};
+use onus_doors::runner::{RootTar, checkout, copy_in, engine, output_until, tail};
 use onus_doors::scope::glob_regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::spec::Spec;
 use crate::store::{
-    Artifact, ArtifactKind, EnvironmentInfo, Manifest, SCHEMA, Store, TestCounts, junit_counts,
+    Artifact, ArtifactKind, EnvironmentInfo, Manifest, Overlay, SCHEMA, Store, TestCounts,
+    junit_counts,
 };
 
 /// What a task's token lets an environment have.
@@ -442,8 +443,37 @@ pub fn get(name: &str) -> Result<Env> {
         .with_context(|| format!("{} is not an Onus environment", container(name)))
 }
 
+/// How [`run_with`] runs a command.
+#[derive(Debug, Clone, Default)]
+pub struct RunOptions {
+    /// Stop the command when this passes; nothing is recorded then.
+    pub timeout: Option<Duration>,
+    /// Files [`overlay`] wrote over the tree before the run, recorded in
+    /// the manifest.
+    pub overlay: Option<Overlay>,
+}
+
+/// How a run ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ran {
+    /// The run's id in the store, and its manifest.
+    Done(String, Box<Manifest>),
+    /// The timeout passed first. The command may still be running in the
+    /// container until the environment is destroyed.
+    TimedOut,
+}
+
 /// Runs `command` in the environment and records the run in `store`.
 pub fn run(name: &str, command: &str, store: &Store) -> Result<(String, Manifest)> {
+    match run_with(name, command, store, &RunOptions::default())? {
+        Ran::Done(id, manifest) => Ok((id, *manifest)),
+        Ran::TimedOut => bail!("the run timed out"),
+    }
+}
+
+/// [`run`], stopped when `options.timeout` passes first.
+pub fn run_with(name: &str, command: &str, store: &Store, options: &RunOptions) -> Result<Ran> {
+    let deadline = options.timeout.map(|t| Instant::now() + t);
     let env = get(name)?;
     let engine = engine()?;
     let c = &env.container;
@@ -495,19 +525,21 @@ pub fn run(name: &str, command: &str, store: &Store) -> Result<(String, Manifest
         .collect()
     };
     let before = newer();
-    let out = Command::new(&engine)
-        .args([
-            "exec",
-            "-w",
-            "/work",
-            c,
-            "sh",
-            "-c",
-            &format!("exec 2>&1\n{command}"),
-        ])
-        .stdin(Stdio::null())
-        .output()
-        .context("cannot run the command in the environment")?;
+    let mut exec = Command::new(&engine);
+    exec.args([
+        "exec",
+        "-w",
+        "/work",
+        c,
+        "sh",
+        "-c",
+        &format!("exec 2>&1\n{command}"),
+    ]);
+    let Some(out) = output_until(&mut exec, None, deadline)
+        .context("cannot run the command in the environment")?
+    else {
+        return Ok(Ran::TimedOut);
+    };
     let finished_at = onus_doors::gateway::now();
     let mut log = out.stdout;
     log.extend_from_slice(&out.stderr);
@@ -577,9 +609,48 @@ pub fn run(name: &str, command: &str, store: &Store) -> Result<(String, Manifest
         },
         artifacts,
         tests,
+        overlay: options.overlay.clone(),
     };
     let id = store.record(&manifest)?;
-    Ok((id, manifest))
+    Ok(Ran::Done(id, Box::new(manifest)))
+}
+
+/// Writes `files` (repository paths and their bytes) over the
+/// environment's tree, for a run of another commit's versions of them.
+pub fn overlay(name: &str, files: &[(String, Vec<u8>)]) -> Result<()> {
+    let env = get(name)?;
+    let engine = engine()?;
+    let mut tar = RootTar::new();
+    for (path, bytes) in files {
+        check_path(path)?;
+        tar.file(&format!("work/{path}"), bytes)?;
+    }
+    copy_in(&engine, &env.container, tar)
+}
+
+/// Runs a shell script in the environment, recording nothing.
+pub fn exec(name: &str, script: &str) -> Result<()> {
+    let env = get(name)?;
+    let engine = engine()?;
+    engine_cmd(
+        &engine,
+        &["exec", "-w", "/work", &env.container, "sh", "-c", script],
+    )?;
+    Ok(())
+}
+
+/// A path inside the tree: relative, with no `..`.
+fn check_path(path: &str) -> Result<()> {
+    if path.is_empty()
+        || path.starts_with('/')
+        || path.contains('\\')
+        || path
+            .split('/')
+            .any(|p| p.is_empty() || p == "." || p == "..")
+    {
+        bail!("`{path}` is not a path inside the repository");
+    }
+    Ok(())
 }
 
 /// The values of the environment's secrets, to keep them out of evidence.
@@ -726,6 +797,10 @@ mod tests {
         assert!(check_host("example.com:443").is_err());
         assert!(check_secret("SMS_TEST_KEY").is_ok());
         assert!(check_secret("SMS_*").is_err());
+        assert!(check_path("src/a.test.ts").is_ok());
+        for bad in ["/etc/passwd", "../x", "src/../../x", "src//a", "./a", ""] {
+            assert!(check_path(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

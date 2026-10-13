@@ -72,7 +72,7 @@ pub const TOPICS: &[Topic] = &[
     },
     Topic {
         name: "environments",
-        summary: "Environments built from a commit, the evidence store, and traces and coverage into the map",
+        summary: "Environments built from a commit, the evidence store, traces and coverage into the map, and the behavior diff",
         text: include_str!("../guide/environments.md"),
     },
     Topic {

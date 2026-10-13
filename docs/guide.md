@@ -16,7 +16,7 @@ The guide ships inside the `onus` binary: `onus help <topic>` prints any of thes
 | [lanes](../crates/onus-cli/guide/lanes.md) | Risk lanes, change submissions, the learned model, the verifying judge, held-out suites and judge rotation, outcome records and provenance |
 | [production](../crates/onus-cli/guide/production.md) | Production signals, rollout plans per lane and automatic rollback |
 | [web-interface](../crates/onus-cli/guide/web-interface.md) | The web interface: onus ui opens all of it in your browser |
-| [environments](../crates/onus-cli/guide/environments.md) | Environments built from a commit, the evidence store, and traces and coverage into the map |
+| [environments](../crates/onus-cli/guide/environments.md) | Environments built from a commit, the evidence store, traces and coverage into the map, and the behavior diff |
 | [cloud](../crates/onus-cli/guide/cloud.md) | Onus Cloud from the CLI: `onus login`, scoped tokens, hosted environments, evidence, escalations, the maps it keeps and agents |
 | [plugins](../crates/onus-cli/guide/plugins.md) | New languages and frameworks, SCIP indexes, language servers, trusted mode |
 | [how-it-works](../crates/onus-cli/guide/how-it-works.md) | How maps are built and compared |

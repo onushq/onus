@@ -234,3 +234,11 @@ The container `onus env create` builds from a commit: its image (default: the de
       coverage: ["coverage/lcov.info"]   # lcov, Cobertura XML or Istanbul JSON
       lockfiles: [package-lock.json]     # default: the usual lockfiles
       egressImage: ubuntu/squid          # the proxy for hosts a token names
+      behavior:                          # onus report --behavior
+        command: "npx vitest run --reporter=junit --outputFile=reports/onus-behavior.xml {files}"
+        junit: ["reports/onus-behavior*.xml"]
+        budget: 600
+        maxFiles: 40
+        depth: 1
+
+`behavior` is the behavior diff (`onus report --behavior`): `command` runs the selected test files (`{files}`, required) and writes JUnit XML to a file `junit` matches; `budget` is seconds for the whole diff, `maxFiles` the most test files run, and `depth` the code-dependency hops (0 to 2) from changed code to the tests chosen. It is read from the base commit like the rest of the config. See `onus help environments`.

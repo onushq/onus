@@ -33,7 +33,7 @@ Inputs, all optional:
 - `onus-path`: use this binary instead of downloading one (for example one you built).
 - `base`, `head`: the commits to compare. Default: the pull request's base and head commits.
 - `intent`: `true` (the default) checks the change against an `onus-intent` block in the pull request body; `false` skips the check; a file path uses that file.
-- `fail-on`: fail the job on `rule-violation`, `secrets` or both (comma separated). Default `none`.
+- `fail-on`: fail the job on `rule-violation`, `secrets`, `behavior` (with `behavior: true`), or several (comma separated). Default `none`.
 - `comment`: `false` to only write the job summary.
 - `config`: an onus.yaml to use for both commits.
 - `lanes`: `true` to classify the change into a risk lane with the policy in onus.yaml and the hard floors, and show it in the comment (`onus help lanes`). Output `lane`.
@@ -42,6 +42,7 @@ Inputs, all optional:
 - `plugins`: a plugins file's contents (YAML), written outside the repository and passed with `--plugins`. For Svelte components: `plugins: [{ name: svelte, kind: language, command: [onus-plugin-svelte], files: ["**/*.svelte"] }]` (the plugin ships in every release archive).
 - `working-directory`: the repository, if not the workspace root.
 - `coverage`: coverage of the head commit (lcov, Cobertura XML or Istanbul JSON) written by an earlier step, as a glob. Passed only when the checkout is the head commit (see "Which changed lines tests ran" below).
+- `behavior`: `true` to run the behavior diff (`onus report --behavior`): the tests that reach the change run at the base and at the head in containers, from `environment.behavior` in the base commit's onus.yaml (`onus help environments`). GitHub's Linux runners have Docker. A binary without the flag skips it with a warning. `behavior-budget`: seconds for it (default: the config's, else 600). With `fail-on: behavior`, a test that passes at the base and fails at the head fails the job.
 - `cache`: `true` (the default) keeps the base commit's map in the Actions cache, so later pushes to the same pull request skip mapping the base again. `false` maps it every time.
 - `feedback`: `true` (the default) ends the comment with a line asking for a 👍 or 👎 reaction and for `/onus caught` replies (see below).
 - `github-token`: the token for the download and the comment. Default: the workflow's token.
