@@ -585,10 +585,18 @@ fn guide(body: Value) -> Answer {
 fn lanes_policy(state: &State) -> Answer {
     let config = loaded_config(state)?;
     let lanes = config.as_ref().and_then(|c| c.config.lanes.clone());
+    let policy = lanes.clone().unwrap_or_default();
+    let judges: Vec<Value> = policy
+        .judges
+        .iter()
+        .map(|j| json!({ "name": j.name, "id": onus_lanes::judge::judge_id_for(&policy, Some(j)) }))
+        .collect();
     Ok(json!({
         "configured": lanes.is_some(),
-        "policy": lanes.unwrap_or_default(),
-        "judge": onus_lanes::judge::judge_id(&config.and_then(|c| c.config.lanes).unwrap_or_default()),
+        "judge": onus_lanes::judge::judge_id(&policy),
+        "judges": judges,
+        "heldOutSuite": state.held_out.is_some(),
+        "policy": policy,
     }))
 }
 
@@ -706,8 +714,32 @@ fn lanes_classify(state: &State, body: Value) -> Answer {
     Ok(serde_json::to_value(c)?)
 }
 
+/// For people only (agents cannot call it), so the answer carries what the
+/// held-out checks did as `heldOut`.
 fn lanes_judge(state: &State, body: Value) -> Answer {
-    let sub = submission_in(body)?;
+    let (mut out, held_out) = lanes_judge_full(state, body)?;
+    out["heldOut"] = serde_json::to_value(held_out)?;
+    Ok(out)
+}
+
+/// The judge's answer, `{classification, judgment}`, and apart from it what
+/// the held-out checks did, which only people read.
+fn lanes_judge_full(
+    state: &State,
+    body: Value,
+) -> Result<(Value, Option<onus_lanes::heldout::HeldOutReport>), Error> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct JudgeIn {
+        submission: onus_lanes::submission::Submission,
+        /// A configuration from lanes.judges instead of the rotation's.
+        #[serde(default)]
+        judge_config: Option<String>,
+    }
+    let q: JudgeIn = input(body)?;
+    let sub = q.submission;
+    // Read at each judgment: the suite may have changed since the start.
+    let suite = lanes::load_held_out(state.held_out.as_deref(), &state.root)?;
     let config = lanes::lanes_config(&state.root, None)?;
     let c = lanes::classify_with(
         &state.root,
@@ -719,8 +751,21 @@ fn lanes_judge(state: &State, body: Value) -> Answer {
             ..Default::default()
         },
     )?;
-    let j = lanes::judge_submission(&state.root, &sub, &c, &config);
-    Ok(json!({ "classification": c, "judgment": j }))
+    let judged = lanes::judge_submission(
+        &state.root,
+        &sub,
+        &c,
+        &config,
+        lanes::JudgeRun {
+            held_out: suite.as_ref(),
+            judge_config: q.judge_config.as_deref(),
+            config_path: None,
+        },
+    )?;
+    Ok((
+        json!({ "classification": c, "judgment": judged.judgment }),
+        judged.held_out,
+    ))
 }
 
 // Submissions handed in by agents, kept as <id>.json with the judge's
@@ -804,20 +849,53 @@ struct IdIn {
     id: String,
 }
 
+/// For people only (agents cannot call it): the held-out report names the
+/// checks.
 fn submissions_show(state: &State, body: Value) -> Answer {
     let q: IdIn = input(body)?;
     let sub = load_submission(state, &q.id)?;
-    Ok(json!({ "id": q.id, "submission": sub, "judgment": load_judgment(state, &q.id) }))
+    let held_out = std::fs::read_to_string(submission_path(state, &q.id, ".held-out.json")?)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok());
+    Ok(json!({
+        "id": q.id,
+        "submission": sub,
+        "judgment": load_judgment(state, &q.id),
+        "heldOut": held_out,
+    }))
 }
 
+/// Judges a kept submission; the held-out report is kept beside the
+/// judgment as `<id>.held-out.json` and not returned. A person may force a
+/// configuration (`judgeConfig`); agents reach this with the id alone.
 fn submissions_judge(state: &State, body: Value) -> Answer {
-    let q: IdIn = input(body)?;
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct In {
+        id: String,
+        #[serde(default)]
+        judge_config: Option<String>,
+    }
+    let q: In = input(body)?;
     let sub = load_submission(state, &q.id)?;
-    let out = lanes_judge(state, json!({ "submission": sub }))?;
+    let (out, held_out) = lanes_judge_full(
+        state,
+        json!({ "submission": sub, "judgeConfig": q.judge_config }),
+    )?;
     std::fs::write(
         submission_path(state, &q.id, ".judgment.json")?,
         serde_json::to_vec_pretty(&out)?,
     )
+    .map_err(anyhow::Error::from)?;
+    let report = submission_path(state, &q.id, ".held-out.json")?;
+    match held_out {
+        Some(h) => std::fs::write(report, serde_json::to_vec_pretty(&h)?),
+        // An earlier report is not about this judgment.
+        None => std::fs::remove_file(report).or_else(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => Ok(()),
+            _ => Err(e),
+        }),
+    }
     .map_err(anyhow::Error::from)?;
     Ok(out)
 }

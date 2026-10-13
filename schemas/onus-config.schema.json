@@ -388,6 +388,40 @@
       },
       "additionalProperties": false
     },
+    "JudgeConfig": {
+      "description": "One judge configuration: the judge picks one per change, so an author\ncannot tune a change to a single reviewer (`onus help lanes`).",
+      "type": "object",
+      "properties": {
+        "heldOutLimit": {
+          "description": "At most this many held-out checks per judgment. Default the suite's `limit`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "name": {
+          "description": "A short name, shown in judgments and outcome summaries.",
+          "type": "string"
+        },
+        "taste": {
+          "description": "The reviewer for taste under this configuration. Default `lanes.taste`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TasteCommand"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name"
+      ]
+    },
     "LabelConfig": {
       "type": "object",
       "properties": {
@@ -491,7 +525,7 @@
           "default": "judge"
         },
         "heldOut": {
-          "description": "Checks the author never saw, run by the judge in a container.",
+          "description": "A check in onus.yaml; agents can read it. Prefer a suite given with\n`--held-out`.",
           "anyOf": [
             {
               "$ref": "#/$defs/CheckCommand"
@@ -523,6 +557,13 @@
             "tests": {
               "untested": "judge"
             }
+          }
+        },
+        "judges": {
+          "description": "Judge configurations the judge rotates between (`onus help lanes`).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/JudgeConfig"
           }
         },
         "learned": {

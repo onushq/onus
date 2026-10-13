@@ -38,12 +38,12 @@ Navigation (experimental):
 
 Handing work in (leave these out with `onus mcp --no-actions`):
 
-- `onus_lanes`: the lane policy: what merges on its own, what goes to the judge or a person, and the floors no policy can lower.
+- `onus_lanes`: the lane policy: what merges on its own, what goes to the judge or a person, and the floors no policy can lower. It says whether held-out checks are configured, never what they run.
 - `onus_env_create`, `onus_env_run`, `onus_envs`, `onus_env_destroy`: an environment built from a commit, and commands run in it. Each run is recorded as evidence (output, JUnit results, traces, coverage) under a run id. See `onus help environments`.
 - `onus_evidence`: recorded runs, a run's manifest, or one of its artifacts.
 - `onus_run_test`: a test command once in a throwaway container, to reproduce a failure; nothing is recorded.
 - `onus_submit`: hands in a committed change with an intent, run ids as evidence and the ids of escalations granted during the task. Onus reports it, attaches the scope of the server's task token, classifies it, and keeps it in `.onus/submissions/` where people see it in `onus ui`. Returns the lane, every reason, and a submission id.
-- `onus_judge`: the verifying judge on a submission: evidence re-run in fresh containers, intent, contracts, tests, held-out checks. The verdict is kept beside the submission.
+- `onus_judge`: the verifying judge on a submission: evidence re-run in fresh containers, intent, contracts, tests, held-out checks, stopping at the first failure. The verdict is kept beside the submission. Held-out checks come from the suite `onus mcp --held-out` was given; the agent sees only how many ran and passed, and not which configuration from `lanes.judges` judged.
 - `onus_escalate`, `onus_escalation`: ask for rights the token lacks, with evidence, and check the answer (`wait` waits up to 50 seconds for it). A granted request returns the new token, the old rights plus exactly what was asked, and the server uses it from then on. The granted token names its request, so it proves the grant wherever the person's decision was logged. Where a request goes is in `onus help scopes`.
 - `onus_blocked`: the safe exit. A test the agent did not write fails and cannot be fixed in scope, the spec contradicts itself or the code, or the task cannot be done as asked: the agent reports it with evidence (`kind` `broken-test`, `contradictory-spec` or `impossible-task`) and stops. It is filed like an escalation that asks for no rights, routed to the owners of the code involved, and listed even when the CLI is signed out. A person answers it; the agent reads the answer with `onus_escalation` (state `answered`).
 - `onus_outcomes`: track records and the held-out backlog, read-only.

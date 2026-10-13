@@ -348,6 +348,10 @@ Examples:
         /// How long the scoped token minted from a login lasts (at most 24h).
         #[arg(long, default_value = "8h", value_name = "DURATION")]
         cloud_ttl: String,
+        /// A held-out suite for onus_judge: a directory outside the repository holding
+        /// held-out.yaml. The agent never sees its checks, only how many passed.
+        #[arg(long, env = "ONUS_HELD_OUT", value_name = "DIR")]
+        held_out: Option<PathBuf>,
     },
     /// Ask the codebase map a question; the same answers as the MCP tools.
     #[command(after_long_help = "\
@@ -440,8 +444,20 @@ Examples:
     /// Which lane a change takes (auto-merge, judge, human, blocked), and why.
     Classify(lanes::LaneArgs),
     /// Verify a submission: re-run evidence, intent, contracts, tests, held-out
-    /// checks, then taste. Exit 0 approve, 2 reject, 3 escalate to a person.
-    Judge(lanes::LaneArgs),
+    /// checks, then taste, stopping at the first failure. Exit 0 approve, 2 reject,
+    /// 3 escalate to a person.
+    #[command(after_long_help = "\
+Examples:
+  onus judge --submission sub.json
+  onus judge --submission sub.json --held-out ~/acme-held-out/shop
+  onus judge --submission sub.json --held-out ~/acme-held-out/shop --show-held-out
+  onus judge --submission sub.json --judge-config strict")]
+    Judge(lanes::JudgeArgs),
+    /// Held-out suites: check one, or see which checks the judge would run for a change.
+    HeldOut {
+        #[command(subcommand)]
+        cmd: lanes::HeldOutCmd,
+    },
     /// Record outcomes of changes and summarize them per agent setup and judge.
     Outcomes {
         #[command(subcommand)]
@@ -929,6 +945,7 @@ fn run(cli: Cli) -> Result<i32> {
         Cmd::Submit(args) => lanes::submit(args),
         Cmd::Classify(args) => lanes::classify_cmd(args),
         Cmd::Judge(args) => lanes::judge_cmd(args),
+        Cmd::HeldOut { cmd } => lanes::held_out_cmd(cmd),
         Cmd::Outcomes { cmd } => lanes::outcomes_cmd(cmd),
         Cmd::Lanes { cmd } => lanes::lanes_cmd(cmd),
         Cmd::Provenance(args) => provenance::run(args),
@@ -957,9 +974,12 @@ fn run(cli: Cli) -> Result<i32> {
             cloud_token,
             cloud_repo,
             cloud_ttl,
+            held_out,
         } => {
             let root = onus_cli::daemon::worktree_root(&repo);
             let canonical = onus_cli::daemon::canonical(&root).unwrap_or_else(|_| root.clone());
+            // Checked now, so a suite inside the worktree fails at start.
+            lanes::load_held_out(held_out.as_deref(), &canonical)?;
             if let Some(k) = &key {
                 // Read now, so a wrong path fails at start rather than at a grant.
                 onus_doors::token::RootKey::from_hex(&doors::read_key(k)?)?;
@@ -1033,6 +1053,7 @@ fn run(cli: Cli) -> Result<i32> {
                         ui::Places {
                             audit: Some(audit),
                             public_key: key_public.clone(),
+                            held_out,
                             ..Default::default()
                         },
                     ),

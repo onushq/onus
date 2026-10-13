@@ -835,7 +835,7 @@ impl OnusMcp {
 
     #[tool(
         name = "onus_judge",
-        description = "Run the verifying judge on a submission: it re-runs your evidence in fresh containers, checks intent, contracts and tests, and runs held-out checks you cannot see. Returns approve, reject (with reasons to act on) or escalate. Takes minutes; needs Docker or Podman."
+        description = "Run the verifying judge on a submission: it re-runs your evidence in fresh containers, checks intent, contracts and tests, and runs held-out checks you cannot see, stopping at the first failure. Returns approve, reject (with the first thing to fix) or escalate. Takes minutes; needs Docker or Podman."
     )]
     async fn judge(
         &self,

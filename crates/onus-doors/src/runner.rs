@@ -71,7 +71,20 @@ pub fn run(
     setup: Option<&str>,
     command: &str,
 ) -> Result<TestRun> {
-    match run_within(repo, reference, image, setup, command, None)? {
+    run_with(repo, reference, image, setup, command, None)
+}
+
+/// [`run`], with `extra` (a directory) copied into the test container at
+/// `/held-out`. It is never copied into the setup container, which has network.
+pub fn run_with(
+    repo: &Path,
+    reference: &str,
+    image: &str,
+    setup: Option<&str>,
+    command: &str,
+    extra: Option<&Path>,
+) -> Result<TestRun> {
+    match run_inner(repo, reference, image, setup, command, extra, None)? {
         Ran::Done(run) => Ok(run),
         Ran::TimedOut => bail!("the run timed out"),
     }
@@ -86,6 +99,18 @@ pub fn run_within(
     image: &str,
     setup: Option<&str>,
     command: &str,
+    limit: Option<Duration>,
+) -> Result<Ran> {
+    run_inner(repo, reference, image, setup, command, None, limit)
+}
+
+fn run_inner(
+    repo: &Path,
+    reference: &str,
+    image: &str,
+    setup: Option<&str>,
+    command: &str,
+    extra: Option<&Path>,
     limit: Option<Duration>,
 ) -> Result<Ran> {
     let deadline = limit.map(|l| Instant::now() + l);
@@ -139,9 +164,19 @@ pub fn run_within(
         }
         Ok(Some(()))
     };
-    let copy = |id: &str| -> Result<Option<()>> {
+    // The tree (unless the image has it) and `extra` at /held-out, in one
+    // archive; nothing when there is neither.
+    let copy = |id: &str, with_tree: bool, extra: Option<&Path>| -> Result<Option<()>> {
+        if !with_tree && extra.is_none() {
+            return Ok(Some(()));
+        }
         let mut tar = RootTar::new();
-        tar.tree(work.path(), "work")?;
+        if with_tree {
+            tar.tree(work.path(), "work")?;
+        }
+        if let Some(dir) = extra {
+            tar.tree_without_git(dir, "held-out")?;
+        }
         copy_until(&engine, id, tar, deadline)
     };
     // Creates the container, copies the tree in unless `image` has it, and
@@ -151,12 +186,13 @@ pub fn run_within(
                         image: &str,
                         network: bool,
                         script: &str,
-                        with_tree: bool|
+                        with_tree: bool,
+                        extra: Option<&Path>|
      -> Result<Option<Output>> {
         if create(id, image, network, script)?.is_none() {
             return Ok(None);
         }
-        if with_tree && copy(id)?.is_none() {
+        if copy(id, with_tree, extra)?.is_none() {
             return Ok(None);
         }
         engine_run(&["start", "-a", id], None)
@@ -167,7 +203,8 @@ pub fn run_within(
     let mut temp_image = None;
     if let Some(setup) = setup {
         let id = format!("{name}-setup");
-        let done = in_container(&id, image, true, setup, true);
+        // Never `extra`: the setup has network.
+        let done = in_container(&id, image, true, setup, true, None);
         let committed = match done {
             Ok(Some(out)) if out.status.success() => {
                 engine_run(&["commit", &id, &tag], None).map(|o| o.map(|o| o.status.success()))
@@ -196,7 +233,14 @@ pub fn run_within(
         test_image = tag.clone();
         temp_image = Some(tag);
     }
-    let result = in_container(&name, &test_image, false, command, temp_image.is_none());
+    let result = in_container(
+        &name,
+        &test_image,
+        false,
+        command,
+        temp_image.is_none(),
+        extra,
+    );
     remove(&["rm", "-f", &name]);
     if let Some(tag) = &temp_image {
         remove(&["rmi", "-f", tag]);
@@ -316,12 +360,27 @@ impl RootTar {
     /// relative to `dir`, sorted.
     pub fn tree(&mut self, dir: &Path, prefix: &str) -> Result<Vec<String>> {
         let mut files = Vec::new();
-        self.walk(dir, prefix, "", &mut files)?;
+        self.walk(dir, prefix, "", false, &mut files)?;
         files.sort();
         Ok(files)
     }
 
-    fn walk(&mut self, dir: &Path, prefix: &str, rel: &str, files: &mut Vec<String>) -> Result<()> {
+    /// [`RootTar::tree`], leaving out `.git` directories.
+    pub fn tree_without_git(&mut self, dir: &Path, prefix: &str) -> Result<Vec<String>> {
+        let mut files = Vec::new();
+        self.walk(dir, prefix, "", true, &mut files)?;
+        files.sort();
+        Ok(files)
+    }
+
+    fn walk(
+        &mut self,
+        dir: &Path,
+        prefix: &str,
+        rel: &str,
+        skip_git: bool,
+        files: &mut Vec<String>,
+    ) -> Result<()> {
         let mut h = Self::header(&std::fs::symlink_metadata(dir)?)?;
         let at = if rel.is_empty() {
             prefix.to_string()
@@ -340,7 +399,9 @@ impl RootTar {
             };
             let meta = std::fs::symlink_metadata(e.path())?;
             if meta.is_dir() {
-                self.walk(&e.path(), prefix, &path, files)?;
+                if !(skip_git && e.file_name() == ".git") {
+                    self.walk(&e.path(), prefix, &path, skip_git, files)?;
+                }
                 continue;
             }
             let mut h = Self::header(&meta)?;

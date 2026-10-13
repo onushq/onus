@@ -79,6 +79,10 @@ pub enum CiCmd {
         /// Run the judge when the lane is `judge` (needs Docker or Podman).
         #[arg(long)]
         judge: bool,
+        /// A held-out suite for the judge: a directory outside the repository holding
+        /// held-out.yaml and its tests. What it did goes to held-out.json in --out.
+        #[arg(long, env = "ONUS_HELD_OUT", value_name = "DIR")]
+        held_out: Option<PathBuf>,
         #[arg(long, value_name = "FILE")]
         config: Option<PathBuf>,
         /// GitHub reviews of the pull request (JSON array; see `onus help ci`).
@@ -88,7 +92,8 @@ pub enum CiCmd {
         /// (Onus Cloud trains one per organisation). Needs lanes.learned in the config.
         #[arg(long, value_name = "FILE")]
         model: Option<PathBuf>,
-        /// Where to write the submission, classification, judgment, provenance and comment section.
+        /// Where to write the submission, classification, judgment, held-out report, provenance
+        /// and comment section.
         #[arg(long, value_name = "DIR")]
         out: PathBuf,
         /// When it happened, in seconds since 1970; now when left out. For records
@@ -284,6 +289,7 @@ pub fn run(cmd: CiCmd) -> Result<i32> {
             evidence,
             records,
             judge,
+            held_out,
             config,
             reviews,
             model,
@@ -301,6 +307,7 @@ pub fn run(cmd: CiCmd) -> Result<i32> {
             evidence,
             records,
             judge,
+            held_out,
             config,
             reviews,
             model,
@@ -458,6 +465,7 @@ struct PrArgs {
     evidence: Vec<PathBuf>,
     records: PathBuf,
     judge: bool,
+    held_out: Option<PathBuf>,
     config: Option<PathBuf>,
     reviews: Option<PathBuf>,
     model: Option<PathBuf>,
@@ -476,6 +484,8 @@ fn verdict_name(v: onus_lanes::judge::Verdict) -> &'static str {
 
 fn pr(a: PrArgs) -> Result<i32> {
     check_change(&a.change)?;
+    // A bad suite fails the run before anything is written.
+    let suite = lanes::load_held_out(a.held_out.as_deref(), &a.repo)?;
     std::fs::create_dir_all(&a.out)?;
     std::fs::create_dir_all(&a.records)?;
     let sha = |r: &str| -> Result<String> {
@@ -546,8 +556,25 @@ fn pr(a: PrArgs) -> Result<i32> {
             model_file: a.model.as_deref(),
         },
     )?;
-    let judgment = (a.judge && c.lane == Lane::Judge)
-        .then(|| lanes::judge_submission(&a.repo, &sub, &c, &config));
+    let judged = (a.judge && c.lane == Lane::Judge)
+        .then(|| {
+            lanes::judge_submission(
+                &a.repo,
+                &sub,
+                &c,
+                &config,
+                lanes::JudgeRun {
+                    held_out: suite.as_ref(),
+                    judge_config: None,
+                    config_path: a.config.as_deref(),
+                },
+            )
+        })
+        .transpose()?;
+    let (judgment, held_out) = match judged {
+        Some(j) => (Some(j.judgment), j.held_out),
+        None => (None, None),
+    };
     // The plan for the final lane: the judge may have moved it.
     let plan = match (&judgment, &c.rollout) {
         (Some(j), _) if j.lane != c.lane => lanes::rollout_plan(
@@ -581,6 +608,10 @@ fn pr(a: PrArgs) -> Result<i32> {
     )?;
     if let Some(j) = &judgment {
         std::fs::write(a.out.join("judgment.json"), serde_json::to_vec_pretty(j)?)?;
+    }
+    // For people only: it names the held-out checks.
+    if let Some(h) = &held_out {
+        std::fs::write(a.out.join("held-out.json"), serde_json::to_vec_pretty(h)?)?;
     }
     std::fs::write(
         a.out.join("rollout.json"),
@@ -687,7 +718,14 @@ fn pr(a: PrArgs) -> Result<i32> {
     ));
     md.push_str(&rollout_markdown(&plan));
     if let Some(j) = &judgment {
-        md.push_str(&format!("\n**Judge:** `{}`\n", verdict_name(j.verdict)));
+        md.push_str(&format!(
+            "\n**Judge:** `{}`{}\n",
+            verdict_name(j.verdict),
+            j.rotation
+                .as_ref()
+                .map(|r| format!(" · configuration `{}`", r.config))
+                .unwrap_or_default()
+        ));
         for r in &j.reasons {
             md.push_str(&format!("- {r}\n"));
         }

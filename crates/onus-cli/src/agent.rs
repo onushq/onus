@@ -36,7 +36,6 @@ pub struct AgentActions {
 
 /// What an agent may call on the API as it is (the door has decided).
 const PASSTHROUGH: &[&str] = &[
-    "lanes.policy",
     "envs.run",
     "envs.list",
     "envs.destroy",
@@ -320,6 +319,52 @@ impl AgentActions {
         Ok(out)
     }
 
+    /// The lane policy, less the held-out check: the author may know there is
+    /// one, never what it runs.
+    fn policy(&self) -> Result<Value> {
+        let mut out = call(&self.state, "lanes.policy", json!({}))?;
+        let suite = out
+            .as_object_mut()
+            .and_then(|o| o.remove("heldOutSuite"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let legacy = out["policy"]
+            .as_object_mut()
+            .and_then(|p| p.remove("heldOut"))
+            .is_some();
+        if let Some(p) = out["policy"].as_object_mut() {
+            p.insert(
+                "heldOut".into(),
+                if suite || legacy {
+                    json!("configured")
+                } else {
+                    Value::Null
+                },
+            );
+        }
+        Ok(out)
+    }
+
+    /// Judges a kept submission, by its id alone: an agent never picks the
+    /// judge's configuration. Nor does it learn which one judged: otherwise it
+    /// could amend its commit until a lenient one comes up. The judgment loses
+    /// `rotation`, and its judge id is the policy's, the same for every
+    /// configuration. The kept judgment has both, for people.
+    fn judge(&self, input: Value) -> Result<Value> {
+        let mut out = call(
+            &self.state,
+            "submissions.judge",
+            json!({ "id": input["id"] }),
+        )?;
+        if let Some(j) = out["judgment"].as_object_mut()
+            && j.remove("rotation").is_some()
+        {
+            let policy = call(&self.state, "lanes.policy", json!({}))?;
+            j.insert("judge".into(), policy["judge"].clone());
+        }
+        Ok(out)
+    }
+
     /// A list, less what the task did not make.
     fn listed(&self, tool: &str, mut answer: Value) -> Result<Value> {
         self.door.filter_list(tool, &mut answer, &self.door.facts());
@@ -331,7 +376,8 @@ impl onus_cli::mcp::Actions for AgentActions {
     fn call(&self, name: &str, input: Value) -> Result<Value> {
         match name {
             "agent.submit" => self.submit(input),
-            "agent.judge" => call(&self.state, "submissions.judge", input),
+            "agent.judge" => self.judge(input),
+            "lanes.policy" => self.policy(),
             "agent.envCreate" => {
                 let mut input = input;
                 input["token"] = json!(self.door.token());

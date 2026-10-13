@@ -9,7 +9,8 @@ use onus_core::{Lane, LanesConfig, LearnedConfig, SemanticReport};
 use onus_lanes::classify::{
     AreaHistories, Classification, ClassifyContext, Learned, LearnedRisk, area, classify,
 };
-use onus_lanes::judge::{Verdict, judge_with};
+use onus_lanes::heldout::{self, LoadedSuite, Reach};
+use onus_lanes::judge::{JudgeOptions, Judged, Verdict, judge_with};
 use onus_lanes::learned::{self, Model};
 use onus_lanes::outcomes::{self, HistoryScope, Outcome};
 use onus_lanes::submission::{AgentSetup, Approval, ScopeUsed, Submission};
@@ -94,6 +95,67 @@ pub struct LaneArgs {
     /// Use this model file instead of lanes.learned.model at the base commit.
     #[arg(long, value_name = "FILE")]
     model: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct JudgeArgs {
+    #[command(flatten)]
+    lane: LaneArgs,
+    /// A held-out suite: a directory outside the repository holding held-out.yaml and
+    /// the tests it runs (`onus help lanes`).
+    #[arg(long, env = "ONUS_HELD_OUT", value_name = "DIR")]
+    held_out: Option<PathBuf>,
+    /// Judge under this configuration from lanes.judges instead of the rotation's.
+    #[arg(long, value_name = "NAME")]
+    judge_config: Option<String>,
+    /// Also print what each held-out check did, as `heldOut`. For people: it names
+    /// the checks.
+    #[arg(long)]
+    show_held_out: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum HeldOutCmd {
+    /// Check a held-out suite: its hash, and each check's id and what it covers.
+    #[command(after_long_help = "\
+Examples:
+  onus held-out check ~/acme-held-out/shop --repo .
+  onus held-out check \"$RUNNER_TEMP/held-out\" --json")]
+    Check {
+        /// The suite: a directory holding held-out.yaml.
+        #[arg(value_name = "DIR")]
+        dir: PathBuf,
+        /// The repository the suite is for: the suite is refused when it is inside it,
+        /// as the judge would refuse it.
+        #[arg(long, value_name = "DIR")]
+        repo: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Which held-out checks the judge would run for a change, in order, and why.
+    #[command(after_long_help = "\
+Examples:
+  onus submit --base main --head feature --out sub.json
+  onus held-out select --held-out ~/acme-held-out/shop --submission sub.json")]
+    Select {
+        /// The suite: a directory outside the repository holding held-out.yaml.
+        #[arg(long, env = "ONUS_HELD_OUT", value_name = "DIR")]
+        held_out: PathBuf,
+        /// A submission (from `onus submit`).
+        #[arg(long, value_name = "FILE")]
+        submission: PathBuf,
+        /// The repository whose onus.yaml holds the lane policy and the components.
+        #[arg(long, default_value = ".", value_name = "DIR")]
+        repo: PathBuf,
+        /// Use this onus.yaml instead.
+        #[arg(long, value_name = "FILE")]
+        config: Option<PathBuf>,
+        /// As if judged under this configuration from lanes.judges.
+        #[arg(long, value_name = "NAME")]
+        judge_config: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -486,12 +548,22 @@ pub fn submit(args: SubmitArgs) -> Result<i32> {
     Ok(0)
 }
 
-pub fn lanes_config(repo: &Path, explicit: Option<&Path>) -> Result<LanesConfig> {
-    let loaded = match explicit {
+/// The onus.yaml the lanes and the judge's head map are read with: `explicit`,
+/// else the one in `repo`'s worktree.
+pub fn loaded_config(
+    repo: &Path,
+    explicit: Option<&Path>,
+) -> Result<Option<onus_map::LoadedConfig>> {
+    Ok(match explicit {
         Some(p) => Some(onus_map::config::load(p)?),
         None => onus_map::config::load_from_tree(repo)?,
-    };
-    Ok(loaded.and_then(|l| l.config.lanes).unwrap_or_default())
+    })
+}
+
+pub fn lanes_config(repo: &Path, explicit: Option<&Path>) -> Result<LanesConfig> {
+    Ok(loaded_config(repo, explicit)?
+        .and_then(|l| l.config.lanes)
+        .unwrap_or_default())
 }
 
 /// The submission or report, the policy, and the classification.
@@ -824,20 +896,92 @@ pub fn classify_with(
     Ok(c)
 }
 
+/// What the judge is given besides the submission and the policy.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct JudgeRun<'a> {
+    /// A held-out suite, loaded with [`load_held_out`].
+    pub held_out: Option<&'a LoadedSuite>,
+    /// A configuration from lanes.judges to use instead of the rotation's.
+    pub judge_config: Option<&'a str>,
+    /// The onus.yaml the policy came from, when not the worktree's.
+    pub config_path: Option<&'a Path>,
+}
+
+/// The suite in `dir`, refused when it is inside `repo`'s worktree.
+pub fn load_held_out(dir: Option<&Path>, repo: &Path) -> Result<Option<LoadedSuite>> {
+    dir.map(|d| heldout::load(d, repo)).transpose()
+}
+
+/// What a change reaches in its head map, for choosing held-out checks. The
+/// changed paths come from git, not from the submission; the head map is
+/// built only when a check of the suite covers something, with the same
+/// onus.yaml as the lanes. Without it, the rows alone.
+pub fn reach_of(
+    repo: &Path,
+    sub: &Submission,
+    suite: Option<&LoadedSuite>,
+    config_path: Option<&Path>,
+) -> Reach {
+    let changed = git_lines(
+        repo,
+        &["diff", "--name-only", "--no-renames", &sub.base, &sub.head],
+    )
+    .unwrap_or_else(|_| sub.changed_files.clone());
+    let covers = suite.is_some_and(|s| s.suite.checks.iter().any(|c| !c.covers.is_empty()));
+    let head = covers
+        .then(|| -> Result<onus_core::CodebaseMap> {
+            let config = loaded_config(repo, config_path)?;
+            let tree = onus_cli::materialize(repo, &sub.head)?;
+            onus_cli::build(tree.dir.path(), config, Some(tree.sha.clone()))
+        })
+        .and_then(Result::ok);
+    let mut reach = Reach::of(&sub.report, &changed, head.as_ref());
+    if !covers {
+        // Not needed, rather than not built.
+        reach.map = None;
+    }
+    reach
+}
+
 /// The judge's verdict on a submission, with evidence re-run in containers
-/// and checked against the repository's evidence store.
+/// and checked against the repository's evidence store, and the held-out
+/// checks the map picks from the suite. It fails only for an unknown
+/// `judge_config`.
 pub fn judge_submission(
     repo: &Path,
     sub: &Submission,
     classification: &Classification,
     config: &LanesConfig,
-) -> onus_lanes::judge::Judgment {
-    let run = |repo: &Path, commit: &str, image: &str, setup: Option<&str>, command: &str| {
-        onus_doors::runner::run(repo, commit, image, setup, command)
+    opts: JudgeRun,
+) -> Result<Judged> {
+    let reach = reach_of(repo, sub, opts.held_out, opts.config_path);
+    let run = |repo: &Path,
+               commit: &str,
+               image: &str,
+               setup: Option<&str>,
+               command: &str,
+               extra: Option<&Path>| {
+        onus_doors::runner::run_with(repo, commit, image, setup, command, extra)
     };
     let store = onus_env::store::Store::for_repo(repo).ok();
-    judge_with(sub, classification, config, repo, &run, store.as_ref())
+    judge_with(
+        sub,
+        classification,
+        config,
+        repo,
+        &run,
+        &JudgeOptions {
+            store: store.as_ref(),
+            suite: opts.held_out,
+            reach: Some(&reach),
+            judge_config: opts.judge_config,
+        },
+    )
 }
+
+/// The note `onus judge` prints when onus.yaml holds a held-out check.
+pub const LEGACY_HELD_OUT_NOTE: &str =
+    "lanes.heldOut is in onus.yaml, where agents can read it; prefer a suite given with --held-out";
 
 pub fn classify_cmd(args: LaneArgs) -> Result<i32> {
     let (_, _, c) = classify_args(&args)?;
@@ -845,12 +989,27 @@ pub fn classify_cmd(args: LaneArgs) -> Result<i32> {
     Ok(0)
 }
 
-pub fn judge_cmd(args: LaneArgs) -> Result<i32> {
-    let (submission, config, c) = classify_args(&args)?;
+pub fn judge_cmd(args: JudgeArgs) -> Result<i32> {
+    let suite = load_held_out(args.held_out.as_deref(), &args.lane.repo)?;
+    let (submission, config, c) = classify_args(&args.lane)?;
     let Some(sub) = submission else {
         bail!("the judge needs a submission (onus submit)");
     };
-    let j = judge_submission(&args.repo, &sub, &c, &config);
+    if config.held_out.is_some() {
+        eprintln!("onus: {LEGACY_HELD_OUT_NOTE}");
+    }
+    let judged = judge_submission(
+        &args.lane.repo,
+        &sub,
+        &c,
+        &config,
+        JudgeRun {
+            held_out: suite.as_ref(),
+            judge_config: args.judge_config.as_deref(),
+            config_path: args.lane.config.as_deref(),
+        },
+    )?;
+    let j = &judged.judgment;
     // The plan for the final lane: the judge may have moved it.
     let rollout = if j.lane == c.lane {
         c.rollout.clone()
@@ -860,19 +1019,144 @@ pub fn judge_cmd(args: LaneArgs) -> Result<i32> {
             &sub.report,
             &config,
             &ClassifyOpts {
-                outcomes: args.outcomes.as_deref(),
-                change: args.change.as_deref(),
+                outcomes: args.lane.outcomes.as_deref(),
+                change: args.lane.change.as_deref(),
                 ..Default::default()
             },
         )?)
     };
-    let out = serde_json::json!({ "classification": c, "judgment": j, "rollout": rollout });
+    let mut out = serde_json::json!({ "classification": c, "judgment": j, "rollout": rollout });
+    if args.show_held_out {
+        out["heldOut"] = serde_json::to_value(&judged.held_out)?;
+    }
     println!("{}", serde_json::to_string_pretty(&out)?);
     Ok(match j.verdict {
         Verdict::Approve => 0,
         Verdict::Reject => 2,
         Verdict::Escalate => 3,
     })
+}
+
+pub fn held_out_cmd(cmd: HeldOutCmd) -> Result<i32> {
+    match cmd {
+        HeldOutCmd::Check { dir, repo, json } => {
+            let s = match repo {
+                Some(repo) => heldout::load(&dir, &repo)?,
+                None => heldout::read(&dir)?,
+            };
+            if json {
+                let out = serde_json::json!({
+                    "suite": s.short(),
+                    "limit": s.suite.limit,
+                    "checks": s.suite.checks.iter().map(|c| serde_json::json!({
+                        "id": c.id,
+                        "covers": c.covers,
+                    })).collect::<Vec<_>>(),
+                });
+                println!("{}", serde_json::to_string_pretty(&out)?);
+            } else {
+                println!(
+                    "held-out suite {}: {} checks{}",
+                    s.short(),
+                    s.suite.checks.len(),
+                    s.suite
+                        .limit
+                        .map(|l| format!(", at most {l} per change"))
+                        .unwrap_or_default()
+                );
+                for c in &s.suite.checks {
+                    if c.covers.is_empty() {
+                        println!("  {}  (every change)", c.id);
+                    } else {
+                        println!("  {}  covers {}", c.id, c.covers.join(", "));
+                    }
+                }
+            }
+            Ok(0)
+        }
+        HeldOutCmd::Select {
+            held_out,
+            submission,
+            repo,
+            config,
+            judge_config,
+            json,
+        } => {
+            let suite = heldout::load(&held_out, &repo)?;
+            let sub: Submission = serde_json::from_str(&std::fs::read_to_string(&submission)?)
+                .with_context(|| format!("{} is not a submission", submission.display()))?;
+            let policy = lanes_config(&repo, config.as_deref())?;
+            let chosen = heldout::choose(&policy, &sub.head, &suite.key, judge_config.as_deref())?;
+            let chosen = chosen.map(|(_, j, _)| j);
+            let reach = reach_of(&repo, &sub, Some(&suite), config.as_deref());
+            let limit = heldout::limit_for(Some(&suite.suite), chosen);
+            let selected =
+                heldout::select(Some(&suite.suite), policy.held_out.as_ref(), &reach, limit);
+            let not_selected = heldout::not_selected(Some(&suite.suite), &selected);
+            let judge = onus_lanes::judge::judge_id_for(&policy, chosen);
+            if json {
+                let out = serde_json::json!({
+                    "suite": suite.short(),
+                    "judge": judge,
+                    "reach": reach,
+                    "checks": selected.iter().map(|s| serde_json::json!({
+                        "id": s.check.id,
+                        "why": s.why,
+                        "with": s.with,
+                    })).collect::<Vec<_>>(),
+                    "notSelected": not_selected,
+                });
+                println!("{}", serde_json::to_string_pretty(&out)?);
+                return Ok(0);
+            }
+            println!("held-out suite {} · judge {judge}", suite.short());
+            let touched: Vec<&str> = reach.touched.iter().map(String::as_str).collect();
+            let pairs: Vec<String> = reach
+                .pairs
+                .iter()
+                .map(|(a, b)| format!("{a}+{b}"))
+                .collect();
+            println!(
+                "touched: {} · pairs: {}{}",
+                if touched.is_empty() {
+                    "none".into()
+                } else {
+                    touched.join(", ")
+                },
+                if pairs.is_empty() {
+                    "none".into()
+                } else {
+                    pairs.join(", ")
+                },
+                if reach.map == Some(false) {
+                    " (the head map could not be built)"
+                } else {
+                    ""
+                }
+            );
+            if selected.is_empty() {
+                println!("no held-out check covers this change");
+            }
+            for (i, s) in selected.iter().enumerate() {
+                let why = serde_json::to_value(s.why)?;
+                let with = if s.with.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", s.with.join(", "))
+                };
+                println!(
+                    "  {}. {}  {}{with}",
+                    i + 1,
+                    s.check.id,
+                    why.as_str().unwrap_or_default()
+                );
+            }
+            if !not_selected.is_empty() {
+                println!("not selected: {}", not_selected.join(", "));
+            }
+            Ok(0)
+        }
+    }
 }
 
 pub const RESULTS: &[&str] = &[

@@ -129,13 +129,17 @@ pub struct LanesConfig {
     /// `auto-merge` lane. Default 10.
     #[serde(default = "default_min_record")]
     pub min_record: u32,
-    /// Checks the author never saw, run by the judge in a container.
+    /// A check in onus.yaml; agents can read it. Prefer a suite given with
+    /// `--held-out`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub held_out: Option<CheckCommand>,
     /// An optional reviewer command for taste, run last by the judge. It can
     /// raise concerns that send the change to a person, never approve it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub taste: Option<TasteCommand>,
+    /// Judge configurations the judge rotates between (`onus help lanes`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub judges: Vec<JudgeConfig>,
     /// Built-in risk inputs; each can only raise a lane (`onus help lanes`).
     #[serde(default)]
     pub inputs: RiskInputs,
@@ -171,11 +175,27 @@ impl Default for LanesConfig {
             min_record: default_min_record(),
             held_out: None,
             taste: None,
+            judges: vec![],
             inputs: RiskInputs::default(),
             learned: None,
             rollout: None,
         }
     }
+}
+
+/// One judge configuration: the judge picks one per change, so an author
+/// cannot tune a change to a single reviewer (`onus help lanes`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct JudgeConfig {
+    /// A short name, shown in judgments and outcome summaries.
+    pub name: String,
+    /// The reviewer for taste under this configuration. Default `lanes.taste`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub taste: Option<TasteCommand>,
+    /// At most this many held-out checks per judgment. Default the suite's `limit`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_out_limit: Option<u32>,
 }
 
 /// A learned model that may raise a change's lane, never lower it
@@ -745,6 +765,23 @@ mod tests {
         assert!(p.get(Lane::AutoMerge).is_none() && p.get(Lane::Blocked).is_none());
         assert!(lanes(r#"{"rollout": {"blocked": {"strategy": "none"}}}"#).is_err());
         assert!(lanes(r#"{"rollout": {"judge": {"strategy": "big-bang"}}}"#).is_err());
+    }
+
+    #[test]
+    fn judge_configurations_are_written_by_name() {
+        assert!(lanes("{}").unwrap().judges.is_empty());
+        let l = lanes(
+            r#"{"judges": [{"name": "a"}, {"name": "b", "taste": {"command": ["./review.sh"]}, "heldOutLimit": 20}]}"#,
+        )
+        .unwrap();
+        assert_eq!(l.judges.len(), 2);
+        assert_eq!(l.judges[0].taste, None);
+        assert_eq!(l.judges[1].held_out_limit, Some(20));
+        assert!(lanes(r#"{"judges": [{"name": "a", "model": "x"}]}"#).is_err());
+        assert!(lanes(r#"{"judges": [{"taste": {"command": []}}]}"#).is_err());
+        // Left out when empty, so the policy's hash (the judge id) is unchanged.
+        let json = serde_json::to_string(&LanesConfig::default()).unwrap();
+        assert!(!json.contains("judges"), "{json}");
     }
 
     #[test]

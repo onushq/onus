@@ -21,3 +21,4 @@ Short records of decisions that are significant or hard to reverse. Propose a ne
 | [0015](0015-learned-lanes-only-raise.md) | A learned model that only raises a lane, read from the base commit | Accepted |
 | [0016](0016-production-signals-and-rollout.md) | Production signals in the records, a rollout plan per lane, and decisions Onus makes but never executes | Accepted |
 | [0017](0017-coverage-into-the-map.md) | Coverage into the map: changed lines tests ran, and how each test link is known | Accepted |
+| [0018](0018-held-out-suites-and-judge-rotation.md) | Held-out suites outside the repository, chosen from the map, and a rotating judge | Accepted |

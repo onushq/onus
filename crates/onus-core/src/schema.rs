@@ -4,6 +4,7 @@ use schemars::schema_for;
 
 use crate::change::SemanticReport;
 use crate::config::OnusConfig;
+use crate::held_out::HeldOutSuite;
 use crate::map::CodebaseMap;
 use crate::plugins::PluginsFile;
 use crate::protocol::PluginProtocol;
@@ -44,6 +45,10 @@ pub fn all_schemas() -> Vec<(&'static str, String)> {
         (
             "rollout-metrics.schema.json",
             serde_json::to_string_pretty(&schema_for!(RolloutMetrics)),
+        ),
+        (
+            "onus-held-out.schema.json",
+            serde_json::to_string_pretty(&schema_for!(HeldOutSuite)),
         ),
     ]
     .into_iter()

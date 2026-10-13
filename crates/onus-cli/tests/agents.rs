@@ -601,6 +601,102 @@ fn agents_hand_in_changes_and_ask_for_more_through_mcp() {
     assert!(msg.as_str().unwrap().contains("only answers questions"));
 }
 
+#[test]
+fn the_judge_never_shows_an_agent_its_held_out_checks() {
+    let repo = tempfile::tempdir().unwrap();
+    let r = repo.path();
+    copy_dir(&fixture().join("base"), r);
+    let mut yaml = std::fs::read_to_string(r.join("onus.yaml")).unwrap();
+    yaml.push_str(
+        "\nlanes:\n  default: judge\n  heldOut: { command: \"npm run secret-legacy\" }\n  judges:\n    - name: a\n    - name: b\n",
+    );
+    std::fs::write(r.join("onus.yaml"), yaml).unwrap();
+    git(r, &["init", "-q", "-b", "main"]);
+    git(r, &["add", "-A"]);
+    git(r, &["commit", "-q", "-m", "base"]);
+    git(r, &["checkout", "-q", "-b", "feature/extra"]);
+    std::fs::write(
+        r.join("services/orders/src/extra.ts"),
+        "export const EXTRA = 1;\n",
+    )
+    .unwrap();
+    git(r, &["add", "-A"]);
+    git(r, &["commit", "-q", "-m", "extra"]);
+    let suite = tempfile::tempdir().unwrap();
+    std::fs::write(
+        suite.path().join("held-out.yaml"),
+        "version: 1\nchecks:\n  - { id: orders-secret-check, command: \"npm run hidden-thing\", covers: [orders] }\n",
+    )
+    .unwrap();
+    let mut mcp = Mcp::start_with(r, &["--held-out", suite.path().to_str().unwrap()]);
+
+    // The policy says there are held-out checks, never what they run.
+    let (failed, policy) = mcp.tool("onus_lanes", serde_json::json!({}));
+    assert!(!failed, "{policy}");
+    assert_eq!(policy["policy"]["heldOut"], "configured", "{policy}");
+    assert!(policy.get("heldOutSuite").is_none(), "{policy}");
+    assert!(!policy.to_string().contains("secret-legacy"), "{policy}");
+    assert_eq!(policy["judges"][0]["name"], "a", "{policy}");
+
+    let (failed, sub) = mcp.tool(
+        "onus_submit",
+        serde_json::json!({
+            "base": "main",
+            "head": "feature/extra",
+            "intent": "summary: An extra constant\ntouches: [orders]",
+        }),
+    );
+    assert!(!failed, "{sub}");
+    let id = sub["id"].as_str().unwrap().to_string();
+    // Without evidence the judge rejects first: no container engine needed.
+    let (failed, judged) = mcp.tool("onus_judge", serde_json::json!({ "id": id }));
+    assert!(!failed, "{judged}");
+    assert_eq!(judged["judgment"]["verdict"], "reject", "{judged}");
+    assert!(judged.get("heldOut").is_none(), "{judged}");
+    assert_eq!(judged["judgment"]["heldOut"]["selected"], 2, "{judged}");
+    let text = judged.to_string();
+    for secret in ["orders-secret-check", "hidden-thing", "secret-legacy"] {
+        assert!(!text.contains(secret), "{secret} in {text}");
+    }
+    // Nor which configuration judged: the policy's id, the same for each.
+    assert!(judged["judgment"].get("rotation").is_none(), "{judged}");
+    assert_eq!(judged["judgment"]["judge"], policy["judge"], "{judged}");
+    assert!(!text.contains("a@") && !text.contains("b@"), "{text}");
+    // A person reads what was chosen, and by which, beside the judgment.
+    let kept =
+        std::fs::read_to_string(r.join(format!(".onus/submissions/{id}.held-out.json"))).unwrap();
+    assert!(kept.contains("orders-secret-check"), "{kept}");
+    let kept: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(r.join(format!(".onus/submissions/{id}.judgment.json"))).unwrap(),
+    )
+    .unwrap();
+    let config = kept["judgment"]["rotation"]["config"].as_str().unwrap();
+    assert!(
+        kept["judgment"]["judge"]
+            .as_str()
+            .unwrap()
+            .starts_with(&format!("{config}@")),
+        "{kept}"
+    );
+
+    // A suite inside the worktree refuses to start.
+    let inside = r.join("held-out");
+    std::fs::create_dir_all(&inside).unwrap();
+    std::fs::copy(
+        suite.path().join("held-out.yaml"),
+        inside.join("held-out.yaml"),
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_onus"))
+        .current_dir(r)
+        .args(["mcp", "--held-out", inside.to_str().unwrap()])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("inside the repository"));
+}
+
 /// A key pair and a token for `plan`, minted with the binary.
 fn task_token(plan: &str) -> (tempfile::TempDir, String, std::path::PathBuf) {
     let keys = tempfile::tempdir().unwrap();

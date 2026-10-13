@@ -174,7 +174,7 @@ Folders named .git, .onus (where Onus keeps its records), node_modules, dist, bu
 
 ## lanes
 
-What happens to a change after it is reported: the default lane, rules that set or raise it, the built-in risk inputs, a learned model that may raise it, the shares of automatic merges a person audits before and after merging, the record an agent setup needs before it may auto-merge, held-out checks and an optional taste reviewer for the judge, and how each lane's changes meet production traffic. See `onus help lanes` and `onus help production`.
+What happens to a change after it is reported: the default lane, rules that set or raise it, the built-in risk inputs, a learned model that may raise it, the shares of automatic merges a person audits before and after merging, the record an agent setup needs before it may auto-merge, an optional taste reviewer and the configurations the judge rotates between, and how each lane's changes meet production traffic. See `onus help lanes` and `onus help production`.
 
     lanes:
       default: judge          # auto-merge, judge, human or blocked
@@ -184,7 +184,11 @@ What happens to a change after it is reported: the default lane, rules that set 
       rules:
         - { lane: auto-merge, match: every, kinds: [internal], components: [docs] }
         - { lane: human, subkinds: [migration-changed] }
-      heldOut: { command: "npm run test:held-out", image: "node:22", setup: "npm ci" }
+      judges:                                  # one judges each change; optional
+        - name: default                        # uses lanes.taste
+        - name: strict
+          taste: { command: [./scripts/review-strict.sh] }
+          heldOutLimit: 20                     # at most this many held-out checks
       inputs:                                  # each key optional; these are the defaults
         blastRadius: { judge: 3 }              # other components that depend on a row
         tests: { untested: judge }             # code no test or trace reaches
@@ -210,6 +214,8 @@ What happens to a change after it is reported: the default lane, rules that set 
 Inputs only raise a lane. A threshold of N means N or more, and the highest lane whose threshold is met applies (`judge`, `human`, `blocked`). Writing a key replaces its default as a whole: `blastRadius: { human: 10 }` has no judge threshold, and `blastRadius: {}` turns the input off. A lane of `auto-merge` turns `tests` or `confidence` off. Thresholds are at least 1 and must not go down as the lane goes up; `history.days` is 1 to 3650.
 
 `coverage` reads the report's coverage of the head (`onus help reports`): when tests ran less than `minChanged` (a share from 0 to 1) of the changed executable lines, the change goes to the judge. So does a change to a file with runtime code that the coverage leaves out (`notMeasured`): coverage of other files cannot let it through. With `required: true`, a change without coverage goes to the judge too. A change with no changed executable lines, and no changed file the coverage leaves out, passes. Coverage given with `--coverage` counts. Coverage an environment recorded counts only when its run's command is one of `commands`, written exactly as `onus env run` ran it: an agent picks the commands it runs, and one could write a coverage file. When the report holds recorded coverage from another command, the change goes to the judge, whatever `required` says: an extra run must not hide an honest one. The input runs only while the change would auto-merge.
+
+Held-out checks live outside the repository, in a suite given with `--held-out` (`onus help lanes`). `heldOut: { command, image, setup }` still works as one check, but agents can read onus.yaml. `judges` names must be unique, without `@` or spaces; the judge picks one per change, and an empty list turns rotation off.
 
 The learned model also only raises a lane, and never to `blocked`. Its thresholds need `0 < judge <= human <= 1`, and the model file's name must end in `lanes-model.json`, so a change to it is a rule of the game and goes to a person.
 

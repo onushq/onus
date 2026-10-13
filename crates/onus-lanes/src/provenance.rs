@@ -852,6 +852,8 @@ mod tests {
             }],
             reasons: vec![],
             judge: "j1".into(),
+            rotation: None,
+            held_out: None,
         }
     }
 

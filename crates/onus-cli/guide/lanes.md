@@ -115,29 +115,85 @@ When it does not raise, `learned` still holds the risk and its top factors, and 
       rules:
         - { lane: auto-merge, match: every, kinds: [internal], components: [docs] }
         - { lane: human, subkinds: [migration-changed, route-added] }
-      heldOut:
-        command: npm run test:held-out
-        image: node:22
-        setup: npm ci
       taste:
         command: [./scripts/review.sh]
+      judges:
+        - name: claude-reviewer                         # uses taste above
+        - name: gpt-reviewer
+          taste: { command: [./scripts/review-gpt.sh] }
+        - name: strict
+          heldOutLimit: 20
 
-A rule matches a row by `kinds`, `subkinds`, `components` and `labels` (an empty list matches anything). `onus help changes` lists the kinds and subkinds.
+A rule matches a row by `kinds`, `subkinds`, `components` and `labels` (an empty list matches anything). `onus help changes` lists the kinds and subkinds. Held-out checks are not in the policy: they live outside the repository (below).
 
 ## The judge
 
     onus judge --submission submission.json      # exit 0 approve, 2 reject, 3 escalate
+    onus judge --submission submission.json --held-out ~/acme-held-out/shop
 
-It verifies first and judges taste last, and stops being lenient at the first failure:
+It verifies first and judges taste last, and stops at the first failure:
 
-1. **Evidence:** each test run in the submission is run again at the head commit in a fresh container; a run that passed for the author must pass again. A run made in an environment (`onus env run`) names its manifest, and must match it: recorded at the head commit, with the same command and exit code (`onus help environments`).
+1. **Evidence:** each test run in the submission is run again at the head commit in a fresh container; a run that passed for the author must pass again. A run made in an environment (`onus env run`) names its manifest, and must match it: recorded at the head commit, with the same command and exit code (`onus help environments`). The first run that fails stops the step; the rest are not re-run.
 2. **Intent:** an intent must be stated, and no row may fall outside it.
 3. **Contracts:** no breaking contract changes and no boundary-rule violations.
 4. **Tests:** no weakened tests without a person's approval.
-5. **Held-out checks:** `heldOut.command` runs in a container at the head commit. Keep it out of the agent's read scope (`onus help scopes`); a failure is reported without its output.
+5. **Held-out checks:** checks the author never saw, from a suite outside the repository, chosen from the map for this change (below). They run in order, most relevant first, up to the first failure. The author sees only counts and `a held-out check failed (exit N)`: never a check's id, command or output.
 6. **Taste (optional):** `taste.command` gets the submission as JSON on stdin and prints `concern: …` lines. Concerns send the change to a person; taste can never approve, and it runs only when everything else passed. Onus itself calls no model.
 
+Once a step fails, every later step is `skipped` with `not reached: <step> failed`, and no more containers start. So `reasons` holds one failing step's reasons: the first thing to fix. Run `onus_check` (or `onus query check`) before submitting for the whole checklist.
+
 The verdict is `approve`, `reject` with reasons the agent can act on, or `escalate` to a person. A change in the `human` lane is escalated even when every check passes; a `blocked` change is rejected.
+
+### Held-out suites
+
+A suite is a directory holding `held-out.yaml` and the files its checks need. Keep it outside the repository: in a private repository, a CI secret or Onus Cloud. The judge refuses a suite inside the repository's worktree, where the author could read it.
+
+    version: 1
+    image: node:22-alpine        # default image for checks (default node:22)
+    setup: npm ci                # default setup, run with network and without the suite
+    limit: 6                     # at most this many checks per change, most relevant first
+    checks:
+      - id: sms-respects-opt-out
+        command: node --test /held-out/sms-opt-out.test.mjs
+        covers: [notifications, user-preferences]
+      - id: send-sms-unit
+        command: node --test /held-out/send-sms.test.mjs
+        covers: ["notifications:src/sms.ts#sendSms"]
+      - id: smoke
+        command: npm run build   # no covers: runs for every change
+
+Each check runs in a container at the head commit with no network, the repository at `/work` (the working directory) and the suite at `/held-out`. The suite is copied into the test container only, never into the setup container, which has network. Ids are unique slugs; unknown fields are refused.
+
+Give it to the judge with `--held-out DIR` or `ONUS_HELD_OUT`: on `onus judge`, `onus ci pr`, `onus ui` and `onus mcp` (for `onus_judge`). Two commands help people write one, without a container engine:
+
+    onus held-out check ~/acme-held-out/shop --repo .              # valid? its hash, ids and covers
+    onus held-out select --held-out ~/acme-held-out/shop --submission sub.json   # what would run, and why
+
+**Chosen from the map.** The judge works out what the change reaches in the head map: the components of its rows and of the files git says changed (`touched`), its rows' subjects, and the pairs of components that interact with at least one side touched: a code dependency either way (a file import counts, so a change that breaks the symbols between two components still pairs them), or one publishes an event the other consumes. A `covers` entry is a component id, or a map id standing for its component; `event:` and `db-table:` ids count only as subjects. A check is chosen for its best reason:
+
+| reason | when |
+|---|---|
+| `combination` | two components it covers form a pair: the cross-feature test an author's own suite rarely has |
+| `subject` | a map id it covers is a row's subject, or the module of one |
+| `touched` | it covers a touched component |
+| `always` | it covers nothing (and `lanes.heldOut`) |
+| `neighbour` | it covers a component that interacts with a touched one |
+
+Within a reason checks keep their order in the file. The configuration's `heldOutLimit`, else the suite's `limit`, cuts the list. The head map is built only when some check has `covers`, with the same onus.yaml as the lanes; if it cannot be built, the rows alone decide, and the report says `"map": false`.
+
+**Who sees what.** The judgment carries `heldOut: {suite, selected, ran, passed}`, safe for the author. What each check did (`why`, `with`, status, exit code and output) is for people: `onus judge --show-held-out`, `held-out.json` beside `judgment.json` from `onus ci pr`, and the lanes page of `onus ui`. No agent tool returns it, and `onus_lanes` shows only that held-out checks are configured. When a check cannot run at all (an image that will not pull, say), the author reads only that the held-out checks could not run; the error is in the report.
+
+**The honest limit.** On a machine where an agent has a shell, a suite is only as hidden as that machine's file permissions. So is the report: `onus ui` and `onus mcp` keep it as `.onus/submissions/<id>.held-out.json` in the worktree, where such an agent can read it. Real secrecy comes from where the suite lives and where the judge runs: a CI secret, a private repository cloned with its own token, or Onus Cloud.
+
+`lanes.heldOut` in onus.yaml still works, as one check with id `lanes.heldOut` that runs for every change. Agents can read onus.yaml, so `onus judge` notes it on stderr; prefer a suite.
+
+### Judge configurations
+
+With `lanes.judges` set, one configuration judges each change. Each has a `name`, and optionally its own `taste` reviewer (default `lanes.taste`) and `heldOutLimit`. The rotation picks one from a hash of the head commit and the suite's full hash, so an author who cannot read the suite cannot predict which configuration will judge a commit. Without a suite the choice is predictable from the head commit.
+
+The judgment records `rotation: {config, index, of, forced}`, and its judge id is `<name>@<hash>`, so outcome records and `onus outcomes summary`'s `byJudge` track each configuration by name. `onus judge --judge-config <name>` (and the lanes page of `onus ui`) forces one, for example to judge an audited change again under another configuration; that is recorded as `forced: true`. Agents cannot choose. Without `judges` nothing changes, and the judge id stays the policy's hash.
+
+Agents do not see which configuration judged. `onus_judge` leaves out `rotation`, and its judge id is the policy's hash, the same for every configuration; the judgment kept beside the submission has both, for people. Otherwise an agent could amend its commit, judge it again, and repeat until a lenient configuration came up. That is the limit: an author who sees the configuration can still shop by amending. `lane.md` from `onus ci pr` names it, so in CI an author who reads the pull-request comment can push again until it likes the one it gets, and on a machine where an agent has a shell, it can read the kept judgment. What still holds there is the record: `byJudge` shows what each configuration let through, so a lenient one shows up in its reverts, incidents and audit misses.
 
 ## Outcomes
 
@@ -149,7 +205,7 @@ The GitHub Action keeps these records for you with `records: true`: outcomes whe
 
 Pass `--component <id>` (repeatable) to name the components the change touched, for the history input, and `--classification <file>` to keep the change's features for the learned model. `onus ci pr` records them from the report, and `onus ci closed`, reverts and incidents keep them.
 
-The summary gives each agent setup its record, and each judge configuration its record of the changes it decided (a verdict on record): merged, reverted, incidents, audited, missed. It also gives the share of changes in the human lane (the review budget), and the miss rate of human audits of automatic approvals, the number that says whether the automatic lanes can be trusted. A judge configuration id is a hash of the lane policy and the Onus version, so changing either starts a new record: that is how configurations are rotated and compared.
+The summary gives each agent setup its record, and each judge configuration its record of the changes it decided (a verdict on record): merged, reverted, incidents, audited, missed. It also gives the share of changes in the human lane (the review budget), and the miss rate of human audits of automatic approvals, the number that says whether the automatic lanes can be trusted. A judge configuration id is a hash of the lane policy and the Onus version, so changing either starts a new record; with `lanes.judges`, each configuration keeps its own record as `<name>@<hash>`.
 
 ## Audits after merge
 

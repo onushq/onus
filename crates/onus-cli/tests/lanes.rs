@@ -41,21 +41,21 @@ fn git(dir: &Path, args: &[&str]) {
     assert!(ok, "git {args:?}");
 }
 
-const POLICY: &str = "\nlanes:\n  default: judge\n  auditRate: 0\n  minRecord: 0\n  rules:\n    - { lane: auto-merge, match: every, kinds: [internal], components: [logger] }\n    - { lane: human, subkinds: [migration-changed] }\n  heldOut: { command: \"node --test held-out/*.test.mjs\", image: \"node:22-alpine\" }\n";
+const POLICY: &str = "\nlanes:\n  default: judge\n  auditRate: 0\n  minRecord: 0\n  rules:\n    - { lane: auto-merge, match: every, kinds: [internal], components: [logger] }\n    - { lane: human, subkinds: [migration-changed] }\n";
 
 fn repo() -> tempfile::TempDir {
+    repo_with(POLICY)
+}
+
+/// The shop with `policy` appended to its onus.yaml. Held-out suites are
+/// kept outside it, where the author cannot read them.
+fn repo_with(policy: &str) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     let r = dir.path();
     copy_dir(&fixture().join("base"), r);
     let mut yaml = std::fs::read_to_string(r.join("onus.yaml")).unwrap();
-    yaml.push_str(POLICY);
+    yaml.push_str(policy);
     std::fs::write(r.join("onus.yaml"), yaml).unwrap();
-    std::fs::create_dir_all(r.join("held-out")).unwrap();
-    std::fs::write(
-        r.join("held-out/check.test.mjs"),
-        "import test from 'node:test';\ntest('held out', () => {});\n",
-    )
-    .unwrap();
     git(r, &["init", "-q", "-b", "main"]);
     git(r, &["add", "-A"]);
     git(r, &["commit", "-q", "-m", "base"]);
@@ -112,11 +112,7 @@ fn changes_take_the_lane_their_rows_and_floors_decide() {
     let dir = repo();
     let r = dir.path();
     // Only logger internals: the policy lets it auto-merge.
-    let logger = std::fs::read_to_string(r.join("packages/logger/src/logger.ts")).unwrap();
-    let logger = format!(
-        "{logger}\nfunction redact(message: string): string {{\n  return message.replace(/[0-9]+/g, '#');\n}}\nvoid redact;\n"
-    );
-    change(r, "logger", &[("packages/logger/src/logger.ts", &logger)]);
+    logger_change(r);
     let c = lane_of(r, "logger");
     assert_eq!(c["lane"], "auto-merge", "{c}");
 
@@ -140,35 +136,49 @@ fn changes_take_the_lane_their_rows_and_floors_decide() {
     let c = lane_of(r, "secret");
     assert_eq!(c["lane"], "blocked", "{c}");
 
-    // The judge: without evidence or intent it rejects with reasons the
-    // agent can act on.
+    // The judge: without evidence or intent it rejects with the first thing
+    // the agent can act on, and stops there.
     let logger_sub = out(r, "logger.json");
     let (code, verdict, err) = onus(r, &["judge", "--submission", &logger_sub]);
     assert_eq!(code, 2, "{verdict}\n{err}");
+    let j: serde_json::Value = serde_json::from_str(&verdict).unwrap();
+    let reasons = j["judgment"]["reasons"].as_array().unwrap();
+    assert_eq!(reasons.len(), 1, "{verdict}");
     assert!(
-        verdict.contains("no test evidence") && verdict.contains("no stated intent"),
+        reasons[0].as_str().unwrap().contains("no test evidence"),
         "{verdict}"
     );
+    assert!(!verdict.contains("no stated intent"), "{verdict}");
 
     // With evidence and intent, and a container engine to verify with, it
-    // re-runs the evidence and the held-out checks and approves.
+    // re-runs the evidence and approves.
     if onus_doors::runner::engine().is_err() {
         return;
     }
+    submit_with_evidence(r, "logger", &logger_sub);
+    let (code, verdict, err) = onus(r, &["judge", "--submission", &logger_sub]);
+    assert_eq!(code, 0, "{verdict}\n{err}");
+    let j: serde_json::Value = serde_json::from_str(&verdict).unwrap();
+    assert_eq!(j["judgment"]["verdict"], "approve", "{j}");
+}
+
+/// Submits `branch` as `sub` with an intent about the logger and a test run
+/// at its head as evidence. Needs a container engine.
+fn submit_with_evidence(r: &Path, branch: &str, sub: &str) {
     let (code, run, err) = onus(
         r,
         &[
             "run-test",
             "--reference",
-            "logger",
+            branch,
             "--image",
             "node:22-alpine",
             "--",
-            "node --test held-out/*.test.mjs",
+            "test -f package.json",
         ],
     );
     assert_eq!(code, 0, "{run}\n{err}");
-    let run_file = out(r, "run.json");
+    let run_file = out(r, &format!("{branch}-run.json"));
     let intent_file = out(r, "intent.yaml");
     std::fs::write(&run_file, &run).unwrap();
     std::fs::write(
@@ -183,7 +193,7 @@ fn changes_take_the_lane_their_rows_and_floors_decide() {
             "--base",
             "main",
             "--head",
-            "logger",
+            branch,
             "--intent",
             &intent_file,
             "--evidence",
@@ -191,14 +201,239 @@ fn changes_take_the_lane_their_rows_and_floors_decide() {
             "--agent-tool",
             "test",
             "--out",
-            &logger_sub,
+            sub,
         ],
     );
     assert_eq!(code, 0, "{err}");
-    let (code, verdict, err) = onus(r, &["judge", "--submission", &logger_sub]);
-    assert_eq!(code, 0, "{verdict}\n{err}");
-    let j: serde_json::Value = serde_json::from_str(&verdict).unwrap();
-    assert_eq!(j["judgment"]["verdict"], "approve", "{j}");
+}
+
+/// A logger-only change on the branch `logger`.
+fn logger_change(r: &Path) {
+    let logger = std::fs::read_to_string(r.join("packages/logger/src/logger.ts")).unwrap();
+    let logger = format!(
+        "{logger}\nfunction redact(message: string): string {{\n  return message.replace(/[0-9]+/g, '#');\n}}\nvoid redact;\n"
+    );
+    change(r, "logger", &[("packages/logger/src/logger.ts", &logger)]);
+}
+
+/// A suite in a directory of its own: `held-out.yaml` and a marker file.
+fn suite(yaml: &str) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("held-out.yaml"), yaml).unwrap();
+    std::fs::write(dir.path().join("marker"), "").unwrap();
+    dir
+}
+
+/// Three checks: one about the logger, one about user-preferences (which
+/// does not interact with the logger in the shop, while billing does), and
+/// one for every change. `logger` is the logger check's command.
+fn suite_yaml(logger: &str, setup: Option<&str>) -> String {
+    format!(
+        "version: 1\nimage: node:22-alpine\n{}checks:\n  - id: logger-format\n    command: {logger:?}\n    covers: [logger]\n  - id: prefs-only\n    command: \"false\"\n    covers: [user-preferences]\n  - id: smoke\n    command: \"test -d /held-out\"\n",
+        setup.map(|s| format!("setup: {s:?}\n")).unwrap_or_default()
+    )
+}
+
+#[test]
+fn held_out_suites_live_outside_and_follow_the_map() {
+    let dir = repo();
+    let r = dir.path();
+    logger_change(r);
+    let sub = out(r, "logger.json");
+    let (code, _, err) = onus(
+        r,
+        &[
+            "submit",
+            "--base",
+            "main",
+            "--head",
+            "logger",
+            "--agent-tool",
+            "test",
+            "--out",
+            &sub,
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    let passing = suite(&suite_yaml(
+        "test -f /held-out/marker && test -f /work/package.json",
+        None,
+    ));
+    let s = passing.path().to_str().unwrap();
+
+    // The suite checks out, with its hash.
+    let (code, checked, err) = onus(r, &["held-out", "check", s, "--json"]);
+    assert_eq!(code, 0, "{err}");
+    let checked: serde_json::Value = serde_json::from_str(&checked).unwrap();
+    assert_eq!(checked["suite"].as_str().unwrap().len(), 12, "{checked}");
+    assert_eq!(checked["checks"].as_array().unwrap().len(), 3, "{checked}");
+    // Only the short hash: the full one is what makes the rotation unpredictable.
+    assert!(checked.get("key").is_none(), "{checked}");
+
+    // Inside the repository, the author could read it.
+    let inside = r.join("held-out");
+    std::fs::create_dir_all(&inside).unwrap();
+    std::fs::write(inside.join("held-out.yaml"), suite_yaml("true", None)).unwrap();
+    let (code, stdout, err) = onus(
+        r,
+        &[
+            "judge",
+            "--submission",
+            &sub,
+            "--held-out",
+            inside.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 1, "{stdout}\n{err}");
+    assert!(err.contains("inside the repository"), "{err}");
+    let (code, _, err) = onus(
+        r,
+        &["held-out", "check", inside.to_str().unwrap(), "--repo", "."],
+    );
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("inside the repository"), "{err}");
+    std::fs::remove_dir_all(&inside).unwrap();
+
+    // The map picks the logger's check and the untagged one; user-preferences
+    // has nothing to do with the logger.
+    let (code, picked, err) = onus(
+        r,
+        &[
+            "held-out",
+            "select",
+            "--held-out",
+            s,
+            "--submission",
+            &sub,
+            "--json",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    let picked: serde_json::Value = serde_json::from_str(&picked).unwrap();
+    let ids: Vec<&str> = picked["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["logger-format", "smoke"], "{picked}");
+    assert_eq!(picked["checks"][0]["why"], "touched", "{picked}");
+    assert_eq!(picked["notSelected"], serde_json::json!(["prefs-only"]));
+    assert_eq!(picked["reach"]["map"], true, "{picked}");
+
+    if onus_doors::runner::engine().is_err() {
+        return;
+    }
+    submit_with_evidence(r, "logger", &sub);
+    // Both checks see the suite and the tree.
+    let (code, stdout, err) = onus(r, &["judge", "--submission", &sub, "--held-out", s]);
+    assert_eq!(code, 0, "{stdout}\n{err}");
+    let j: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(j["judgment"]["heldOut"]["ran"], 2, "{j}");
+    assert_eq!(j["judgment"]["heldOut"]["passed"], 2, "{j}");
+    assert!(j.get("heldOut").is_none(), "{j}");
+
+    // A failing check rejects without naming itself.
+    let failing = suite(&suite_yaml("test -f /held-out/missing", None));
+    let f = failing.path().to_str().unwrap();
+    let (code, stdout, err) = onus(r, &["judge", "--submission", &sub, "--held-out", f]);
+    assert_eq!(code, 2, "{stdout}\n{err}");
+    let j: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(
+        j["judgment"]["reasons"],
+        serde_json::json!(["held-out: a held-out check failed (exit 1)"])
+    );
+    for id in ["logger-format", "prefs-only", "smoke", "/held-out/missing"] {
+        assert!(!stdout.contains(id), "{id} in {stdout}");
+    }
+    // People can ask what ran.
+    let (code, stdout, _) = onus(
+        r,
+        &[
+            "judge",
+            "--submission",
+            &sub,
+            "--held-out",
+            f,
+            "--show-held-out",
+        ],
+    );
+    assert_eq!(code, 2);
+    let j: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(j["heldOut"]["checks"][0]["id"], "logger-format", "{j}");
+    assert_eq!(j["heldOut"]["checks"][0]["status"], "failed", "{j}");
+    assert_eq!(j["heldOut"]["checks"][1]["status"], "not-run", "{j}");
+
+    // The setup runs with network, and never sees the suite.
+    let setup = suite(&suite_yaml(
+        "test -f /held-out/marker",
+        Some("test ! -e /held-out"),
+    ));
+    let (code, stdout, err) = onus(
+        r,
+        &[
+            "judge",
+            "--submission",
+            &sub,
+            "--held-out",
+            setup.path().to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{stdout}\n{err}");
+}
+
+#[test]
+fn judges_rotate_and_are_recorded() {
+    let dir = repo_with(&format!(
+        "{POLICY}  judges:\n    - name: a\n    - name: b\n      heldOutLimit: 1\n"
+    ));
+    let r = dir.path();
+    logger_change(r);
+    let sub = out(r, "logger.json");
+    let (code, _, err) = onus(
+        r,
+        &[
+            "submit",
+            "--base",
+            "main",
+            "--head",
+            "logger",
+            "--agent-tool",
+            "test",
+            "--out",
+            &sub,
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    // Without evidence the judge rejects at once: no container engine needed.
+    let judged = |extra: &[&str]| -> serde_json::Value {
+        let mut args = vec!["judge", "--submission", sub.as_str()];
+        args.extend(extra);
+        let (code, stdout, err) = onus(r, &args);
+        assert_eq!(code, 2, "{stdout}\n{err}");
+        serde_json::from_str::<serde_json::Value>(&stdout).unwrap()["judgment"].clone()
+    };
+    let first = judged(&[]);
+    let again = judged(&[]);
+    let config = first["rotation"]["config"].as_str().unwrap().to_string();
+    assert!(config == "a" || config == "b", "{first}");
+    assert_eq!(first["rotation"], again["rotation"]);
+    assert_eq!(first["rotation"]["forced"], false);
+    assert_eq!(first["rotation"]["of"], 2);
+    assert!(
+        first["judge"]
+            .as_str()
+            .unwrap()
+            .starts_with(&format!("{config}@")),
+        "{first}"
+    );
+    let forced = judged(&["--judge-config", "b"]);
+    assert_eq!(forced["rotation"]["config"], "b");
+    assert_eq!(forced["rotation"]["forced"], true);
+    assert!(forced["judge"].as_str().unwrap().starts_with("b@"));
+    let (code, _, err) = onus(r, &["judge", "--submission", &sub, "--judge-config", "c"]);
+    assert_eq!(code, 1);
+    assert!(err.contains("no judge configuration `c`"), "{err}");
 }
 
 #[test]

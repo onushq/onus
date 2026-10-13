@@ -721,6 +721,127 @@ fn a_judged_pull_request_records_the_judge_that_decided() {
 }
 
 #[test]
+fn a_held_out_report_goes_beside_the_judgment_for_people() {
+    let tmp = tempfile::tempdir().unwrap();
+    let t = tmp.path();
+    let r = t.join("shop");
+    copy_dir(&fixture().join("base"), &r);
+    let mut yaml = std::fs::read_to_string(r.join("onus.yaml")).unwrap();
+    yaml.push_str(
+        "\nlanes:\n  default: judge\n  auditRate: 0\n  minRecord: 0\n  judges:\n    - name: a\n    - name: b\n",
+    );
+    std::fs::write(r.join("onus.yaml"), yaml).unwrap();
+    git(&r, &["init", "-q", "-b", "main"]);
+    git(&r, &["add", "-A"]);
+    git(&r, &["commit", "-q", "-m", "base"]);
+    git(&r, &["checkout", "-q", "-b", "codex/extra"]);
+    std::fs::write(
+        r.join("services/orders/src/extra.ts"),
+        "export const EXTRA = 1;\n",
+    )
+    .unwrap();
+    git(&r, &["add", "-A"]);
+    git(&r, &["commit", "-q", "-m", "An extra constant"]);
+    let suite = t.join("suite");
+    std::fs::create_dir_all(&suite).unwrap();
+    std::fs::write(
+        suite.join("held-out.yaml"),
+        "version: 1\nchecks:\n  - { id: orders-money, command: \"true\", covers: [orders, money] }\n  - { id: smoke, command: \"true\" }\n",
+    )
+    .unwrap();
+    let rec = t.join("records");
+    let out = t.join("out");
+    let pr = |held_out: &Path, judge: bool| {
+        let mut args = vec![
+            "ci",
+            "pr",
+            "--base",
+            "main",
+            "--head",
+            "codex/extra",
+            "--change",
+            "acme/shop#6",
+            "--records",
+            rec.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+            "--held-out",
+            held_out.to_str().unwrap(),
+        ];
+        if judge {
+            args.push("--judge");
+        }
+        Command::new(env!("CARGO_BIN_EXE_onus"))
+            .current_dir(&r)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    // Without evidence the judge rejects before the held-out checks: no
+    // container engine is needed.
+    let done = pr(&suite, true);
+    assert!(
+        done.status.success(),
+        "{}",
+        String::from_utf8_lossy(&done.stderr)
+    );
+    let judgment: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(out.join("judgment.json")).unwrap()).unwrap();
+    let report: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(out.join("held-out.json")).unwrap()).unwrap();
+    let config = judgment["rotation"]["config"].as_str().unwrap();
+    assert!(
+        judgment["judge"]
+            .as_str()
+            .unwrap()
+            .starts_with(&format!("{config}@")),
+        "{judgment}"
+    );
+    assert_eq!(report["judge"], judgment["judge"]);
+    assert_eq!(judgment["heldOut"]["selected"], 2, "{judgment}");
+    assert_eq!(judgment["heldOut"]["ran"], 0, "{judgment}");
+    assert_eq!(report["checks"][0]["id"], "orders-money", "{report}");
+    assert_eq!(report["checks"][0]["why"], "combination", "{report}");
+    assert_eq!(report["checks"][0]["status"], "not-run", "{report}");
+    // The pull record keeps the configuration that decided.
+    let pulls = lines(&rec.join("pulls.jsonl"));
+    assert_eq!(pulls[0]["judge"], judgment["judge"], "{:?}", pulls[0]);
+    // The comment names the configuration, never a check.
+    let md = std::fs::read_to_string(out.join("lane.md")).unwrap();
+    assert!(md.contains(&format!("configuration `{config}`")), "{md}");
+    assert!(
+        !md.contains("orders-money") && !md.contains("smoke"),
+        "{md}"
+    );
+    for f in ["judgment.json", "provenance.json", "submission.json"] {
+        let text = std::fs::read_to_string(out.join(f)).unwrap();
+        assert!(!text.contains("orders-money"), "{f}: {text}");
+    }
+
+    // Without --judge nothing decided: no report, no judge on record.
+    std::fs::remove_dir_all(&out).unwrap();
+    assert!(pr(&suite, false).status.success());
+    assert!(!out.join("held-out.json").exists());
+    let pulls = lines(&rec.join("pulls.jsonl"));
+    assert!(pulls[1].get("judge").is_none(), "{:?}", pulls[1]);
+
+    // A suite inside the repository fails the run.
+    std::fs::create_dir_all(r.join("held-out")).unwrap();
+    std::fs::copy(
+        suite.join("held-out.yaml"),
+        r.join("held-out/held-out.yaml"),
+    )
+    .unwrap();
+    let failed = pr(&r.join("held-out"), true);
+    assert_eq!(failed.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&failed.stderr).contains("inside the repository"),
+        "{}",
+        String::from_utf8_lossy(&failed.stderr)
+    );
+}
+
+#[test]
 fn a_human_lane_change_waits_for_a_persons_review() {
     let tmp = tempfile::tempdir().unwrap();
     let t = tmp.path();

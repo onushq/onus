@@ -158,6 +158,17 @@ pub fn validate(config: &OnusConfig) -> Result<(), MapError> {
                 );
             }
         }
+        let mut names = std::collections::BTreeSet::new();
+        for j in &lanes.judges {
+            if j.name.trim().is_empty() || j.name.contains(['@', ' ']) {
+                problems.push(format!(
+                    "lanes.judges: the name `{}` may not be empty or contain `@` or spaces",
+                    j.name
+                ));
+            } else if !names.insert(j.name.as_str()) {
+                problems.push(format!("lanes.judges: the name `{}` is used twice", j.name));
+            }
+        }
         if let Some(policy) = &lanes.rollout {
             for lane in [Lane::AutoMerge, Lane::Judge, Lane::Human] {
                 if let Some(r) = policy.get(lane) {

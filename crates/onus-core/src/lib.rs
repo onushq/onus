@@ -8,6 +8,7 @@
 pub mod change;
 pub mod config;
 pub mod hash;
+pub mod held_out;
 pub mod ids;
 pub mod implementations;
 pub mod map;
@@ -23,6 +24,7 @@ pub mod signal;
 
 pub use change::*;
 pub use config::*;
+pub use held_out::*;
 pub use map::*;
 pub use provider::{
     DiscoveryProvider, FactProvider, LanguageAdapter, PartialMap, ProviderError, Workspace,

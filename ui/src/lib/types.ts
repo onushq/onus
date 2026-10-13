@@ -388,6 +388,33 @@ export interface Judgment {
 	steps: Step[];
 	reasons: string[];
 	judge: string;
+	/** The configuration from lanes.judges that judged, when there are any. */
+	rotation?: { config: string; index: number; of: number; forced: boolean } | null;
+	/** The held-out step in counts; it never names a check. */
+	heldOut?: { suite?: string; selected: number; ran: number; passed: number } | null;
+}
+
+/** What the held-out checks did, for people only (`<id>.held-out.json`). */
+export interface HeldOutReport {
+	suite: string;
+	judge: string;
+	/** `map` is false when the head map could not be built, absent when no check needed it. */
+	reach: { touched: string[]; pairs: [string, string][]; map?: boolean };
+	checks: {
+		id: string;
+		why: 'combination' | 'subject' | 'touched' | 'always' | 'neighbour';
+		with?: string[];
+		status: 'passed' | 'failed' | 'not-run' | 'error';
+		exitCode?: number | null;
+		outputTail?: string;
+	}[];
+	notSelected: string[];
+}
+
+export interface JudgeConfig {
+	name: string;
+	taste?: { command: string[] } | null;
+	heldOutLimit?: number | null;
 }
 
 export interface CheckCommand {
@@ -408,6 +435,10 @@ export interface LaneRule {
 export interface LanesPolicy {
 	configured: boolean;
 	judge: string;
+	/** Each configuration in lanes.judges with its judge id. */
+	judges?: { name: string; id: string }[];
+	/** Whether `onus ui --held-out` gave a suite. */
+	heldOutSuite?: boolean;
 	policy: {
 		default?: Lane;
 		auditRate?: number;
@@ -415,6 +446,7 @@ export interface LanesPolicy {
 		rules?: LaneRule[];
 		heldOut?: CheckCommand | null;
 		taste?: { command: string[] } | null;
+		judges?: JudgeConfig[];
 	};
 }
 

@@ -95,9 +95,17 @@ inputs:
   judge:
     description: >-
       'true' (with records) to run the verifying judge when the lane is judge: it re-runs the
-      evidence in containers and runs held-out checks. Needs Docker, which GitHub's Linux runners have.
+      evidence in containers and runs the held-out checks (see held-out). Needs Docker, which
+      GitHub's Linux runners have.
     required: false
     default: 'false'
+  held-out:
+    description: >-
+      A directory outside the working directory holding a held-out suite (held-out.yaml and its
+      tests), for example cloned from a private repository with its own token into $RUNNER_TEMP.
+      Passed to onus ci pr --held-out.
+    required: false
+    default: ''
   evidence:
     description: >-
       Test runs to submit as evidence, as a glob of JSON files from onus run-test or onus env run
@@ -442,6 +450,7 @@ runs:
         RECORDS: ${{ inputs.records }}
         RECORDS_BRANCH: ${{ inputs.records-branch }}
         JUDGE: ${{ inputs.judge }}
+        HELD_OUT: ${{ inputs.held-out }}
         EVIDENCE: ${{ inputs.evidence }}
         BASE: ${{ inputs.base }}
         HEAD: ${{ inputs.head }}
@@ -463,6 +472,7 @@ runs:
             --body-file "$RUNNER_TEMP/onus/pr-body.md" --report "$REPORT" --records "$dir" --out "$out")
           [ -n "$CONFIG" ] && args+=(--config "$CONFIG")
           [ "$JUDGE" = true ] && args+=(--judge)
+          [ -n "$HELD_OUT" ] && args+=(--held-out "$HELD_OUT")
           if [ -n "$EVIDENCE" ]; then
             shopt -s nullglob globstar
             for f in $EVIDENCE; do args+=(--evidence "$f"); done
