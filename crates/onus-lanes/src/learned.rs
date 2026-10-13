@@ -1000,6 +1000,7 @@ mod tests {
             note: None,
             components: components.iter().map(|c| c.to_string()).collect(),
             reviewed_by: vec![],
+            approval: None,
             sampled: false,
             audit: None,
             merged_by: None,

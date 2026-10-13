@@ -622,10 +622,13 @@ pub fn build(i: Inputs) -> ProvenanceRecord {
         (None, None) => from.map(|f| f.approval.rows.clone()).unwrap_or_default(),
     };
     let merged_by = merged_line.and_then(|o| o.merged_by.clone());
-    let reviewed: &[String] = match merged_line {
-        Some(o) if !o.reviewed_by.is_empty() => &o.reviewed_by,
-        _ => pull.map_or(&[], |p| &p.reviewed_by),
+    let (reviewed, review): (&[String], _) = match (merged_line, pull) {
+        (Some(o), _) if !o.reviewed_by.is_empty() => (&o.reviewed_by, o.approval),
+        (_, Some(p)) => (&p.reviewed_by, p.approval),
+        _ => (&[], None),
     };
+    // No reviewers, so no rule to claim for them.
+    let review = review.filter(|_| !reviewed.is_empty());
     let mut people: Vec<String> = Vec::new();
     for who in rows
         .iter()
@@ -656,6 +659,7 @@ pub fn build(i: Inputs) -> ProvenanceRecord {
         people,
         rows,
         merged_by,
+        review,
         judge: (by == ApprovedBy::Judge)
             .then(|| {
                 judge
@@ -875,6 +879,7 @@ mod tests {
             components: vec![],
             requested: vec![],
             reviewed_by: vec![],
+            approval: None,
             audit_after_merge: None,
             features: None,
             caught: false,
@@ -898,6 +903,7 @@ mod tests {
             note: None,
             components: vec![],
             reviewed_by: vec![],
+            approval: None,
             sampled: false,
             audit: None,
             merged_by: None,
@@ -964,6 +970,7 @@ mod tests {
         }];
         let mut merged = outcome(&p, "merged", 10);
         merged.reviewed_by = vec!["@grace".into(), "@lead".into()];
+        merged.approval = Some(onus_core::ApprovalRule::Owner);
         merged.merged_by = Some("@grace".into());
         let r = build(Inputs {
             pulls: std::slice::from_ref(&p),
@@ -972,7 +979,24 @@ mod tests {
         });
         assert_eq!(r.approval.people, ["@lead", "@grace"]);
         assert_eq!(r.approval.rows[0].row, "r1");
+        // Whose review counted, as the records say.
+        assert_eq!(r.approval.review, Some(onus_core::ApprovalRule::Owner));
         assert!(!r.gaps.iter().any(|g| g.field == "approval"));
+        // Rebuilt with no reviewers in the records: no rule is claimed.
+        let again = build(Inputs {
+            from: Some(r),
+            ..Inputs::new(CHANGE, 110)
+        });
+        assert_eq!(again.approval.review, None);
+        // A human-lane change still waiting: the rule is on the pull record,
+        // but nobody approved, so none is claimed.
+        let mut waiting = pull(Lane::Human, None);
+        waiting.approval = Some(onus_core::ApprovalRule::Owner);
+        let r = build(Inputs {
+            pulls: std::slice::from_ref(&waiting),
+            ..Inputs::new(CHANGE, 100)
+        });
+        assert_eq!(r.approval.review, None);
     }
 
     #[test]

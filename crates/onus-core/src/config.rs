@@ -181,6 +181,32 @@ pub struct LanesConfig {
     /// unless written, one lane at a time (`onus help production`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rollout: Option<RolloutPolicy>,
+    /// Whose approval lets a human-lane change through: `owner` (one of the
+    /// change's owners, or a member of an owning team) or `member` (any
+    /// person with write access). Default `owner` when the change names
+    /// owners, `member` when it names none (`onus help ci`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval: Option<ApprovalRule>,
+}
+
+/// Whose approving review counts in the human lane.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum ApprovalRule {
+    /// One of the change's owners, or a member of an owning team.
+    Owner,
+    /// Any person with write access who did not open the pull request.
+    #[default]
+    Member,
+}
+
+impl ApprovalRule {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ApprovalRule::Owner => "owner",
+            ApprovalRule::Member => "member",
+        }
+    }
 }
 
 fn default_lane() -> Lane {
@@ -209,6 +235,7 @@ impl Default for LanesConfig {
             inputs: RiskInputs::default(),
             learned: None,
             rollout: None,
+            approval: None,
         }
     }
 }

@@ -201,11 +201,11 @@ A step is a flag percentage. Turn the flag named in the plan up to each step, re
 
 ## Area history
 
-    onus signals areas --records rec [--days 90]
+    onus signals areas --records rec [--days 90] [--repository acme/shop]
     # {"since":1757000000,"days":90,"areas":{"billing":{"reverts":1,"incidents":1,
     #   "changes":["acme/shop#42"],"errorSpikes":2,"lastAt":1759990000}}}
 
-Each component's history in the window: reverts and rollbacks (a planned rollback does not count), incidents, the changes behind them (a signal tied to no change stands for itself by its id), error spikes (error-spike, latency and metric signals of medium severity or more, or none given) and when the latest was recorded. Incidents and rollbacks tied to a change are counted once, from their outcomes. Deploys, rollout stages and traces are not history. A signal tied to no change names no repository, so it counts for its components in every repository whose records hold it (Onus Cloud keeps one records folder per organisation); give its `change` or `commit` to scope it. This is the history the classifier's `history` input reads, and what tightens rollout plans.
+Each component's history in the window: reverts and rollbacks (a planned rollback does not count), incidents, the changes behind them (a signal tied to no change stands for itself by its id), error spikes (error-spike, latency and metric signals of medium severity or more, or none given) and when the latest was recorded. Incidents and rollbacks tied to a change are counted once, from their outcomes. Deploys, rollout stages and traces are not history. A signal tied to no change names no repository, so it counts for its components in every repository whose records hold it (Onus Cloud keeps one records folder per organisation); give its `change` or `commit` to scope it. `--repository owner/name` counts only that repository's changes (and the signals tied to no change), as a classification of one of its changes reads them; without it, every repository's changes count. This is the history the classifier's `history` input reads, and what tightens rollout plans.
 
 An agent setup whose recent changes were rolled back cannot auto-merge either: `record.recentRollbacks` in `onus ci pr`'s summary, and a `record` reason in the lane.
 

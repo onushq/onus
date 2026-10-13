@@ -14,7 +14,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::change::{IntentCheck, ReportSummary};
-use crate::config::{Lane, MetricGuard};
+use crate::config::{ApprovalRule, Lane, MetricGuard};
 
 /// The version of the record's format.
 pub const SCHEMA: u32 = 1;
@@ -278,6 +278,10 @@ pub struct Approval {
     pub rows: Vec<RowApproval>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merged_by: Option<String>,
+    /// Whose approving review counted (`lanes.approval`): `owner` or
+    /// `member`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<ApprovalRule>,
     /// The judge configuration, when the judge approved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub judge: Option<String>,

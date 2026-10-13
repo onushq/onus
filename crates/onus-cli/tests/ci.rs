@@ -933,12 +933,32 @@ fn a_human_lane_change_waits_for_a_persons_review() {
         md()
     );
 
-    // A member approves the head: the lane is satisfied.
+    // A member approves the head, but the change has owners, so only an
+    // owner's approval counts.
     let s = pr(Some(serde_json::json!([review("grace", "MEMBER", &head)])));
+    assert_eq!(s["review"]["satisfied"], false, "{s}");
+    assert_eq!(s["review"]["approval"], "owner", "{s}");
+    assert_eq!(
+        s["review"]["ignored"],
+        serde_json::json!([{ "by": "@grace", "why": "not an owner" }])
+    );
+    assert!(
+        md().contains("from an owner of what changed") && md().contains("@grace (not an owner)"),
+        "{}",
+        md()
+    );
+
+    // The host says grace is in @team-growth: the lane is satisfied.
+    let s = pr(Some(serde_json::json!({
+        "reviews": [review("grace", "MEMBER", &head)],
+        "teams": { "@team-growth": ["grace", "lin"] },
+    })));
     assert_eq!(s["review"]["satisfied"], true, "{s}");
     assert_eq!(s["review"]["approvedBy"], serde_json::json!(["@grace"]));
+    assert!(s["review"].get("note").is_none(), "{s}");
     assert!(md().contains("**Review:** approved by @grace."), "{}", md());
     assert_eq!(last_pull()["reviewedBy"], serde_json::json!(["@grace"]));
+    assert_eq!(last_pull()["approval"], "owner");
     assert_eq!(
         last_pull()["requested"],
         serde_json::json!(["@team-growth"])
@@ -961,6 +981,330 @@ fn a_human_lane_change_waits_for_a_persons_review() {
     assert_eq!(
         outcomes.last().unwrap()["reviewedBy"],
         serde_json::json!(["@grace"])
+    );
+    assert_eq!(outcomes.last().unwrap()["approval"], "owner");
+}
+
+#[test]
+fn lanes_approval_at_the_base_commit_says_whose_approval_counts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let t = tmp.path();
+    let r = t.join("shop");
+    copy_dir(&fixture().join("base"), &r);
+    // A GitHub team owns what the change touches.
+    let config = std::fs::read_to_string(r.join("onus.yaml"))
+        .unwrap()
+        .replace("@team-growth", "@acme/growth");
+    std::fs::write(r.join("onus.yaml"), &config).unwrap();
+    git(&r, &["init", "-q", "-b", "main"]);
+    git(&r, &["add", "-A"]);
+    git(&r, &["commit", "-q", "-m", "base"]);
+    git(&r, &["checkout", "-q", "-b", "codex/sms"]);
+    apply_overlay(&fixture().join("scenarios/s1-sms-alerts"), &r);
+    // The change tries to loosen the rule for itself.
+    std::fs::write(
+        r.join("onus.yaml"),
+        format!("{config}\nlanes:\n  approval: member\n"),
+    )
+    .unwrap();
+    git(&r, &["add", "-A"]);
+    git(&r, &["commit", "-q", "-m", "Text customers"]);
+    let head = git(&r, &["rev-parse", "HEAD"]);
+    let member = t.join("member.yaml");
+    std::fs::write(&member, format!("{config}\nlanes:\n  approval: member\n")).unwrap();
+    let rec = t.join("records");
+    let out = t.join("out");
+    let file = t.join("reviews.json");
+    let pr = |reviews: serde_json::Value, config: Option<&Path>| -> serde_json::Value {
+        std::fs::write(&file, reviews.to_string()).unwrap();
+        let mut args = vec![
+            "ci",
+            "pr",
+            "--base",
+            "main",
+            "--head",
+            "codex/sms",
+            "--change",
+            "acme/shop#9",
+            "--author",
+            "mike",
+            "--records",
+            rec.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+            "--reviews",
+            file.to_str().unwrap(),
+        ];
+        if let Some(c) = config {
+            args.extend(["--config", c.to_str().unwrap()]);
+        }
+        let s: serde_json::Value = serde_json::from_str(&onus(&r, &args)).unwrap();
+        assert_eq!(s["lane"], "human", "{s}");
+        s["review"].clone()
+    };
+    let md = || std::fs::read_to_string(out.join("lane.md")).unwrap();
+    let grace = serde_json::json!({ "by": "grace", "state": "APPROVED", "commit": head, "association": "MEMBER", "at": 1 });
+
+    // The base commit asks for an owner (by default), and the host says
+    // who is in the team: grace is not.
+    let s = pr(
+        serde_json::json!({ "reviews": [grace], "teams": { "@acme/growth": ["ada"] } }),
+        None,
+    );
+    assert_eq!(s["owners"], serde_json::json!(["@acme/growth"]), "{s}");
+    assert_eq!(s["approval"], "owner", "{s}");
+    assert_eq!(s["satisfied"], false, "{s}");
+    assert_eq!(
+        s["ignored"],
+        serde_json::json!([{ "by": "@grace", "why": "not an owner" }])
+    );
+
+    // Without the team's members, anyone with write access counts, and the
+    // answer says why.
+    let s = pr(serde_json::json!([grace]), None);
+    assert_eq!(s["satisfied"], true, "{s}");
+    assert_eq!(s["approval"], "member", "{s}");
+    let note = "The members of @acme/growth are not known, so an approval from any person with write access counts";
+    assert_eq!(s["note"], note, "{s}");
+    assert!(md().contains(note), "{}", md());
+    let pulls = lines(&rec.join("pulls.jsonl"));
+    assert_eq!(pulls.last().unwrap()["approval"], "member");
+
+    // lanes.approval: member, given explicitly: anyone with write access.
+    let s = pr(
+        serde_json::json!({ "reviews": [grace], "teams": { "@acme/growth": ["ada"] } }),
+        Some(&member),
+    );
+    assert_eq!(s["satisfied"], true, "{s}");
+    assert_eq!(s["approval"], "member", "{s}");
+    assert!(s.get("note").is_none(), "{s}");
+}
+
+#[test]
+fn a_change_cannot_name_who_approves_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let t = tmp.path();
+    let r = t.join("shop");
+    copy_dir(&fixture().join("base"), &r);
+    let config = std::fs::read_to_string(r.join("onus.yaml")).unwrap();
+    std::fs::create_dir_all(r.join(".github")).unwrap();
+    std::fs::write(r.join(".github/CODEOWNERS"), "* @grace\n").unwrap();
+    std::fs::create_dir_all(r.join("ci")).unwrap();
+    std::fs::write(r.join("ci/onus.yaml"), &config).unwrap();
+    git(&r, &["init", "-q", "-b", "main"]);
+    git(&r, &["add", "-A"]);
+    git(&r, &["commit", "-q", "-m", "base"]);
+    git(&r, &["checkout", "-q", "-b", "codex/sms"]);
+    apply_overlay(&fixture().join("scenarios/s1-sms-alerts"), &r);
+    // The change makes ada an owner, and loosens the config it is run with.
+    std::fs::write(r.join(".github/CODEOWNERS"), "* @ada\n").unwrap();
+    std::fs::write(
+        r.join("ci/onus.yaml"),
+        format!("{config}\nlanes:\n  approval: member\n"),
+    )
+    .unwrap();
+    git(&r, &["add", "-A"]);
+    git(&r, &["commit", "-q", "-m", "Text customers"]);
+    let head = git(&r, &["rev-parse", "HEAD"]);
+    let rec = t.join("records");
+    let out = t.join("out");
+    let file = t.join("reviews.json");
+    let in_repo = r.join("ci/onus.yaml");
+    let pr = |by: &str, config: Option<&Path>| -> serde_json::Value {
+        let review = serde_json::json!([
+            { "by": by, "state": "APPROVED", "commit": head, "association": "MEMBER", "at": 1 }
+        ]);
+        std::fs::write(&file, review.to_string()).unwrap();
+        let mut args = vec![
+            "ci",
+            "pr",
+            "--base",
+            "main",
+            "--head",
+            "codex/sms",
+            "--change",
+            "acme/shop#10",
+            "--author",
+            "mike",
+            "--records",
+            rec.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+            "--reviews",
+            file.to_str().unwrap(),
+        ];
+        if let Some(c) = config {
+            args.extend(["--config", c.to_str().unwrap()]);
+        }
+        let s: serde_json::Value = serde_json::from_str(&onus(&r, &args)).unwrap();
+        assert_eq!(s["lane"], "human", "{s}");
+        s["review"].clone()
+    };
+
+    // CODEOWNERS is read at the base commit: grace owns it, ada does not.
+    let s = pr("ada", None);
+    assert_eq!(
+        s["owners"],
+        serde_json::json!(["@grace", "@team-growth"]),
+        "{s}"
+    );
+    assert_eq!(s["approval"], "owner", "{s}");
+    assert_eq!(s["satisfied"], false, "{s}");
+    assert_eq!(
+        s["ignored"],
+        serde_json::json!([{ "by": "@ada", "why": "not an owner" }])
+    );
+    let s = pr("grace", None);
+    assert_eq!(s["satisfied"], true, "{s}");
+    assert_eq!(s["approvedBy"], serde_json::json!(["@grace"]));
+
+    // A config inside the repository is read at the base commit too, so
+    // the head's `approval: member` does not count.
+    let s = pr("ada", Some(&in_repo));
+    assert_eq!(s["approval"], "owner", "{s}");
+    assert_eq!(s["satisfied"], false, "{s}");
+}
+
+#[test]
+fn the_owners_who_may_approve_come_from_the_base_commit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let t = tmp.path();
+    let r = t.join("shop");
+    copy_dir(&fixture().join("base"), &r);
+    // onus.yaml names no owners for what the change touches, so the map
+    // takes them from CODEOWNERS, in whichever tree it maps.
+    let declared = std::fs::read_to_string(r.join("onus.yaml")).unwrap();
+    let unowned: String = declared
+        .lines()
+        .map(|l| match l.split_once("owners: [\"@team-growth\"]") {
+            Some((a, b)) => format!("{}{b}\n", a.trim_end().trim_end_matches(',')),
+            None => format!("{l}\n"),
+        })
+        .collect();
+    std::fs::write(r.join("onus.yaml"), &unowned).unwrap();
+    std::fs::create_dir_all(r.join(".github")).unwrap();
+    std::fs::write(r.join(".github/CODEOWNERS"), "* @grace\n").unwrap();
+    // A config kept in the repository and given with --config.
+    std::fs::create_dir_all(r.join("ci")).unwrap();
+    std::fs::write(r.join("ci/onus.yaml"), &declared).unwrap();
+    git(&r, &["init", "-q", "-b", "main"]);
+    git(&r, &["add", "-A"]);
+    git(&r, &["commit", "-q", "-m", "base"]);
+    git(&r, &["checkout", "-q", "-b", "codex/sms"]);
+    apply_overlay(&fixture().join("scenarios/s1-sms-alerts"), &r);
+    // The change makes ada the owner, in CODEOWNERS and in the config.
+    std::fs::write(r.join(".github/CODEOWNERS"), "* @ada\n").unwrap();
+    std::fs::write(
+        r.join("ci/onus.yaml"),
+        declared.replace("@team-growth", "@ada"),
+    )
+    .unwrap();
+    git(&r, &["add", "-A"]);
+    git(&r, &["commit", "-q", "-m", "Text customers"]);
+    let head = git(&r, &["rev-parse", "HEAD"]);
+    let in_repo = r.join("ci/onus.yaml");
+    let rec = t.join("records");
+    let out = t.join("out");
+    let file = t.join("reviews.json");
+    let review = serde_json::json!([
+        { "by": "ada", "state": "APPROVED", "commit": head, "association": "MEMBER", "at": 1 }
+    ]);
+    std::fs::write(&file, review.to_string()).unwrap();
+    // As the action runs it: the report first, then ci owners and ci pr.
+    let run = |config: Option<&Path>| -> (serde_json::Value, serde_json::Value) {
+        let mut report = vec![
+            "report",
+            "--base",
+            "main",
+            "--head",
+            "codex/sms",
+            "--format",
+            "json",
+        ];
+        let mut extra = vec![];
+        if let Some(c) = config {
+            extra = vec!["--config", c.to_str().unwrap()];
+        }
+        report.extend(&extra);
+        let report_file = t.join("report.json");
+        std::fs::write(&report_file, onus(&r, &report)).unwrap();
+        let mut owners = vec![
+            "ci",
+            "owners",
+            "--base",
+            "main",
+            "--report",
+            report_file.to_str().unwrap(),
+        ];
+        owners.extend(&extra);
+        let owners: serde_json::Value = serde_json::from_str(&onus(&r, &owners)).unwrap();
+        let mut args = vec![
+            "ci",
+            "pr",
+            "--base",
+            "main",
+            "--head",
+            "codex/sms",
+            "--change",
+            "acme/shop#11",
+            "--author",
+            "mike",
+            "--report",
+            report_file.to_str().unwrap(),
+            "--records",
+            rec.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+            "--reviews",
+            file.to_str().unwrap(),
+        ];
+        args.extend(&extra);
+        let s: serde_json::Value = serde_json::from_str(&onus(&r, &args)).unwrap();
+        assert_eq!(s["lane"], "human", "{s}");
+        (owners, s["review"].clone())
+    };
+
+    // The head's map names ada from its own CODEOWNERS; the review reads
+    // CODEOWNERS at the base, where grace owns it.
+    let names_ada = || {
+        std::fs::read_to_string(t.join("report.json"))
+            .unwrap()
+            .contains("\"@ada\"")
+    };
+    let (owners, s) = run(None);
+    assert!(names_ada(), "the head's map names ada");
+    assert_eq!(owners, serde_json::json!({ "owners": ["@grace"] }));
+    assert_eq!(s["owners"], serde_json::json!(["@grace"]), "{s}");
+    assert_eq!(s["approval"], "owner", "{s}");
+    assert_eq!(s["satisfied"], false, "{s}");
+    assert_eq!(
+        s["ignored"],
+        serde_json::json!([{ "by": "@ada", "why": "not an owner" }])
+    );
+
+    // The head's copy of an in-repository config names ada; the review
+    // reads the base copy, where @team-growth owns it.
+    let (owners, s) = run(Some(&in_repo));
+    assert!(names_ada(), "the head's map names ada");
+    assert_eq!(owners["owners"], s["owners"], "{s}");
+    assert!(
+        s["owners"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("@team-growth")),
+        "{s}"
+    );
+    assert!(
+        !s["owners"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("@ada")),
+        "{s}"
+    );
+    assert_eq!(s["satisfied"], false, "{s}");
+    assert_eq!(
+        s["ignored"],
+        serde_json::json!([{ "by": "@ada", "why": "not an owner" }])
     );
 }
 

@@ -29,16 +29,16 @@ use anyhow::{Context, Result, bail};
 use clap::Subcommand;
 use onus_core::provenance::IntentSource;
 use onus_core::signal::{ProductionSignal, RolloutMetrics, RolloutStage, SignalKind};
-use onus_core::{Lane, SemanticReport};
+use onus_core::{ApprovalRule, Lane, SemanticReport};
 use onus_core::{MetricGuard, RolloutStrategy};
 use onus_lanes::outcomes::{self, Outcome};
 use onus_lanes::provenance;
 use onus_lanes::pulls::{self, PullRecord};
-use onus_lanes::review::{self, Review, ReviewState};
+use onus_lanes::review::{self, ApprovalPolicy, ReviewState, ReviewsFile};
 use onus_lanes::rollout::{self, Decision, RolloutPlan};
 use onus_lanes::signals;
 use onus_lanes::submission::Approval;
-use onus_map::discover::{CODEOWNERS_PATHS, Codeowners};
+use onus_map::discover::{CODEOWNERS_PATHS, Codeowners, ComponentMatcher};
 use serde_json::json;
 
 use crate::{lanes, records};
@@ -85,7 +85,8 @@ pub enum CiCmd {
         held_out: Option<PathBuf>,
         #[arg(long, value_name = "FILE")]
         config: Option<PathBuf>,
-        /// GitHub reviews of the pull request (JSON array; see `onus help ci`).
+        /// GitHub reviews of the pull request: a JSON array, or {"reviews": [...],
+        /// "teams": {...}} with the members of owning teams (see `onus help ci`).
         #[arg(long, value_name = "FILE")]
         reviews: Option<PathBuf>,
         /// A learned lane model to use instead of lanes.learned.model at the base commit
@@ -100,6 +101,21 @@ pub enum CiCmd {
         /// written after the fact, such as a hosted service catching up on history.
         #[arg(long, value_name = "SECONDS")]
         at: Option<u64>,
+    },
+    /// Who owns a change, as the base commit says: the owners `ci pr` asks to
+    /// review and, with lanes.approval `owner`, whose approval counts. Prints
+    /// {"owners": [...]}, so a host can look up the members of owning teams
+    /// before it runs `ci pr --reviews`.
+    Owners {
+        #[arg(long, default_value = ".", value_name = "DIR")]
+        repo: PathBuf,
+        #[arg(long, value_name = "REF")]
+        base: String,
+        /// The change's report (onus report --format json).
+        #[arg(long, value_name = "FILE")]
+        report: PathBuf,
+        #[arg(long, value_name = "FILE")]
+        config: Option<PathBuf>,
     },
     /// A pull request was closed: its last record becomes an outcome.
     Closed {
@@ -314,6 +330,21 @@ pub fn run(cmd: CiCmd) -> Result<i32> {
             out,
             at,
         }),
+        CiCmd::Owners {
+            repo,
+            base,
+            report,
+            config,
+        } => {
+            let base = commit_sha(&repo, &base)?;
+            let report: SemanticReport =
+                serde_json::from_str(&std::fs::read_to_string(&report)?)
+                    .with_context(|| format!("{} is not a report", report.display()))?;
+            let config = base_config(&repo, &base, config.as_deref());
+            let owners = review_owners(&repo, &base, config.as_ref(), &report);
+            println!("{}", json!({ "owners": owners }));
+            Ok(0)
+        }
         CiCmd::Closed {
             change,
             merged,
@@ -482,22 +513,23 @@ fn verdict_name(v: onus_lanes::judge::Verdict) -> &'static str {
     }
 }
 
+/// The commit `r` names.
+fn commit_sha(repo: &Path, r: &str) -> Result<String> {
+    Ok(
+        lanes::git_lines(repo, &["rev-parse", "--verify", &format!("{r}^{{commit}}")])?
+            .first()
+            .cloned()
+            .unwrap_or_default(),
+    )
+}
+
 fn pr(a: PrArgs) -> Result<i32> {
     check_change(&a.change)?;
     // A bad suite fails the run before anything is written.
     let suite = lanes::load_held_out(a.held_out.as_deref(), &a.repo)?;
     std::fs::create_dir_all(&a.out)?;
     std::fs::create_dir_all(&a.records)?;
-    let sha = |r: &str| -> Result<String> {
-        Ok(lanes::git_lines(
-            &a.repo,
-            &["rev-parse", "--verify", &format!("{r}^{{commit}}")],
-        )?
-        .first()
-        .cloned()
-        .unwrap_or_default())
-    };
-    let (base, head) = (sha(&a.base)?, sha(&a.head)?);
+    let (base, head) = (commit_sha(&a.repo, &a.base)?, commit_sha(&a.repo, &a.head)?);
     let message = lanes::git_lines(&a.repo, &["log", "-1", "--format=%B", &head])?.join("\n");
     let (agent, agent_source) = pulls::detect_agent_source(&message, &a.branch, &a.author);
     let body = match &a.body_file {
@@ -513,10 +545,10 @@ fn pr(a: PrArgs) -> Result<i32> {
                 .with_context(|| format!("{} is not a test run", p.display()))
         })
         .collect::<Result<Vec<_>>>()?;
-    let reviews: Vec<Review> = match &a.reviews {
-        Some(p) => serde_json::from_str(&std::fs::read_to_string(p)?)
+    let reviews = match &a.reviews {
+        Some(p) => ReviewsFile::parse(&std::fs::read_to_string(p)?)
             .with_context(|| format!("{} is not a list of reviews", p.display()))?,
-        None => Vec::new(),
+        None => ReviewsFile::default(),
     };
     let all_pulls = pulls::load(&pulls_file(&a.records))?;
     let previous = pulls::latest(&all_pulls, &a.change).cloned();
@@ -631,8 +663,25 @@ fn pr(a: PrArgs) -> Result<i32> {
         .collect();
     components.sort();
     components.dedup();
-    let owners = review_owners(&a.repo, &head, &sub.report);
-    let review = review::evaluate(lane, &head, &a.author, &reviews, owners, &asked_before);
+    // Who owns the change and whose approval counts, as the base commit
+    // says: the change cannot name its own approver.
+    let at_base = base_config(&a.repo, &base, a.config.as_deref());
+    let owners = review_owners(&a.repo, &base, at_base.as_ref(), &sub.report);
+    let review = review::evaluate(
+        lane,
+        &head,
+        &a.author,
+        &reviews.reviews,
+        owners,
+        &asked_before,
+        &ApprovalPolicy {
+            rule: at_base
+                .as_ref()
+                .and_then(|c| c.lanes.as_ref())
+                .and_then(|l| l.approval),
+            teams: reviews.teams,
+        },
+    );
     let mut requested = asked_before;
     requested.extend(review.request.iter().cloned());
     requested.sort();
@@ -655,6 +704,9 @@ fn pr(a: PrArgs) -> Result<i32> {
             components,
             requested: requested.clone(),
             reviewed_by: review.approved_by.clone(),
+            // How the approvals were counted, once a review matters.
+            approval: (review.required || !review.approved_by.is_empty())
+                .then_some(review.approval),
             // Recorded for `ci closed`; nothing shows it before the merge.
             audit_after_merge: Some(config.audit_after_merge),
             features: c.features.clone(),
@@ -850,56 +902,138 @@ fn learned_markdown(l: &onus_lanes::classify::LearnedRisk) -> String {
     }
 }
 
-/// Whom to ask to review a change: the owners of the rows that need a
-/// person, with CODEOWNERS at `head` for those rows that name none; the
-/// owners of every row when that finds nobody. Sorted.
-fn review_owners(repo: &Path, head: &str, report: &SemanticReport) -> Vec<String> {
-    let needing: Vec<_> = report
-        .changes
+/// Who owns a change, as the base commit says: for each file of the rows
+/// that need a person (of every row when that finds nobody), the owners of
+/// the base onus.yaml's component holding it, else CODEOWNERS at the base.
+/// These are the owners asked to review and, with `lanes.approval: owner`,
+/// the people who may approve. The report's own `hints.owners` come from
+/// the head and are not used: a change could name its own approver. Sorted.
+fn review_owners(
+    repo: &Path,
+    base: &str,
+    config: Option<&onus_core::OnusConfig>,
+    report: &SemanticReport,
+) -> Vec<String> {
+    let declared: Vec<onus_core::Component> = config
+        .map(|c| {
+            c.components
+                .iter()
+                .map(|(id, cc)| onus_core::Component {
+                    id: id.clone(),
+                    kind: cc.kind.unwrap_or(onus_core::ComponentKind::Module),
+                    roots: cc.path.to_vec(),
+                    public_entrypoints: vec![],
+                    owners: cc.owners.clone(),
+                    labels: vec![],
+                    package_name: None,
+                    confidence: onus_core::Confidence::Declared,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let matcher = ComponentMatcher::new(&declared);
+    // Relative to `repo`, as the map reads it.
+    let codeowners = CODEOWNERS_PATHS
         .iter()
-        .filter(|r| r.hints.needs_person)
-        .collect();
-    let mut owners: BTreeSet<String> = needing
-        .iter()
-        .flat_map(|r| r.hints.owners.iter().cloned())
-        .collect();
-    let unowned: Vec<_> = needing
-        .iter()
-        .filter(|r| r.hints.owners.is_empty())
-        .collect();
-    if !unowned.is_empty() {
-        let codeowners = CODEOWNERS_PATHS
-            .iter()
-            .find_map(|p| lanes::git_lines(repo, &["show", &format!("{head}:{p}")]).ok())
-            .map(|lines| Codeowners::parse(&lines.join("\n")))
-            .unwrap_or_default();
-        for r in unowned {
-            for l in &r.locations {
-                owners.extend(codeowners.owners_of_file(&l.file));
-            }
-        }
-    }
-    if owners.is_empty() {
-        owners = report
+        .find_map(|p| lanes::git_lines(repo, &["show", &format!("{base}:./{p}")]).ok())
+        .map(|lines| Codeowners::parse(&lines.join("\n")))
+        .unwrap_or_default();
+    let owners_of = |file: &str| -> Vec<String> {
+        matcher
+            .component_of(file)
+            .and_then(|id| declared.iter().find(|c| c.id == id))
+            .map(|c| c.owners.clone())
+            .filter(|o| !o.is_empty())
+            .unwrap_or_else(|| codeowners.owners_of_file(file))
+    };
+    let of_rows = |needing: bool| -> BTreeSet<String> {
+        report
             .changes
             .iter()
-            .flat_map(|r| r.hints.owners.iter().cloned())
-            .collect();
+            .filter(|r| !needing || r.hints.needs_person)
+            .flat_map(|r| r.locations.iter())
+            .flat_map(|l| owners_of(&l.file))
+            .collect()
+    };
+    let mut owners = of_rows(true);
+    if owners.is_empty() {
+        owners = of_rows(false);
     }
     owners.into_iter().collect()
 }
 
+/// The onus.yaml a review is decided by: the base commit's, so a change
+/// can neither loosen whose approval counts nor name its own owners. An
+/// explicit `config` inside the repository is read at the base commit too;
+/// one outside it (a host's own) is taken as given. None when there is
+/// none, or it cannot be read (with a warning): then nobody is an owner by
+/// onus.yaml, and `lanes.approval` takes its default.
+fn base_config(repo: &Path, base: &str, explicit: Option<&Path>) -> Option<onus_core::OnusConfig> {
+    let path = match explicit {
+        // Relative to `repo`, which may be a folder of the repository.
+        None => format!("./{}", onus_map::config::CONFIG_FILE),
+        // Relative to the top of the repository.
+        Some(p) => match in_repo(repo, p) {
+            Some(rel) => rel,
+            None => {
+                return onus_map::config::load(p)
+                    .map(|l| l.config)
+                    .map_err(|e| eprintln!("warning: {} does not load ({e:#})", p.display()))
+                    .ok();
+            }
+        },
+    };
+    let Ok(lines) = lanes::git_lines(repo, &["show", &format!("{base}:{path}")]) else {
+        if explicit.is_some() {
+            eprintln!(
+                "warning: {path} is not in the base commit; the review takes no owners from it and lanes.approval takes its default"
+            );
+        }
+        return None;
+    };
+    match onus_map::config::parse(&lines.join("\n")) {
+        Ok(c) => Some(c.config),
+        Err(e) => {
+            eprintln!(
+                "warning: {path} at the base commit does not parse ({e:#}); the review takes no owners from it and lanes.approval takes its default"
+            );
+            None
+        }
+    }
+}
+
+/// `path` relative to the top of the git repository `repo` is in, when it
+/// lies inside it: a config beside a `--repo` subfolder is still the
+/// repository's, so it is read at the base commit too.
+fn in_repo(repo: &Path, path: &Path) -> Option<String> {
+    let top = lanes::git_lines(repo, &["rev-parse", "--show-toplevel"]).ok()?;
+    let top = Path::new(top.first()?).canonicalize().ok()?;
+    let path = path.canonicalize().ok()?;
+    let rel = path.strip_prefix(&top).ok()?;
+    Some(rel.to_string_lossy().replace('\\', "/"))
+}
+
 /// The **Review:** paragraph of the lane section, for the human lane.
 fn review_markdown(review: &ReviewState, asked: &[String]) -> String {
+    let note = review
+        .note
+        .as_ref()
+        .map(|n| format!(" {n}."))
+        .unwrap_or_default();
     if review.satisfied {
         return format!(
-            "\n**Review:** approved by {}.\n",
+            "\n**Review:** approved by {}.{note}\n",
             review.approved_by.join(", ")
         );
     }
-    let mut md = String::from(
-        "\n**Review:** waiting for an approving review from a person with write access who did not open this pull request.",
-    );
+    let mut md = String::from(match review.approval {
+        ApprovalRule::Owner => {
+            "\n**Review:** waiting for an approving review from an owner of what changed who did not open this pull request."
+        }
+        ApprovalRule::Member => {
+            "\n**Review:** waiting for an approving review from a person with write access who did not open this pull request."
+        }
+    });
     if !asked.is_empty() {
         md.push_str(&format!(" Asked: {}.", asked.join(", ")));
     } else if !review.owners.is_empty() {
@@ -915,6 +1049,7 @@ fn review_markdown(review: &ReviewState, asked: &[String]) -> String {
             review.changes_requested_by.join(", ")
         ));
     }
+    md.push_str(&note);
     if !review.ignored.is_empty() {
         let names: Vec<String> = review
             .ignored
@@ -982,6 +1117,7 @@ fn closed(
             note: None,
             components: last.components.clone(),
             reviewed_by: last.reviewed_by.clone(),
+            approval: last.approval,
             sampled,
             audit: None,
             merged_by,
@@ -1463,4 +1599,28 @@ fn rollback(
     }
     println!("{change}: rolled back");
     Ok(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_config_beside_a_repo_subfolder_is_in_the_repository() {
+        let t = std::env::temp_dir().join(format!("onus-in-repo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        std::fs::create_dir_all(t.join("app")).unwrap();
+        std::fs::write(t.join("onus.yaml"), "").unwrap();
+        let outside = t.with_extension("yaml");
+        std::fs::write(&outside, "").unwrap();
+        lanes::git_lines(&t, &["init", "-q"]).unwrap();
+        let app = t.join("app");
+        assert_eq!(
+            in_repo(&app, &app.join("../onus.yaml")).as_deref(),
+            Some("onus.yaml")
+        );
+        assert_eq!(in_repo(&app, &outside), None);
+        let _ = std::fs::remove_dir_all(&t);
+        let _ = std::fs::remove_file(&outside);
+    }
 }

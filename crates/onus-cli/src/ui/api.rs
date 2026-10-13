@@ -1135,6 +1135,7 @@ fn outcomes_record(state: &State, body: Value) -> Answer {
             note: None,
             components: q.components,
             reviewed_by: vec![],
+            approval: None,
             sampled: false,
             audit: None,
             merged_by: None,

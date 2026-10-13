@@ -9,7 +9,7 @@ use std::io::{BufRead, Write};
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use onus_core::{Lane, ids};
+use onus_core::{ApprovalRule, Lane, ids};
 use serde::{Deserialize, Serialize};
 
 use crate::classify::{AreaHistories, AreaHistory, Record};
@@ -56,6 +56,9 @@ pub struct Outcome {
     /// it merged without a counted review.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reviewed_by: Vec<String>,
+    /// Whose approval counted for `reviewed_by`: `owner` or `member`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval: Option<ApprovalRule>,
     /// Chosen when it merged for a person to audit (`lanes.auditAfterMerge`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub sampled: bool,
@@ -570,6 +573,7 @@ mod tests {
             note: None,
             components: vec![],
             reviewed_by: vec![],
+            approval: None,
             sampled: false,
             audit: None,
             merged_by: None,

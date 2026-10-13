@@ -213,6 +213,17 @@
             "type": "string"
           }
         },
+        "review": {
+          "description": "Whose approving review counted (`lanes.approval`): `owner` or\n`member`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ApprovalRule"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "rows": {
           "description": "Rows of the report a person approved.",
           "type": "array",
@@ -224,6 +235,21 @@
       },
       "required": [
         "by"
+      ]
+    },
+    "ApprovalRule": {
+      "description": "Whose approving review counts in the human lane.",
+      "oneOf": [
+        {
+          "description": "One of the change's owners, or a member of an owning team.",
+          "type": "string",
+          "const": "owner"
+        },
+        {
+          "description": "Any person with write access who did not open the pull request.",
+          "type": "string",
+          "const": "member"
+        }
       ]
     },
     "ApprovedBy": {

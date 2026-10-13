@@ -1277,6 +1277,7 @@ pub fn outcomes_cmd(cmd: OutcomesCmd) -> Result<i32> {
                     note: None,
                     components,
                     reviewed_by: vec![],
+                    approval: None,
                     sampled: false,
                     audit: None,
                     merged_by: None,

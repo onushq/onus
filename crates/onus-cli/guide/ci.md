@@ -38,6 +38,7 @@ Inputs, all optional:
 - `config`: an onus.yaml to use for both commits.
 - `lanes`: `true` to classify the change into a risk lane with the policy in onus.yaml and the hard floors, and show it in the comment (`onus help lanes`). Output `lane`.
 - `apply-lane`: `true` (with `lanes`) to label the pull request `onus/lane:<lane>` and fail the job for the `blocked` lane. Needs `issues: write`.
+- `wait-for-review`: `true` (the default, with `records`) fails the job while the change is in the human lane and no review counts yet. Output `review`: `waiting` or `approved`. See "Reviews in the human lane" below.
 - `auto-merge`: `true` (with `lanes`) to enable GitHub's auto-merge (squash) for the `auto-merge` lane. Required checks still apply. Needs `contents: write`.
 - `plugins`: a plugins file's contents (YAML), written outside the repository and passed with `--plugins`. For Svelte components: `plugins: [{ name: svelte, kind: language, command: [onus-plugin-svelte], files: ["**/*.svelte"] }]` (the plugin ships in every release archive).
 - `working-directory`: the repository, if not the workspace root.
@@ -47,7 +48,7 @@ Inputs, all optional:
 - `feedback`: `true` (the default) ends the comment with a line asking for a 👍 or 👎 reaction and for `/onus caught` replies (see below).
 - `github-token`: the token for the download and the comment. Default: the workflow's token.
 
-Outputs: `report` (path of the JSON report), `markdown` (path of the Markdown report), `meaning-changes` and `needs-attention` (counts from the report's summary), and `metrics` (one line of JSON: changed files and lines, rows, findings, the time the report took and, with coverage, `coverage: {changed, ran}`). With `records: true` also `lane`, `provenance`, `rollout-strategy` (`none`, `canary` or `flag`) and `rollout-plan` (the path of `rollout.json`), and with `rollout-percent`, `rollout-decision` (see "Rollouts" below).
+Outputs: `report` (path of the JSON report), `markdown` (path of the Markdown report), `meaning-changes` and `needs-attention` (counts from the report's summary), and `metrics` (one line of JSON: changed files and lines, rows, findings, the time the report took and, with coverage, `coverage: {changed, ran}`). With `records: true` also `lane`, `review` (`waiting` or `approved` in the human lane), `provenance`, `rollout-strategy` (`none`, `canary` or `flag`) and `rollout-plan` (the path of `rollout.json`), and with `rollout-percent`, `rollout-decision` (see "Rollouts" below).
 
 Notes:
 
@@ -65,14 +66,16 @@ With `records: true`, the action keeps the track record lanes depend on without 
     on:
       pull_request:
         types: [opened, synchronize, reopened, edited, ready_for_review, closed]
+      pull_request_review:
+        types: [submitted, dismissed]
       issue_comment:
         types: [created]
       push:
         branches: [main]
     permissions:
       contents: write           # the onus/records branch
-      pull-requests: write      # the comment
-      actions: write            # re-running the check after /onus approve
+      pull-requests: write      # the comment, and reading reviews
+      actions: write            # re-running the check after /onus approve or an approval
     jobs:
       onus:
         # Comments matter only when they are /onus commands on pull requests.
@@ -91,6 +94,7 @@ With `records: true`, the action keeps the track record lanes depend on without 
 What happens on each event:
 
 - **Opened or pushed:** the change is submitted with the report as its evidence, classified with the policy, the risk inputs (including the reverts and incidents of the components it touches, from this repository's records), the hard floors and its agent setup's record, and judged when the lane is `judge` and `judge: true`. The comment shows the lane, why, the agent setup's record and an `/onus approve` command for each row that needs a person. The latest classification is appended to `pulls.jsonl`, with the components the change touched, the change's features (what the learned lane model trains on), and the judge configuration and its verdict when the judge decided. With `lanes.learned`, the model is read from the base commit, and the comment shows its risk on a **Learned risk:** line (`onus help lanes`). The change's provenance record is written to `provenance.json` (output `provenance`; `onus help provenance`), and its rollout plan to `rollout.json` (outputs `rollout-strategy` and `rollout-plan`), which the comment shows on a **Rollout:** line (`onus help production`). Production traces kept in the records (`signals.jsonl`) are passed to `onus report --traces`, so the report's map includes the calls production observed.
+- **A review is submitted or dismissed:** the same as a push. The lane, the comment and the check are worked out again with the reviews as they now stand (see "Reviews in the human lane" below).
 - **Merged or closed:** the pull request's latest record becomes an outcome (`merged` or `closed`), with the commit it landed as, who merged it (`mergedBy`), the components it touched and its features. Running twice records it once. The provenance record is rebuilt from the records (output `provenance`); upload it with `actions/upload-artifact` to keep it.
 - **A push to the default branch:** commits that revert a merged change (`This reverts commit …`) are recorded against it; a reverted change no longer counts toward its agent setup's record.
 - **A `/onus` comment** from someone with write access (owner, member or collaborator); anyone else's is answered with a 😕 and ignored:
@@ -128,10 +132,14 @@ A change in the human lane needs a person to approve it. `onus ci pr --reviews <
 
     [{"by": "grace", "state": "APPROVED", "commit": "<sha>", "association": "MEMBER", "bot": false, "at": 1760000000}]
 
+or as an object that also says who is in each owning team:
+
+    {"reviews": [...], "teams": {"@acme/growth": ["grace", "lin"]}}
+
 `by` is the login without `@`; `state` is `APPROVED`, `CHANGES_REQUESTED`, `COMMENTED`, `DISMISSED` or `PENDING`, in any case; `commit` is the commit reviewed; `association` is the reviewer's author association; `bot` and `at` (seconds) are optional. A host gets them with the GitHub CLI:
 
-    gh api repos/OWNER/REPO/pulls/N/reviews --paginate | jq '[.[] | {by: .user.login, state, commit: .commit_id,
-      association: .author_association, bot: (.user.type == "Bot"),
+    gh api repos/OWNER/REPO/pulls/N/reviews --paginate | jq '[.[] | {by: (.user.login // "ghost"), state,
+      commit: (.commit_id // ""), association: .author_association, bot: (.user.type == "Bot"),
       at: ((.submitted_at // "1970-01-01T00:00:00Z") | fromdate)}]' > reviews.json
 
 The rules:
@@ -139,19 +147,25 @@ The rules:
 - Each reviewer's latest review counts, ordered by `at` and then by position. `COMMENTED` and `PENDING` never replace an earlier verdict; `DISMISSED` clears it.
 - A review is not counted, and is listed in `ignored` with the reason, when the reviewer is a bot (`bot`, or a login ending in `[bot]`), opened the pull request (`--author`), has no write access (an association other than OWNER, MEMBER or COLLABORATOR), or approved a commit other than the head.
 - Changes requested by a counted reviewer stand at any commit, as on GitHub.
-- In the human lane the review is satisfied with at least one counted approval and no outstanding changes requested. Approvals are recorded in every lane.
+- Whose approval counts in the human lane is `lanes.approval` in the base commit's onus.yaml, so a change cannot loosen it for itself. An explicit `--config` inside the repository is read at the base commit too; one outside it (a host's own) is taken as given. An onus.yaml that does not parse leaves the default, with a warning.
+  - `owner`, the default when the change has owners: only an owner of what changed. That is a person named as an owner (`@grace`), or a member of an owning team (`@acme/growth`) when the reviews file lists the team's members. An approval from anyone else is listed in `ignored` as "not an owner". Changes requested by anyone with write access still stand.
+  - `member`, the default when nobody owns what changed: any person with write access.
+  - When `owner` cannot be checked, any person with write access counts, and `note` says why: an owning team whose members the file does not list, an owner given as an email, no owners at all, or no owner but the author who could approve (the only owner opened the pull request, or the owning teams hold nobody else). A team the file lists with no members has none: beside other owners it adds nobody.
+- In the human lane the review is satisfied with at least one counted approval and no outstanding changes requested. Other lanes need no approval: there every approval from someone with write access is recorded, for provenance, and `approval` is `member`.
 
-The owners to ask are those of the rows that need a person (`hints.owners`, from onus.yaml), with CODEOWNERS at the head commit for those rows that name none, or the owners of every row when that finds nobody. Each is asked once per pull request: the pull record keeps everyone asked so far.
+The owners are read at the base commit, as GitHub reads CODEOWNERS, so a change can name neither its own owner nor, with `owner`, its own approver. For each file of the rows that need a person (of every row when that finds nobody), they are the owners of the component holding it in the base commit's onus.yaml (or the `--config` read as above), else the owners CODEOWNERS at the base commit gives the file. The report's `hints.owners` come from the head and are not used here. They are the owners to ask, each once per pull request: the pull record keeps everyone asked so far. `onus ci owners --base <ref> --report <file> [--config <file>]` prints them, `{"owners": [...]}`, so a host can look up the members of owning teams before it runs `ci pr --reviews`.
 
 The answer is the `review` key of what `onus ci pr` prints, always present:
 
     {"lane": "human", …, "review": {"required": true, "satisfied": false, "approvedBy": [],
       "changesRequestedBy": [], "owners": ["@team-growth"], "request": ["@team-growth"],
-      "ignored": [{"by": "@eve", "why": "no write access (CONTRIBUTOR)"}]}}
+      "ignored": [{"by": "@eve", "why": "no write access (CONTRIBUTOR)"}], "approval": "owner"}}
 
-`required` is true in the human lane only, and `satisfied` is true outside it. `request` lists the owners to ask now: not asked before, never the author, and empty once satisfied. `lane.md` gains a **Review:** paragraph in the human lane: who was asked, or that it was approved and by whom. Without `--reviews` there are no reviews, so a human-lane change waits.
+`required` is true in the human lane only, and `satisfied` is true outside it. `approval` is the rule that counted the approvals, `owner` or `member`, and `note` is there only when `owner` fell back to `member`. `request` lists the owners to ask now: not asked before, never the author, and empty once satisfied. `lane.md` gains a **Review:** paragraph in the human lane: who was asked, or that it was approved and by whom. Without `--reviews` there are no reviews, so a human-lane change waits.
 
-The pull record keeps `requested` (everyone asked) and `reviewedBy` (the counted approvals of its head), and the outcome keeps `reviewedBy`. A human-lane outcome with no `reviewedBy` merged without a counted review: an admin merge, or a check that was not required. The GitHub Action does not pass `--reviews` yet; Onus Cloud does, and turns `satisfied` into its check.
+The pull record keeps `requested` (everyone asked), `reviewedBy` (the counted approvals of its head) and `approval` (the rule that counted them, once a review was needed or given), and the outcome keeps `reviewedBy` and `approval`. A human-lane outcome with no `reviewedBy` merged without a counted review: an admin merge, or a check that was not required.
+
+With `records: true`, the action passes `--reviews`. It lists the pull request's reviews with the GitHub CLI, as above, and the members of each owning team of the repository's organisation that `onus ci owners` names. It asks the owners in `review.request` to review (GitHub's requested reviewers): `@org/team` of the repository's organisation as a team, `@login` as a person, never the author; emails and other organisations' teams are skipped. A name GitHub refuses (not a collaborator, or a team without access) is a warning, and the others are still asked. onus has already recorded it as asked, so it is not tried again on every push, and the comment says GitHub would not ask it. The workflow's own token cannot read team members (that needs the organisation's members: read permission), so with it onus counts anyone with write access for those teams and says so; give `github-token` a token that can read them to count only their members. While no review counts, the job fails (`wait-for-review`, default `true`) and the output `review` is `waiting`; once one does, it is `approved`. A `pull_request_review` event runs the action again, and after an approval it re-runs the failed `pull_request` check for the head (with `actions: write`), so both pass. Make the job a required status check in branch protection or a ruleset: otherwise a failed check is shown but does not stop a merge. A listing that fails passes no reviews, so the change keeps waiting. Each run is its own check of the same name on the head commit, and GitHub goes by the newest: when an approval is dismissed, the run for the dismissal fails, and it is the newest. For the same reason every review runs the action, comments too: a run that skipped the work would leave a passing check as the newest. Reviews on a closed pull request do nothing. Only `records: true` waits; `lanes: true` alone classifies without reviews, and says so in a notice when the lane is human. A pull request runs the workflow and the action as it changes them, so it could turn the wait off for itself: protect `.github/workflows` (and the action, when it is in the repository) with CODEOWNERS and *Require review from Code Owners*, or a ruleset. Onus Cloud passes `--reviews` too, and turns `satisfied` into its check.
 
 ### Who made the change
 
@@ -174,7 +188,7 @@ Each outcome is kept against an agent setup. Onus reads it from what git and Git
 
 - Pull requests from forks get a read-only token on `pull_request` events, so they are classified but not recorded.
 - Concurrent runs merge their records by taking every line from both sides, each as many times as the side that holds it most, and retry the push when another run pushed first. So a line one run wrote twice is kept twice, and a line two runs each wrote once is kept once.
-- The `onus ci` commands the action runs work in any CI system: `onus ci pr`, `onus ci closed`, `onus ci comment`, `onus ci push`, `onus ci rollout`, `onus ci rollback` and `onus ci records pull|push` (see `onus help commands` and `onus ci --help`).
+- The `onus ci` commands the action runs work in any CI system: `onus ci pr`, `onus ci owners`, `onus ci closed`, `onus ci comment`, `onus ci push`, `onus ci rollout`, `onus ci rollback` and `onus ci records pull|push` (see `onus help commands` and `onus ci --help`).
 
 ## Which changed lines tests ran
 

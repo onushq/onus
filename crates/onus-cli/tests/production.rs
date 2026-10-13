@@ -411,6 +411,35 @@ fn a_change_meets_production_and_is_rolled_back() {
         areas["areas"]["billing"]["changes"],
         serde_json::json!(["acme/shop#1"])
     );
+    // Scoped to one repository, as a classification of its changes reads it.
+    let shop = json(&onus(
+        &r,
+        &[
+            "signals",
+            "areas",
+            "--records",
+            rs,
+            "--repository",
+            "acme/shop",
+        ],
+    ));
+    assert_eq!(shop["areas"]["billing"]["reverts"], 1, "{shop}");
+    let other = json(&onus(
+        &r,
+        &[
+            "signals",
+            "areas",
+            "--records",
+            rs,
+            "--repository",
+            "acme/other",
+        ],
+    ));
+    assert_eq!(
+        other["areas"]["billing"]["reverts"].as_u64().unwrap_or(0),
+        0,
+        "{other}"
+    );
     // A rollback that was not planned, after the planned one, counts.
     assert_eq!(
         onus(

@@ -6,7 +6,7 @@ Once Onus has described a change, lanes decide what happens to it: merge it auto
 |---|---|
 | `auto-merge` | It merges when required checks pass (the action can enable GitHub's auto-merge). |
 | `judge` | `onus judge` verifies it; it merges on `approve`. |
-| `human` | A person with write access who did not open it approves its head commit. Its owners are asked to review. |
+| `human` | An owner of what changed (`lanes.approval`) who did not open it approves its head commit. Its owners are asked to review. |
 | `blocked` | It may not merge as it is. |
 
 ## Submitting a change
@@ -279,6 +279,10 @@ A gap is listed for each of `intent`, `token`, `evidence`, `escalations`, `judge
 
 ## In CI
 
-In the human lane, `onus ci pr --reviews <file>` decides whether the change has the review it needs: an approval of the head commit from someone with write access who is not a bot and did not open the pull request, and no outstanding request for changes. It also names the owners of the rows that need a person (onus.yaml, else CODEOWNERS) for the host to ask, each once per pull request. Onus Cloud uses this to keep its check waiting until then; see `onus help ci`.
+In the human lane, `onus ci pr --reviews <file>` decides whether the change has the review it needs: an approval of the head commit from someone with write access who is not a bot and did not open the pull request, and no outstanding request for changes. It also names the owners of the rows that need a person (onus.yaml, else CODEOWNERS) for the host to ask, each once per pull request.
+
+`lanes.approval` says whose approval counts. With `owner`, the default when the change has owners, only an owner counts: a person named as an owner, or a member of an owning team when the host says who is in it. With `member`, the default when nobody owns what changed, anyone with write access counts. When Onus cannot check an owner (a team whose members it was not given, or an email), or no owner but the author could approve, anyone with write access counts and the review says why. The rule and the owners are read at the base commit (onus.yaml, then CODEOWNERS), so a change can neither loosen the rule for itself nor name its own approver. The rule applies in the human lane only, and it is kept on the pull record, the outcome and the provenance record (`approval.review`).
+
+The action (with `records: true`) and Onus Cloud both pass the reviews, ask the owners to review, and keep their check failing or waiting until a review counts; see `onus help ci`.
 
 The action classifies every pull request with `lanes: true` and shows the lane in its comment. `apply-lane: true` labels the pull request `onus/lane:<lane>` and fails the job for `blocked`; `auto-merge: true` enables GitHub's auto-merge for the `auto-merge` lane. See `onus help ci`. With `records: true`, the action also keeps the outcome records on an `onus/records` branch: outcomes when pull requests close, reverts when the default branch moves, and approvals, audits and incidents from `/onus` comments.

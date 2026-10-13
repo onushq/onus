@@ -76,6 +76,21 @@
     "version"
   ],
   "$defs": {
+    "ApprovalRule": {
+      "description": "Whose approving review counts in the human lane.",
+      "oneOf": [
+        {
+          "description": "One of the change's owners, or a member of an owning team.",
+          "type": "string",
+          "const": "owner"
+        },
+        {
+          "description": "Any person with write access who did not open the pull request.",
+          "type": "string",
+          "const": "member"
+        }
+      ]
+    },
     "BehaviorConfig": {
       "description": "How `onus report --behavior` runs tests. Read from the base commit (or\n`--config`), so a change cannot alter the command that checks it.",
       "type": "object",
@@ -566,6 +581,17 @@
     "LanesConfig": {
       "type": "object",
       "properties": {
+        "approval": {
+          "description": "Whose approval lets a human-lane change through: `owner` (one of the\nchange's owners, or a member of an owning team) or `member` (any\nperson with write access). Default `owner` when the change names\nowners, `member` when it names none (`onus help ci`).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ApprovalRule"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "auditAfterMerge": {
           "description": "The share of changes approved without a person (`auto-merge`, or the\njudge's `approve`) that wait for a person to audit after they merge,\nchosen by a hash of the merge commit (0 to 1). Default 0.05.",
           "type": "number",

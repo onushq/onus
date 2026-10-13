@@ -6,7 +6,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use onus_core::Lane;
+use onus_core::{ApprovalRule, Lane};
 use serde::{Deserialize, Serialize};
 
 use crate::learned::Features;
@@ -41,6 +41,10 @@ pub struct PullRecord {
     /// Who approved the head commit, from the reviews that counted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reviewed_by: Vec<String>,
+    /// Whose approval counted (`lanes.approval`, after any fallback), when
+    /// a review was needed or given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval: Option<ApprovalRule>,
     /// `lanes.auditAfterMerge` when this change was classified; `ci closed`
     /// samples with it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -261,6 +265,7 @@ mod tests {
             components: vec![],
             requested: vec![],
             reviewed_by: vec![],
+            approval: None,
             audit_after_merge: None,
             features: None,
             caught: false,
@@ -273,12 +278,19 @@ mod tests {
         assert!(latest(&all, "acme/shop#2").is_none());
         // Review fields are left out when empty, so old lines stay the same.
         let line = serde_json::to_string(&rec(Lane::Human, 1)).unwrap();
-        assert!(!line.contains("requested") && !line.contains("reviewedBy"));
+        assert!(
+            !line.contains("requested")
+                && !line.contains("reviewedBy")
+                && !line.contains("approval")
+        );
         let mut reviewed = rec(Lane::Human, 3);
         reviewed.requested = vec!["@team-growth".into()];
         reviewed.reviewed_by = vec!["@grace".into()];
+        reviewed.approval = Some(ApprovalRule::Owner);
         let line = serde_json::to_string(&reviewed).unwrap();
-        assert!(line.contains(r#""requested":["@team-growth"],"reviewedBy":["@grace"]"#));
+        assert!(line.contains(
+            r#""requested":["@team-growth"],"reviewedBy":["@grace"],"approval":"owner""#
+        ));
         assert_eq!(serde_json::from_str::<PullRecord>(&line).unwrap(), reviewed);
         // The audit share is left out of older lines and round-trips.
         assert!(!line.contains("auditAfterMerge"));

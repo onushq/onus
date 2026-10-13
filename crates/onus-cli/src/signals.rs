@@ -76,6 +76,10 @@ Examples:
         /// The repository whose onus.yaml sets the window.
         #[arg(long, default_value = ".", value_name = "DIR")]
         repo: PathBuf,
+        /// Only this repository's changes (`owner/name`), as a classification
+        /// of one of its changes reads them. Signals that name no change count.
+        #[arg(long, value_name = "OWNER/NAME")]
+        repository: Option<String>,
     },
 }
 
@@ -280,7 +284,7 @@ fn traces(a: TraceArgs) -> Result<i32> {
     Ok(0)
 }
 
-fn areas(records: &Path, days: Option<u32>, repo: &Path) -> Result<i32> {
+fn areas(records: &Path, days: Option<u32>, repo: &Path, repository: Option<&str>) -> Result<i32> {
     let days = match days {
         Some(d) => d,
         None => lanes::lanes_config(repo, None)?.inputs.history.days,
@@ -292,7 +296,7 @@ fn areas(records: &Path, days: Option<u32>, repo: &Path) -> Result<i32> {
         &HistoryScope {
             since,
             until: Some(now),
-            repo: None,
+            repo: repository,
             exclude: None,
         },
     )?;
@@ -327,7 +331,8 @@ pub fn run(cmd: SignalsCmd) -> Result<i32> {
             records,
             days,
             repo,
-        } => areas(&records, days, &repo),
+            repository,
+        } => areas(&records, days, &repo, repository.as_deref()),
     }
 }
 
