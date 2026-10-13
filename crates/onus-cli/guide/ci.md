@@ -98,7 +98,7 @@ What happens on each event:
       /onus audit miss the opt-out was ignored
       /onus incident SMS sent twice involved: notifications, notifications:src/sms.ts#sendSms
 
-  `approve` records a person's approval of a row and re-runs the check, so the lane updates. `audit` records a human audit of a merged change, the miss rate that says whether the automatic lanes can be trusted, and clears the change from the audit queue (`onus outcomes audits`, `onus help lanes`). `incident` marks a merged change as having caused one, with the components and symbols involved: an agent setup with an incident among its last 20 changes cannot auto-merge, and `onus outcomes backlog` lists where incidents happen. The action reacts with 👍 and replies with what it recorded.
+  `approve` records a person's approval of a row and re-runs the check, so the lane updates. `audit` records a human audit of a merged change, the miss rate that says whether the automatic lanes can be trusted, and clears the change from the audit queue (`onus outcomes audits`, `onus help lanes`). `incident` marks a merged change as having caused one, with the components and symbols involved: an agent setup with an incident among its last 20 changes cannot auto-merge, and `onus outcomes backlog` lists where incidents happen. The action reacts with 👍 and replies with what it recorded. `/onus accuracy` is answered the same way but records nothing (see "Accuracy checks" below).
 
 ### Reviews in the human lane
 
@@ -164,7 +164,7 @@ The cached map's file name is a hash of everything that shapes it: the base comm
 
 With a cached base map, Onus extracts only the base commit's changed files (plus `onus.yaml`, its packs and `.gitignore` files), which roughly halves the time of a report on a large repository: about 12 seconds instead of 22 for a pull request in a 31,000-file repository.
 
-## Was the report useful? 👍 👎 and /onus caught
+## Was the report useful? 👍 👎, /onus caught and /onus accuracy
 
 The Phase 1 question is whether reviewers prefer the report to the raw diff. Two signals answer it, both left on the pull request itself:
 
@@ -188,6 +188,16 @@ To acknowledge those replies with a 🚀, add a second workflow; the same action
         runs-on: ubuntu-latest
         steps:
           - uses: onushq/onus/action@v0.10.0
+
+### Accuracy checks
+
+Wrong facts are the metric that matters most, so people can also say whether a report was right. After reading it, reply:
+
+    /onus accuracy ok
+    /onus accuracy wrong 3 the vendor is not new
+    /onus accuracy missed the nightly cron job now sends email too
+
+`wrong` names a row by its number in the table (from 1) or by its id; `missed` says what the report left out. Only people with write access (OWNER, MEMBER, COLLABORATOR) can give an accuracy check. With `records: true`, the action answers with a 👍, or with 😕 and the reason when it cannot take the check. It records nothing: an accuracy check is not an outcome and changes no track record. Onus Cloud asks for a check on a sample of reports, keeps the answers, and shows them with the 👍 and 👎 counts, the catch rate and review times on its Metrics page.
 
 The comment also carries the report's metrics line in a hidden HTML comment. `scripts/onus-metrics.sh` in the Onus repository reads all of it back with the GitHub CLI, one JSON line per pull request, or one line of totals with `--summary` (reports, large reports, the share of 👍 on large pull requests, the catch rate, changed lines per row, time to first review):
 

@@ -864,3 +864,152 @@ fn an_automatic_merge_is_sampled_and_audited() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("has no outcome yet"), "{err}");
 }
+
+#[test]
+fn comment_feedback_says_what_was_said() {
+    let tmp = tempfile::tempdir().unwrap();
+    let t = tmp.path();
+    let r = t.join("shop");
+    copy_dir(&fixture().join("base"), &r);
+    git(&r, &["init", "-q", "-b", "main"]);
+    git(&r, &["add", "-A"]);
+    git(&r, &["commit", "-q", "-m", "base"]);
+    git(&r, &["checkout", "-q", "-b", "codex/sms"]);
+    apply_overlay(&fixture().join("scenarios/s1-sms-alerts"), &r);
+    git(&r, &["add", "-A"]);
+    git(
+        &r,
+        &[
+            "commit",
+            "-q",
+            "-m",
+            "Text customers when their order ships",
+        ],
+    );
+    let rec = t.join("records");
+    let rs = rec.to_str().unwrap();
+    let change = "acme/shop#7";
+    onus(
+        &r,
+        &[
+            "ci",
+            "pr",
+            "--base",
+            "main",
+            "--head",
+            "codex/sms",
+            "--change",
+            change,
+            "--branch",
+            "codex/sms",
+            "--records",
+            rs,
+            "--out",
+            t.join("out").to_str().unwrap(),
+        ],
+    );
+    let report_file = t.join("report.json");
+    std::fs::write(
+        &report_file,
+        onus(
+            &r,
+            &[
+                "report",
+                "--base",
+                "main",
+                "--head",
+                "codex/sms",
+                "--format",
+                "json",
+            ],
+        ),
+    )
+    .unwrap();
+    let report: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&report_file).unwrap()).unwrap();
+    let first = report["changes"][0]["id"].as_str().unwrap().to_string();
+    let rows = report["changes"].as_array().unwrap().len();
+    let snapshot = || {
+        ["pulls.jsonl", "outcomes.jsonl"].map(|f| std::fs::read(rec.join(f)).unwrap_or_default())
+    };
+    let before = snapshot();
+
+    let say = |text: &str, association: &str, with_report: bool| -> serde_json::Value {
+        let f = t.join("comment.md");
+        std::fs::write(&f, text).unwrap();
+        let mut args = vec![
+            "ci",
+            "comment",
+            "--change",
+            change,
+            "--body-file",
+            f.to_str().unwrap(),
+            "--author",
+            "lead",
+            "--association",
+            association,
+            "--records",
+            rs,
+        ];
+        if with_report {
+            args.extend(["--report", report_file.to_str().unwrap()]);
+        }
+        serde_json::from_str(&onus(&r, &args)).unwrap()
+    };
+
+    // Anyone may say the report caught something; the note and who said it come back.
+    let caught = say("/onus caught the new SMS vendor", "NONE", false);
+    assert_eq!(caught["ok"], true, "{caught}");
+    assert_eq!(caught["note"], "the new SMS vendor");
+    assert_eq!(caught["by"], "@lead");
+    assert_eq!(
+        say("/onus caught", "NONE", false)["note"],
+        serde_json::Value::Null
+    );
+
+    // An accuracy check needs write access.
+    let ok = say("/onus accuracy ok", "MEMBER", true);
+    assert_eq!(ok["ok"], true, "{ok}");
+    assert_eq!(ok["verdict"], "ok");
+    assert_eq!(ok["row"], serde_json::Value::Null);
+    assert_eq!(ok["by"], "@lead");
+    let refused = say("/onus accuracy ok", "CONTRIBUTOR", true);
+    assert_eq!(refused["ok"], false);
+    assert_eq!(refused["command"], "accuracy");
+    assert!(
+        refused["reply"].as_str().unwrap().contains("write access"),
+        "{refused}"
+    );
+
+    // A row number is the row's id in the table; a row id is kept.
+    let wrong = say("/onus accuracy wrong 1 not new", "MEMBER", true);
+    assert_eq!(wrong["verdict"], "wrong", "{wrong}");
+    assert_eq!(wrong["row"], first.as_str());
+    assert_eq!(wrong["note"], "not new");
+    assert_eq!(
+        say("/onus accuracy wrong #1", "MEMBER", true)["row"],
+        first.as_str()
+    );
+    let unknown = say("/onus accuracy wrong 99 x", "MEMBER", true);
+    assert_eq!(unknown["ok"], false);
+    let text = unknown["reply"].as_str().unwrap();
+    assert!(text.contains("has no row `99`"), "{text}");
+    assert!(text.contains(&format!("it has {rows}")), "{text}");
+    let by_id = say(&format!("/onus accuracy wrong {first} x"), "MEMBER", true);
+    assert_eq!(by_id["row"], first.as_str(), "{by_id}");
+    assert_eq!(by_id["note"], "x");
+    // Without the report, the row is kept as written.
+    assert_eq!(say("/onus accuracy wrong 7 x", "MEMBER", false)["row"], "7");
+    assert_eq!(say("/onus accuracy wrong", "MEMBER", true)["ok"], false);
+
+    // A miss needs to say what was left out.
+    assert_eq!(say("/onus accuracy missed", "MEMBER", true)["ok"], false);
+    let missed = say("/onus accuracy missed the cron job", "MEMBER", true);
+    assert_eq!(missed["verdict"], "missed", "{missed}");
+    assert_eq!(missed["note"], "the cron job");
+    assert_eq!(missed["row"], serde_json::Value::Null);
+    assert_eq!(say("/onus accuracy maybe", "MEMBER", true)["ok"], false);
+
+    // None of it is a record.
+    assert_eq!(snapshot(), before);
+}

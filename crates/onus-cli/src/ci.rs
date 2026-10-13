@@ -8,7 +8,9 @@
 //! - It closes: `onus ci closed` turns its last record into an outcome,
 //!   merged or closed.
 //! - Someone comments `/onus approve`, `/onus audit` or `/onus incident`:
-//!   `onus ci comment` records it, for people with write access only.
+//!   `onus ci comment` records it, for people with write access only. It
+//!   also answers `/onus caught` and `/onus accuracy` with what was said,
+//!   for a hosted service to keep, and records nothing for them.
 //! - The default branch moves: `onus ci push` records reverts.
 //!
 //! Records live in a folder that `onus ci records pull|push` syncs with a
@@ -96,7 +98,8 @@ pub enum CiCmd {
         at: Option<u64>,
     },
     /// A comment on a pull request: `/onus approve <row>`, `/onus audit ok|miss`,
-    /// `/onus incident <what happened>`. Prints what to reply.
+    /// `/onus incident <what happened>`, `/onus caught <what>`, `/onus accuracy
+    /// ok|wrong <row>|missed <what>`. Prints what to reply.
     Comment {
         #[arg(long)]
         change: String,
@@ -110,6 +113,10 @@ pub enum CiCmd {
         association: String,
         #[arg(long, value_name = "DIR")]
         records: PathBuf,
+        /// The report the comment is about (onus report --format json). `/onus accuracy wrong <row>`
+        /// is checked against its rows, and a row number is turned into the row's id.
+        #[arg(long, value_name = "FILE")]
+        report: Option<PathBuf>,
     },
     /// The default branch moved: record reverts of merged changes.
     Push {
@@ -234,9 +241,24 @@ pub fn run(cmd: CiCmd) -> Result<i32> {
             author,
             association,
             records,
+            report,
         } => {
             let body = std::fs::read_to_string(&body_file)?;
-            let answer = comment(&change, &body, &author, &association, &records)?;
+            let report: Option<SemanticReport> = match &report {
+                Some(p) => Some(
+                    serde_json::from_str(&std::fs::read_to_string(p)?)
+                        .with_context(|| format!("{} is not a report", p.display()))?,
+                ),
+                None => None,
+            };
+            let answer = comment(
+                &change,
+                &body,
+                &author,
+                &association,
+                &records,
+                report.as_ref(),
+            )?;
             println!("{}", serde_json::to_string_pretty(&answer)?);
             Ok(0)
         }
@@ -660,13 +682,15 @@ fn closed(
 }
 
 /// A reply for a `/onus` comment, and whether the pull request should be
-/// classified again.
+/// classified again. `report` is the report the comment is about, to check
+/// `/onus accuracy wrong <row>` against.
 pub fn comment(
     change: &str,
     body: &str,
     author: &str,
     association: &str,
     records: &Path,
+    report: Option<&SemanticReport>,
 ) -> Result<serde_json::Value> {
     check_change(change)?;
     let line = body
@@ -680,9 +704,18 @@ pub fn comment(
     let mut words = rest.split_whitespace();
     let command = words.next().unwrap_or("").to_string();
     let args: Vec<&str> = words.collect();
+    let by = format!("@{author}");
     if command == "caught" {
-        // Counted from the comment itself by scripts/onus-metrics.sh.
-        return Ok(json!({ "command": "caught", "ok": true, "reply": null }));
+        // Anyone may say it. Nothing is recorded: scripts/onus-metrics.sh counts
+        // the comment itself, and a hosted service keeps the note.
+        let note = args.join(" ");
+        return Ok(json!({
+            "command": "caught",
+            "ok": true,
+            "reply": null,
+            "note": (!note.is_empty()).then_some(note),
+            "by": by,
+        }));
     }
     let reply = |ok: bool, text: String, rerun: bool| json!({ "command": command, "ok": ok, "reply": text, "rerun": rerun });
     if !["OWNER", "MEMBER", "COLLABORATOR"].contains(&association) {
@@ -692,8 +725,10 @@ pub fn comment(
             false,
         ));
     }
+    if command == "accuracy" {
+        return Ok(accuracy(&args, &by, report));
+    }
     std::fs::create_dir_all(records)?;
-    let by = format!("@{author}");
     match command.as_str() {
         "approve" => {
             if args.is_empty() {
@@ -741,8 +776,83 @@ pub fn comment(
                 Err(e) => Ok(reply(false, format!("{e:#}"), false)),
             }
         }
-        _ => Ok(reply(false, "Onus knows `/onus approve <row>`, `/onus audit ok|miss`, `/onus incident <what happened>` and `/onus caught <what>`.".into(), false)),
+        _ => Ok(reply(false, "Onus knows `/onus approve <row>`, `/onus audit ok|miss`, `/onus incident <what happened>`, `/onus accuracy ok|wrong|missed` and `/onus caught <what>`.".into(), false)),
     }
+}
+
+/// `/onus accuracy ok|wrong <row>|missed <what>`: a person's check of the
+/// report. It says what was said, with `wrong 3` turned into the third row's
+/// id when the report is known, and records nothing.
+fn accuracy(args: &[&str], by: &str, report: Option<&SemanticReport>) -> serde_json::Value {
+    let refuse =
+        |text: String| json!({ "command": "accuracy", "ok": false, "reply": text, "rerun": false });
+    let answer = |verdict: &str, row: Option<String>, note: String| {
+        json!({
+            "command": "accuracy",
+            "ok": true,
+            "reply": null,
+            "rerun": false,
+            "verdict": verdict,
+            "row": row,
+            "note": (!note.is_empty()).then_some(note),
+            "by": by,
+        })
+    };
+    let rest = |from: usize| args.get(from..).unwrap_or_default().join(" ");
+    match args.first().copied() {
+        Some("ok") => answer("ok", None, rest(1)),
+        Some("wrong") => {
+            let Some(row) = args.get(1).copied() else {
+                return refuse(
+                    "Name the row: `/onus accuracy wrong <row number or id> <what is wrong>`."
+                        .into(),
+                );
+            };
+            let row = match report {
+                Some(report) => match report_row(report, row) {
+                    Some(id) => id,
+                    None => {
+                        return refuse(format!(
+                            "This report has no row `{row}`: it has {}. Count rows from 1 in the table, or use a row id.",
+                            report.changes.len()
+                        ));
+                    }
+                },
+                None => row.to_string(),
+            };
+            answer("wrong", Some(row), rest(2))
+        }
+        Some("missed") => {
+            let note = rest(1);
+            if note.is_empty() {
+                return refuse(
+                    "Say what the report left out: `/onus accuracy missed <what>`.".into(),
+                );
+            }
+            answer("missed", None, note)
+        }
+        _ => refuse(
+            "Write `/onus accuracy ok`, `/onus accuracy wrong <row> <what>` or `/onus accuracy missed <what>`."
+                .into(),
+        ),
+    }
+}
+
+/// The id of a report row named by its number in the table (from 1, `#` allowed)
+/// or by its id.
+fn report_row(report: &SemanticReport, row: &str) -> Option<String> {
+    let n = row.strip_prefix('#').unwrap_or(row).parse::<usize>().ok();
+    if let Some(c) = n
+        .and_then(|n| n.checked_sub(1))
+        .and_then(|i| report.changes.get(i))
+    {
+        return Some(c.id.clone());
+    }
+    report
+        .changes
+        .iter()
+        .find(|c| c.id == row)
+        .map(|c| c.id.clone())
 }
 
 /// Fails unless `s` is a change id, `owner/repo#123`.
