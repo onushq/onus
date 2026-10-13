@@ -136,6 +136,20 @@ pub fn validate(config: &OnusConfig) -> Result<(), MapError> {
                 inputs.history.days
             ));
         }
+        if let Some(learned) = &lanes.learned {
+            let (judge, human) = (learned.judge, learned.human);
+            if !(0.0 < judge && judge <= human && human <= 1.0) {
+                problems.push(format!(
+                    "lanes.learned: the thresholds must be 0 < judge <= human <= 1, found judge {judge} and human {human}"
+                ));
+            }
+            if !learned.model.ends_with("lanes-model.json") {
+                problems.push(
+                    "lanes.learned.model: name the file …lanes-model.json, so a change to it goes to a person"
+                        .into(),
+                );
+            }
+        }
     }
     if let Some(events) = &config.extractors.events {
         for p in events.publish.iter().chain(&events.subscribe) {
@@ -230,5 +244,30 @@ extractors:
             parse("version: 1\nlanes:\n  inputs: { blastRadius: {}, history: { days: 30 } }\n")
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn a_learned_model_has_ordered_thresholds_and_a_named_file() {
+        let err = |learned: &str| {
+            parse(&format!("version: 1\nlanes:\n  learned: {learned}\n"))
+                .unwrap_err()
+                .to_string()
+        };
+        assert!(
+            err("{ judge: 0.9, human: 0.5 }").contains(
+                "lanes.learned: the thresholds must be 0 < judge <= human <= 1, found judge 0.9 and human 0.5"
+            )
+        );
+        assert!(err("{ judge: 0 }").contains("0 < judge"));
+        assert!(err("{ model: model.json }").contains(
+            "lanes.learned.model: name the file …lanes-model.json, so a change to it goes to a person"
+        ));
+        let loaded = parse("version: 1\nlanes:\n  learned: {}\n").unwrap();
+        let learned = loaded.config.lanes.unwrap().learned.unwrap();
+        assert_eq!(
+            (learned.model.as_str(), learned.judge, learned.human),
+            ("onus.lanes-model.json", 0.6, 0.85)
+        );
+        assert!(parse("version: 1\nlanes:\n  learned: { model: ops/lanes-model.json }\n").is_ok());
     }
 }

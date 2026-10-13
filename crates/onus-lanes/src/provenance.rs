@@ -725,6 +725,8 @@ mod tests {
                 reason: "a rule".into(),
                 rows: vec![],
             }],
+            learned: None,
+            features: None,
         }
     }
 
@@ -760,6 +762,8 @@ mod tests {
             requested: vec![],
             reviewed_by: vec![],
             audit_after_merge: None,
+            features: None,
+            caught: false,
         }
     }
 
@@ -782,6 +786,8 @@ mod tests {
             sampled: false,
             audit: None,
             merged_by: None,
+            features: None,
+            caught: false,
         }
     }
 

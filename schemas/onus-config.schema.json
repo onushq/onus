@@ -494,6 +494,17 @@
             }
           }
         },
+        "learned": {
+          "description": "A learned model that may raise a change's lane, never lower it\n(`onus help lanes`). Off unless written.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LearnedConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "minRecord": {
           "description": "Changes an agent setup needs on record before it may use the\n`auto-merge` lane. Default 10.",
           "type": "integer",
@@ -519,6 +530,30 @@
               "type": "null"
             }
           ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "LearnedConfig": {
+      "description": "A learned model that may raise a change's lane, never lower it\n(`onus help lanes`).",
+      "type": "object",
+      "properties": {
+        "human": {
+          "description": "Raise lanes below `human` to `human` at or above this risk. Default 0.85.",
+          "type": "number",
+          "format": "double",
+          "default": 0.85
+        },
+        "judge": {
+          "description": "Raise lanes below `judge` to `judge` at or above this risk. Default 0.6.",
+          "type": "number",
+          "format": "double",
+          "default": 0.6
+        },
+        "model": {
+          "description": "The model file from `onus lanes train`, relative to the repository\nroot. Its name must end in `lanes-model.json`, so a change to it goes\nto a person. Default `onus.lanes-model.json`.",
+          "type": "string",
+          "default": "onus.lanes-model.json"
         }
       },
       "additionalProperties": false

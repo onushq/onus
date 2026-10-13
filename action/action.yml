@@ -6,8 +6,9 @@ description: Report the changes in meaning of a pull request, as a sticky commen
 #   with records, classify it with its agent's track record and, when it
 #   closes, record the outcome.
 # - issue_comment: acknowledge `/onus caught <note>`; with records, act on
-#   `/onus approve`, `/onus audit` and `/onus incident`, and answer
-#   `/onus accuracy` (which records nothing).
+#   `/onus approve`, `/onus audit` and `/onus incident`, record `/onus caught`
+#   from people with write access, and answer `/onus accuracy` (which records
+#   nothing).
 # - push (to the default branch), with records: record reverts.
 # See `onus help ci`.
 author: Onus
@@ -556,7 +557,16 @@ runs:
         answer=$("$ONUS" ci comment --change "$CHANGE" --body-file "$RUNNER_TEMP/onus-comment.md" \
           --author "$AUTHOR" --association "$ASSOCIATION" --records "$dir")
         command=$(jq -r '.command // empty' <<< "$answer")
-        [ -z "$command" ] || [ "$command" = caught ] && exit 0
+        [ -z "$command" ] && exit 0
+        # A caught from someone with write access is recorded, for the learned
+        # lane model; the first step already reacted to it.
+        if [ "$command" = caught ]; then
+          if [ "$(jq -r '.recorded // false' <<< "$answer")" = true ]; then
+            "$ONUS" ci records push --dir "$dir" --branch "$RECORDS_BRANCH" --message "$CHANGE: /onus caught by $AUTHOR" ||
+              echo "::warning::Cannot push the records to $RECORDS_BRANCH (a read-only token on a fork?)."
+          fi
+          exit 0
+        fi
         # An accuracy check is answered, not recorded: there is nothing to push.
         if [ "$command" = accuracy ]; then
           reaction=$([ "$(jq -r .ok <<< "$answer")" = true ] && echo '+1' || echo confused)

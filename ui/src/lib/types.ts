@@ -281,16 +281,40 @@ export interface SemanticReport {
 
 export interface Applied {
 	lane: Lane;
-	/** `default`, `policy`, `input`, `floor`, `record` or `audit`. */
+	/** `default`, `policy`, `input`, `floor`, `model`, `record` or `audit`. */
 	source: string;
 	reason: string;
 	/** The ids of the report rows behind it. */
 	rows?: string[];
 }
 
+/** A feature that pushed the learned risk up. */
+export interface LearnedFactor {
+	feature: string;
+	value: number;
+	contribution: number;
+	/** In plain words: "2 breaking rows". */
+	text: string;
+}
+
+/** The learned lane model's view of a change; it can only raise a lane. */
+export interface LearnedRisk {
+	/** `applied`, `missing`, `stale` or `invalid`. */
+	status: string;
+	model?: string | null;
+	risk?: number | null;
+	judgeAt: number;
+	humanAt: number;
+	raised: boolean;
+	factors: LearnedFactor[];
+	/** Why a missing, stale or invalid model was ignored. */
+	note?: string | null;
+}
+
 export interface Classification {
 	lane: Lane;
 	applied: Applied[];
+	learned?: LearnedRisk;
 }
 
 export interface ReportAnswer {

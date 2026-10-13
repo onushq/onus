@@ -118,6 +118,7 @@ Some changes need a person whatever their size or shape, so they get their own r
 |---|---|---|---|
 | ci-changed | config | yes | .github/workflows/*, .gitlab-ci.yml, .circleci/, .buildkite/, Jenkinsfile |
 | onus-config-changed | config | yes | onus.yaml (the report used the base version) |
+| lanes-model-changed | config | yes | *lanes-model.json, the learned lane model (the lane used the base version) |
 | onus-pack-changed | config | yes | a framework pack listed in onus.yaml (the report used the base version) |
 | codeowners-changed | config | yes | CODEOWNERS |
 | policy-changed | config | yes | *.rego, policy/, policies/ |

@@ -18,3 +18,4 @@ Short records of decisions that are significant or hard to reverse. Propose a ne
 | [0012](0012-agents-act-through-mcp.md) | Agents hand work in through MCP, and cannot approve themselves | Accepted |
 | [0013](0013-outcome-records-from-ci.md) | Outcome records kept by CI on a branch of the repository | Accepted |
 | [0014](0014-built-in-risk-inputs.md) | Built-in risk inputs that only raise a lane | Accepted |
+| [0015](0015-learned-lanes-only-raise.md) | A learned model that only raises a lane, read from the base commit | Accepted |

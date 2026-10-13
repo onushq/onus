@@ -132,6 +132,16 @@ fn a_pull_request_is_recorded_from_open_to_revert() {
         pulls[0]["components"],
         serde_json::json!(["notifications", "user-preferences"])
     );
+    // And what the change looked like, for the learned lane model.
+    assert_eq!(pulls[0]["features"]["set"], 1, "{:?}", pulls[0]);
+    assert!(
+        pulls[0]["features"]["components"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("notifications")),
+        "{:?}",
+        pulls[0]
+    );
     let md = std::fs::read_to_string(out.join("lane.md")).unwrap();
     assert!(
         md.contains("/onus approve new-external-service:external:acme-sms@notifications"),
@@ -209,7 +219,8 @@ fn a_pull_request_is_recorded_from_open_to_revert() {
     );
 
     // The next run shows the approval and no longer offers that row. It
-    // runs in the same second as the approval, so it writes the same line.
+    // runs in the same second as the approval, on the same pull request, so
+    // it writes the same line.
     let approved_at = pulls.last().unwrap()["at"].to_string();
     onus(
         &r,
@@ -224,6 +235,10 @@ fn a_pull_request_is_recorded_from_open_to_revert() {
             change,
             "--branch",
             "codex/sms",
+            "--author",
+            "mike",
+            "--body-file",
+            body.to_str().unwrap(),
             "--at",
             &approved_at,
             "--records",
@@ -322,6 +337,9 @@ fn a_pull_request_is_recorded_from_open_to_revert() {
         outcomes[0]["components"],
         serde_json::json!(["notifications", "user-preferences"])
     );
+    let last_pull = lines(&rec.join("pulls.jsonl")).pop().unwrap();
+    assert_eq!(outcomes[0]["features"], last_pull["features"]);
+    assert!(outcomes[0]["features"].is_object());
 
     // Its provenance once merged, rebuilt from the records: the facts from
     // while it was open are kept.
@@ -401,6 +419,7 @@ fn a_pull_request_is_recorded_from_open_to_revert() {
     let reverted = outcomes.last().unwrap();
     assert_eq!(reverted["result"], "reverted");
     assert_eq!(reverted["components"], outcomes[0]["components"]);
+    assert_eq!(reverted["features"], outcomes[0]["features"]);
 
     // The rollout holds every outcome in order: merged, audited, the
     // incident and the revert.
@@ -467,6 +486,52 @@ fn a_pull_request_is_recorded_from_open_to_revert() {
         ),
         "{md}"
     );
+
+    // `/onus caught` from someone with write access is recorded: on the
+    // outcome once there is one, else on the pull record.
+    let count = |f: &str| lines(&rec.join(f)).len();
+    let (outcomes_before, pulls_before) = (count("outcomes.jsonl"), count("pulls.jsonl"));
+    let caught = say("/onus caught the new vendor", "NONE");
+    assert_eq!(
+        (&caught["ok"], &caught["recorded"]),
+        (&serde_json::json!(true), &serde_json::json!(false))
+    );
+    assert_eq!(count("outcomes.jsonl"), outcomes_before);
+    let caught = say("/onus caught the new vendor", "MEMBER");
+    assert_eq!(caught["recorded"], true, "{caught}");
+    assert_eq!(caught["note"], "the new vendor");
+    let outcomes = lines(&rec.join("outcomes.jsonl"));
+    assert_eq!(outcomes.len(), outcomes_before + 1);
+    let last = outcomes.last().unwrap();
+    assert_eq!(last["caught"], true, "{last}");
+    assert_eq!(last["result"], "reverted");
+    assert_eq!(last["note"], "caught by @lead: the new vendor");
+    assert_eq!(last["features"], outcomes[0]["features"]);
+    let f = t.join("comment.md");
+    std::fs::write(&f, "/onus caught the retry loop").unwrap();
+    let open_pr: serde_json::Value = serde_json::from_str(&onus(
+        &r,
+        &[
+            "ci",
+            "comment",
+            "--change",
+            "acme/shop#8",
+            "--body-file",
+            f.to_str().unwrap(),
+            "--author",
+            "lead",
+            "--association",
+            "OWNER",
+            "--records",
+            rs,
+        ],
+    ))
+    .unwrap();
+    assert_eq!(open_pr["recorded"], true, "{open_pr}");
+    let pulls = lines(&rec.join("pulls.jsonl"));
+    assert_eq!(pulls.len(), pulls_before + 1);
+    assert_eq!(pulls.last().unwrap()["change"], "acme/shop#8");
+    assert_eq!(pulls.last().unwrap()["caught"], true);
     git(&r, &["checkout", "-q", "main"]);
 
     // Two runs pushing at once: both sets of lines end up on the branch.

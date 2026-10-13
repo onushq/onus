@@ -57,7 +57,7 @@ pub const TOPICS: &[Topic] = &[
     },
     Topic {
         name: "lanes",
-        summary: "Risk lanes, change submissions, the verifying judge, outcome records and provenance",
+        summary: "Risk lanes, change submissions, the learned model, the verifying judge, outcome records and provenance",
         text: include_str!("../guide/lanes.md"),
     },
     Topic {

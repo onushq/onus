@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use onus_core::Lane;
 use serde::{Deserialize, Serialize};
 
+use crate::learned::Features;
 use crate::submission::{AgentSetup, Approval};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -43,6 +44,14 @@ pub struct PullRecord {
     /// samples with it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audit_after_merge: Option<f64>,
+    /// What the change looked like when it was classified; `ci closed`
+    /// copies it onto the outcome, for the learned lane model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub features: Option<Features>,
+    /// A person with write access said Onus caught a problem in it
+    /// (`/onus caught`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub caught: bool,
 }
 
 pub fn load(path: &Path) -> Result<Vec<PullRecord>> {
@@ -249,6 +258,8 @@ mod tests {
             requested: vec![],
             reviewed_by: vec![],
             audit_after_merge: None,
+            features: None,
+            caught: false,
         };
         append(&path, &rec(Lane::Human, 1)).unwrap();
         append(&path, &rec(Lane::Judge, 2)).unwrap();

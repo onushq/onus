@@ -88,8 +88,8 @@ With `records: true`, the action keeps the track record lanes depend on without 
 
 What happens on each event:
 
-- **Opened or pushed:** the change is submitted with the report as its evidence, classified with the policy, the risk inputs (including the reverts and incidents of the components it touches, from this repository's records), the hard floors and its agent setup's record, and judged when the lane is `judge` and `judge: true`. The comment shows the lane, why, the agent setup's record and an `/onus approve` command for each row that needs a person. The latest classification is appended to `pulls.jsonl`, with the components the change touched, and the judge configuration and its verdict when the judge decided. The change's provenance record is written to `provenance.json` (output `provenance`; `onus help provenance`).
-- **Merged or closed:** the pull request's latest record becomes an outcome (`merged` or `closed`), with the commit it landed as, who merged it (`mergedBy`) and the components it touched. Running twice records it once. The provenance record is rebuilt from the records (output `provenance`); upload it with `actions/upload-artifact` to keep it.
+- **Opened or pushed:** the change is submitted with the report as its evidence, classified with the policy, the risk inputs (including the reverts and incidents of the components it touches, from this repository's records), the hard floors and its agent setup's record, and judged when the lane is `judge` and `judge: true`. The comment shows the lane, why, the agent setup's record and an `/onus approve` command for each row that needs a person. The latest classification is appended to `pulls.jsonl`, with the components the change touched, the change's features (what the learned lane model trains on), and the judge configuration and its verdict when the judge decided. With `lanes.learned`, the model is read from the base commit, and the comment shows its risk on a **Learned risk:** line (`onus help lanes`). The change's provenance record is written to `provenance.json` (output `provenance`; `onus help provenance`).
+- **Merged or closed:** the pull request's latest record becomes an outcome (`merged` or `closed`), with the commit it landed as, who merged it (`mergedBy`), the components it touched and its features. Running twice records it once. The provenance record is rebuilt from the records (output `provenance`); upload it with `actions/upload-artifact` to keep it.
 - **A push to the default branch:** commits that revert a merged change (`This reverts commit …`) are recorded against it; a reverted change no longer counts toward its agent setup's record.
 - **A `/onus` comment** from someone with write access (owner, member or collaborator); anyone else's is answered with a 😕 and ignored:
 
@@ -98,7 +98,7 @@ What happens on each event:
       /onus audit miss the opt-out was ignored
       /onus incident SMS sent twice involved: notifications, notifications:src/sms.ts#sendSms
 
-  `approve` records a person's approval of a row and re-runs the check, so the lane updates. `audit` records a human audit of a merged change, the miss rate that says whether the automatic lanes can be trusted, and clears the change from the audit queue (`onus outcomes audits`, `onus help lanes`). `incident` marks a merged change as having caused one, with the components and symbols involved: an agent setup with an incident among its last 20 changes cannot auto-merge, and `onus outcomes backlog` lists where incidents happen. The action reacts with 👍 and replies with what it recorded. `/onus accuracy` is answered the same way but records nothing (see "Accuracy checks" below).
+  `approve` records a person's approval of a row and re-runs the check, so the lane updates. `audit` records a human audit of a merged change, the miss rate that says whether the automatic lanes can be trusted, and clears the change from the audit queue (`onus outcomes audits`, `onus help lanes`). `incident` marks a merged change as having caused one, with the components and symbols involved: an agent setup with an incident among its last 20 changes cannot auto-merge, and `onus outcomes backlog` lists where incidents happen. The action reacts with 👍 and replies with what it recorded. `/onus accuracy` is answered the same way but records nothing (see "Accuracy checks" below). `/onus caught <what>` from someone with write access is recorded too, as `caught: true` on the change's outcome, or on its pull record while it is open: the learned lane model counts it as a problem, like an incident (`onus help lanes`).
 
 ### Reviews in the human lane
 
@@ -173,7 +173,7 @@ The Phase 1 question is whether reviewers prefer the report to the raw diff. Two
 
       /onus caught the new SMS vendor; I would have missed it in 1,400 lines
 
-To acknowledge those replies with a 🚀, add a second workflow; the same action handles both events:
+Anyone's `/onus caught` counts toward the catch rate. One from someone with write access is also recorded when the action keeps records (`records: true`), and trains the learned lane model. To acknowledge those replies with a 🚀, add a second workflow; the same action handles both events:
 
     name: Onus caught
     on:

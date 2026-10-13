@@ -402,6 +402,8 @@ fn report(state: &State, body: Value) -> Answer {
         &config,
         &lanes::ClassifyOpts {
             outcomes: Some(&state.outcomes),
+            // The model the base commit holds.
+            model_at: Some(&pair.base.sha),
             ..Default::default()
         },
     )?;
@@ -1023,6 +1025,8 @@ fn outcomes_record(state: &State, body: Value) -> Answer {
             sampled: false,
             audit: None,
             merged_by: None,
+            features: None,
+            caught: false,
         },
     )?;
     outcomes(state)

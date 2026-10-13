@@ -134,6 +134,10 @@ pub struct LanesConfig {
     /// Built-in risk inputs; each can only raise a lane (`onus help lanes`).
     #[serde(default)]
     pub inputs: RiskInputs,
+    /// A learned model that may raise a change's lane, never lower it
+    /// (`onus help lanes`). Off unless written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub learned: Option<LearnedConfig>,
 }
 
 fn default_lane() -> Lane {
@@ -159,6 +163,47 @@ impl Default for LanesConfig {
             held_out: None,
             taste: None,
             inputs: RiskInputs::default(),
+            learned: None,
+        }
+    }
+}
+
+/// A learned model that may raise a change's lane, never lower it
+/// (`onus help lanes`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct LearnedConfig {
+    /// The model file from `onus lanes train`, relative to the repository
+    /// root. Its name must end in `lanes-model.json`, so a change to it goes
+    /// to a person. Default `onus.lanes-model.json`.
+    #[serde(default = "default_model_path")]
+    pub model: String,
+    /// Raise lanes below `judge` to `judge` at or above this risk. Default 0.6.
+    #[serde(default = "default_judge_at")]
+    pub judge: f64,
+    /// Raise lanes below `human` to `human` at or above this risk. Default 0.85.
+    #[serde(default = "default_human_at")]
+    pub human: f64,
+}
+
+fn default_model_path() -> String {
+    "onus.lanes-model.json".into()
+}
+
+fn default_judge_at() -> f64 {
+    0.6
+}
+
+fn default_human_at() -> f64 {
+    0.85
+}
+
+impl Default for LearnedConfig {
+    fn default() -> Self {
+        LearnedConfig {
+            model: default_model_path(),
+            judge: default_judge_at(),
+            human: default_human_at(),
         }
     }
 }
@@ -553,6 +598,15 @@ mod tests {
         assert_eq!(off.history, HistoryInput::default());
         assert!(lanes(r#"{"inputs": {"speed": {}}}"#).is_err());
         assert!(lanes(r#"{"inputs": {"history": {"weeks": 2}}}"#).is_err());
+    }
+
+    #[test]
+    fn a_learned_model_is_off_unless_written() {
+        assert_eq!(lanes("{}").unwrap().learned, None);
+        let on = lanes(r#"{"learned": {}}"#).unwrap().learned.unwrap();
+        assert_eq!(on, LearnedConfig::default());
+        assert_eq!(on.model, "onus.lanes-model.json");
+        assert!(lanes(r#"{"learned": {"raise": 1}}"#).is_err());
     }
 
     #[test]

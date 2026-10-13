@@ -11,18 +11,22 @@
 //!    to a person; a new dependency never auto-merges; committed secrets,
 //!    writes outside the token's scope and weakened tests without an
 //!    approval are blocked.
-//! 5. A setup with too short a record may not auto-merge, and a share of
+//! 5. Raise it with the learned model, when `lanes.learned` is set: at or
+//!    above its thresholds a change goes to the judge or a person. It never
+//!    lowers a lane and never blocks (ADR 0015).
+//! 6. A setup with too short a record may not auto-merge, and a share of
 //!    the remaining auto-merges is audited by a person.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use onus_core::{
-    ChangeKind, Confidence, Lane, LaneRule, LanesConfig, RuleMatch, SemanticChange, SemanticReport,
-    TestReach, Thresholds,
+    ChangeKind, Confidence, Lane, LaneRule, LanesConfig, LearnedConfig, RuleMatch, SemanticChange,
+    SemanticReport, TestReach, Thresholds,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::learned::{Factor, Features, Model, Prediction};
 use crate::submission::Submission;
 
 /// One reason the lane is what it is.
@@ -30,7 +34,7 @@ use crate::submission::Submission;
 #[serde(rename_all = "camelCase")]
 pub struct Applied {
     pub lane: Lane,
-    /// `default`, `policy`, `input`, `floor`, `record` or `audit`.
+    /// `default`, `policy`, `input`, `floor`, `model`, `record` or `audit`.
     pub source: String,
     pub reason: String,
     /// The ids of the report rows behind it, when there are some.
@@ -38,12 +42,71 @@ pub struct Applied {
     pub rows: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Classification {
     pub lane: Lane,
     /// Every rule that applied, in the order it was applied.
     pub applied: Vec<Applied>,
+    /// The learned model's view, when `lanes.learned` is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub learned: Option<LearnedRisk>,
+    /// What the change looked like when classified: kept with its records
+    /// for training.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub features: Option<Features>,
+}
+
+/// The learned model's view of a change.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LearnedRisk {
+    /// `applied`, `missing` (no model file at the commit), `stale` (another
+    /// feature set) or `invalid` (it does not parse).
+    pub status: String,
+    /// The model's id (`learned::model_id`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// The change's risk, to 3 decimal places.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk: Option<f64>,
+    pub judge_at: f64,
+    pub human_at: f64,
+    /// Whether the model raised the lane.
+    pub raised: bool,
+    /// The features that pushed the risk up most, largest first.
+    #[serde(default)]
+    pub factors: Vec<Factor>,
+    /// Why a missing, stale or invalid model was ignored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl LearnedRisk {
+    /// A model that could not be used: the lane comes from rules only.
+    pub fn ignored(status: &str, config: &LearnedConfig, note: String) -> LearnedRisk {
+        LearnedRisk {
+            status: status.into(),
+            model: None,
+            risk: None,
+            judge_at: config.judge,
+            human_at: config.human,
+            raised: false,
+            factors: vec![],
+            note: Some(note),
+        }
+    }
+}
+
+/// A learned model, ready to apply.
+#[derive(Debug, Clone, Copy)]
+pub struct Learned<'a> {
+    pub model: &'a Model,
+    /// Its id (`learned::model_id`).
+    pub id: &'a str,
+    pub config: &'a LearnedConfig,
+    /// The change's features.
+    pub features: &'a Features,
 }
 
 fn kind_name(k: ChangeKind) -> &'static str {
@@ -123,6 +186,8 @@ pub struct ClassifyContext<'a> {
     /// Whether the submission's token allows writing a path (`None` when
     /// there is no token).
     pub writable: Option<&'a dyn Fn(&str) -> bool>,
+    /// The learned model, when `lanes.learned` is set and one was found.
+    pub learned: Option<Learned<'a>>,
 }
 
 impl std::fmt::Debug for ClassifyContext<'_> {
@@ -131,6 +196,7 @@ impl std::fmt::Debug for ClassifyContext<'_> {
             .field("record", &self.record)
             .field("areas", &self.areas)
             .field("writable", &self.writable.is_some())
+            .field("learned", &self.learned.map(|l| l.id))
             .finish()
     }
 }
@@ -141,6 +207,7 @@ impl Default for ClassifyContext<'_> {
             record: None,
             areas: &NO_HISTORY,
             writable: None,
+            learned: None,
         }
     }
 }
@@ -496,7 +563,43 @@ pub fn classify(
             &mut lane,
         );
     }
-    // 5. Track record and random audits.
+    // 5. The learned model: it only raises, to the judge or a person, never
+    // to blocked. Its entry is added only when it raises, so it never
+    // crowds out a rule's reason; its view is always in `learned`.
+    let mut learned = None;
+    if let Some(l) = &ctx.learned {
+        let p = l.model.predict(l.features);
+        let to = if p.risk >= l.config.human {
+            Lane::Human
+        } else if p.risk >= l.config.judge {
+            Lane::Judge
+        } else {
+            lane
+        };
+        let factors = l.model.factors(&p, l.features);
+        let raised = to > lane;
+        if raised {
+            raise(
+                to,
+                "model",
+                model_reason(&p, &factors, l),
+                vec![],
+                &mut applied,
+                &mut lane,
+            );
+        }
+        learned = Some(LearnedRisk {
+            status: "applied".into(),
+            model: Some(l.id.to_string()),
+            risk: Some((p.risk * 1000.0).round() / 1000.0),
+            judge_at: l.config.judge,
+            human_at: l.config.human,
+            raised,
+            factors,
+            note: None,
+        });
+    }
+    // 6. Track record and random audits.
     if lane == Lane::AutoMerge && record.is_some_and(|r| r.recent_incidents > 0) {
         raise(
             Lane::Judge,
@@ -539,7 +642,35 @@ pub fn classify(
             &mut lane,
         );
     }
-    Classification { lane, applied }
+    Classification {
+        lane,
+        applied,
+        learned,
+        features: None,
+    }
+}
+
+/// "the learned model puts this change's risk at 0.91 (a person from 0.85,
+/// the judge from 0.60): 2 breaking rows (+1.42), …; model 3f2a9c1e0b7d,
+/// trained on 412 outcomes"
+fn model_reason(p: &Prediction, factors: &[Factor], l: &Learned) -> String {
+    let why: Vec<String> = factors
+        .iter()
+        .map(|f| format!("{} (+{:.2})", f.text, f.contribution))
+        .collect();
+    format!(
+        "the learned model puts this change's risk at {:.2} (a person from {:.2}, the judge from {:.2}){}; model {}, trained on {} outcomes",
+        p.risk,
+        l.config.human,
+        l.config.judge,
+        if why.is_empty() {
+            String::new()
+        } else {
+            format!(": {}", why.join(", "))
+        },
+        l.id,
+        l.model.training.examples
+    )
 }
 
 /// The first changed file of an untested row.
@@ -920,6 +1051,174 @@ mod tests {
                 assert!(classify(r, None, &human, &ctx).lane >= Lane::Human);
             }
         }
+    }
+
+    fn model(bias: f64, weights: &[(&str, f64)]) -> Model {
+        use crate::learned::{FEATURE_SET, FEATURES, Holdout, Rates, SCHEMA, Training};
+        let d = FEATURES.len();
+        let none = || Rates {
+            raised: None,
+            recall: None,
+        };
+        Model {
+            schema: SCHEMA,
+            feature_set: FEATURE_SET,
+            features: FEATURES.iter().map(|f| f.to_string()).collect(),
+            mean: vec![0.0; d],
+            scale: vec![1.0; d],
+            weights: FEATURES
+                .iter()
+                .map(|f| weights.iter().find(|w| w.0 == *f).map_or(0.0, |w| w.1))
+                .collect(),
+            bias,
+            training: Training {
+                examples: 412,
+                positives: 23,
+                skipped: BTreeMap::new(),
+                settle_days: 14,
+                through: 0,
+                outcomes_sha256: String::new(),
+                l2: 0.01,
+                iterations: 3000,
+                learning_rate: 0.5,
+            },
+            holdout: Holdout {
+                examples: 0,
+                positives: 0,
+                auc: None,
+                at_judge: none(),
+                at_human: none(),
+            },
+        }
+    }
+
+    fn with_model(
+        r: &SemanticReport,
+        p: &LanesConfig,
+        m: &Model,
+        config: &LearnedConfig,
+    ) -> Classification {
+        let features = crate::learned::features(r, None, &crate::learned::History::default());
+        let ctx = ClassifyContext {
+            learned: Some(Learned {
+                model: m,
+                id: "3f2a9c1e0b7d",
+                config,
+                features: &features,
+            }),
+            ..with(VETERAN)
+        };
+        classify(r, None, p, &ctx)
+    }
+
+    #[test]
+    fn a_model_only_raises() {
+        let p = policy();
+        let mut secret = report(vec![row(ChangeKind::Internal, "internal-changes", &[])]);
+        secret.summary.secrets = 1;
+        let reports = [
+            report(vec![row(ChangeKind::Internal, "internal-changes", &[])]),
+            report(vec![
+                row(ChangeKind::Internal, "internal-changes", &[]),
+                row(ChangeKind::Additive, "export-added", &[]),
+            ]),
+            report(vec![row(
+                ChangeKind::Internal,
+                "internal-changes",
+                &["payments"],
+            )]),
+            secret,
+        ];
+        let models = [
+            model(-20.0, &[]),
+            model(0.0, &[]),
+            model(20.0, &[]),
+            model(-1.0, &[("rows", 3.0), ("kind.internal", -2.0)]),
+        ];
+        let thresholds = [(0.6, 0.85), (0.1, 0.2), (0.5, 0.5), (1.0, 1.0)];
+        let rules_and_floors = |c: &Classification| -> Vec<Applied> {
+            c.applied
+                .iter()
+                .filter(|a| ["default", "policy", "input", "floor"].contains(&a.source.as_str()))
+                .cloned()
+                .collect()
+        };
+        for r in &reports {
+            let without = classify(r, None, &p, &with(VETERAN));
+            for m in &models {
+                for (judge, human) in thresholds {
+                    let config = LearnedConfig {
+                        judge,
+                        human,
+                        ..LearnedConfig::default()
+                    };
+                    let c = with_model(r, &p, m, &config);
+                    assert!(c.lane >= without.lane, "{c:?}");
+                    if without.lane != Lane::Blocked {
+                        assert_ne!(c.lane, Lane::Blocked);
+                    }
+                    assert_eq!(rules_and_floors(&c), rules_and_floors(&without));
+                    let l = c.learned.unwrap();
+                    assert_eq!(l.status, "applied");
+                    assert_eq!(l.raised, c.applied.iter().any(|a| a.source == "model"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_model_raises_at_its_thresholds() {
+        let p = policy();
+        let docs = report(vec![row(ChangeKind::Internal, "internal-changes", &[])]);
+        let config = LearnedConfig::default();
+        // One internal row adds ln 2 to the logit; the bias sets the risk.
+        let at = |risk: f64| {
+            let internal =
+                crate::learned::features(&docs, None, &Default::default()).get("kind.internal");
+            let bias = (risk / (1.0 - risk)).ln() - internal;
+            with_model(&docs, &p, &model(bias, &[("kind.internal", 1.0)]), &config)
+        };
+        let c = at(0.7);
+        assert_eq!(c.lane, Lane::Judge);
+        let m = inputs(&c, "model");
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].lane, Lane::Judge);
+        assert!(m[0].reason.contains("0.70"), "{}", m[0].reason);
+        assert!(
+            m[0].reason.contains("1 internal row (+0.69)"),
+            "{}",
+            m[0].reason
+        );
+        assert!(
+            m[0].reason
+                .contains("(a person from 0.85, the judge from 0.60)"),
+            "{}",
+            m[0].reason
+        );
+        assert!(
+            m[0].reason
+                .ends_with("model 3f2a9c1e0b7d, trained on 412 outcomes"),
+            "{}",
+            m[0].reason
+        );
+        let l = c.learned.unwrap();
+        assert!(l.raised);
+        assert_eq!(l.factors[0].text, "1 internal row");
+        assert_eq!(at(0.9).lane, Lane::Human);
+        let low = at(0.1);
+        assert_eq!(low.lane, Lane::AutoMerge);
+        assert!(inputs(&low, "model").is_empty());
+        let l = low.learned.unwrap();
+        assert_eq!((l.risk, l.raised), (Some(0.1), false));
+        // Already with a person: nothing to raise.
+        let payments = report(vec![row(
+            ChangeKind::Internal,
+            "internal-changes",
+            &["payments"],
+        )]);
+        let c = with_model(&payments, &p, &model(20.0, &[]), &config);
+        assert_eq!(c.lane, Lane::Human);
+        assert!(inputs(&c, "model").is_empty());
     }
 
     #[test]

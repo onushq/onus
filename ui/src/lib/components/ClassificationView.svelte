@@ -12,6 +12,29 @@
 		<span class="text-sm text-muted-foreground">Lane</span>
 		<LaneBadge lane={classification.lane} large />
 	</div>
+	{#if classification.learned}
+		{@const l = classification.learned}
+		<div class="text-sm">
+			{#if l.status === 'applied' && l.risk != null}
+				<p>
+					<span class="text-muted-foreground">Learned risk</span>
+					<span class="font-medium tabular-nums">{l.risk.toFixed(2)}</span>
+					<span class="text-muted-foreground"
+						>· judge from {l.judgeAt.toFixed(2)}, a person from {l.humanAt.toFixed(2)}{#if l.model}
+							· model <code>{l.model}</code>{/if}</span
+					>
+				</p>
+				{#if l.factors.length > 0}
+					<p class="mt-1 text-muted-foreground">{l.factors.map((f) => f.text).join(', ')}</p>
+				{/if}
+			{:else if l.note}
+				<p class="text-muted-foreground">
+					<span>Learned risk:</span>
+					<Inline text={l.note} />
+				</p>
+			{/if}
+		</div>
+	{/if}
 	<ol class="relative grid gap-3 border-l pl-5">
 		{#each classification.applied as a, i (i)}
 			<li class="relative text-sm">

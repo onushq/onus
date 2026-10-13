@@ -430,6 +430,8 @@ mod tests {
                 reason: "test".into(),
                 rows: vec![],
             }],
+            learned: None,
+            features: None,
         }
     }
 

@@ -1,6 +1,6 @@
 # Risk lanes and the judge
 
-Once Onus has described a change, lanes decide what happens to it: merge it automatically, have the judge verify it, send it to a person, or block it. Lanes come from rules you write and from hard floors no rule can lower; nothing about a lane is generated.
+Once Onus has described a change, lanes decide what happens to it: merge it automatically, have the judge verify it, send it to a person, or block it. Lanes come from rules you write and from hard floors no rule can lower. A learned model you train and commit can raise a lane, never lower it.
 
 | Lane | What happens |
 |---|---|
@@ -25,7 +25,7 @@ The submission holds the stated intent, Onus's report, every changed path, the t
     onus classify --report report.json              # a change without a submission (CI)
     onus classify --submission submission.json --outcomes outcomes.jsonl --change acme/shop#42
 
-The answer is the lane and every rule that applied, in order. Each entry has a `source` (`default`, `policy`, `input`, `floor`, `record` or `audit`), a reason, and the ids of the report rows behind it (`rows`):
+The answer is the lane and every rule that applied, in order. Each entry has a `source` (`default`, `policy`, `input`, `floor`, `model`, `record` or `audit`), a reason, and the ids of the report rows behind it (`rows`):
 
 1. The policy's `default` lane, or a lower one when a `match: every` rule covers every row of the change (for example, internal changes in a docs component).
 2. Rules that raise the lane when any row matches.
@@ -34,7 +34,8 @@ The answer is the lane and every rule that applied, in order. Each entry has a `
    - **Blocked:** a committed secret, a write outside the token's scope, or weakened tests without a person's approval.
    - **Human:** rows in sensitive code (`auth`, `payments`, `pii`, or any label of medium or high sensitivity), security-sensitive rows, rules of the game (tests, CI, policies, `onus.yaml`, and edits to the code of a declared contract), rows outside the stated intent, and third-party code new to the repository (an npm package no component used before).
    - **Judge:** a new dependency never auto-merges: a package new to a component, or a new dependency between components.
-5. An agent setup with fewer than `minRecord` merged changes on record cannot auto-merge. A share (`auditRate`) of the remaining auto-merges is sent to a person before merging, chosen by a hash of the head commit.
+5. The learned model (`lanes.learned`, below), read from the base commit: at or above its thresholds it raises a lower lane to `judge` or `human`. It never lowers a lane and never blocks.
+6. An agent setup with fewer than `minRecord` merged changes on record cannot auto-merge. A share (`auditRate`) of the remaining auto-merges is sent to a person before merging, chosen by a hash of the head commit.
 
 ## Risk inputs
 
@@ -57,7 +58,48 @@ Four built-in inputs read facts Onus computes for every change. They are on by d
           reverts: { judge: 1 }
           incidents: { human: 1 }
 
+Every classification also carries `features`: what the change looked like when it was classified, which the learned model trains on, and `learned` when `lanes.learned` is set.
+
 Test reach is per file: a file counts as tested when a test in the map exercises anything in it, and as traced when a runtime trace saw it (`onus help environments`). It is not line coverage. History counts each change once per component, from every record in the window, so a revert and an incident count at the time they were recorded. Code outside every component counts as `root`. A backfill (`onus ci pr --at`) sees only what was recorded by then. Records shared by several repositories are scoped with `--change owner/repo#N`: only that repository's changes count, and the change itself is left out. `onus ci pr` does this for you.
+
+## A learned model that only raises
+
+Once outcome records show which changes went wrong, a model can learn from them. It may move a change up a lane, never below the lane the rules give it, and never to `blocked`.
+
+    onus ci records pull --dir rec
+    onus lanes train --outcomes rec/outcomes.jsonl          # writes onus.lanes-model.json
+    git add onus.lanes-model.json && git commit -m "Lanes model"
+
+    lanes:
+      learned:
+        model: onus.lanes-model.json   # the default
+        judge: 0.6                     # raise to the judge at or above this risk
+        human: 0.85                    # raise to a person at or above this risk
+
+**What it learns from.** Every classification computes a fixed set of features from the report (rows of each kind, blast radius, dependent components, lines and files, novelty, sensitive code, rows that need a person, map confidence, test reach, unverified contracts, rule violations, a stated intent), the submission (passing and failing test runs) and the records (earlier changes and problems in the same components, the agent setup's record). `onus ci pr` keeps them on the pull record, `onus ci closed` copies them onto the outcome, and reverts, incidents and audits keep them. `onus outcomes record --classification <file>` copies them from a classification, for outcomes recorded by hand.
+
+**What counts as a problem.** A change that had an incident, was reverted or rolled back, whose audit found a miss, or about which a person with write access said `/onus caught` (`onus help ci`). A merged change counts as clean once it is `--settle-days` old (default 14) at the latest record's time, so reverts and incidents have had time to show. Open changes, changes closed without a catch, unsettled merges and records without features are left out, and the output says how many.
+
+**Training.** A logistic regression on standardized features, class-balanced and L2-regularised, fitted by gradient descent from zero with a fixed number of steps. There is no randomness: the same records in any line order give the same file, byte for byte. A fifth of the changes, chosen by a hash of their ids, is held out: a first fit without them is measured on them, then the model is fitted on everything. It refuses with "too little data" (exit 1) below `--min-examples` (default 50) labelled changes or `--min-positives` (10) problems, or when the part left after holding out the fifth lacks problems or clean merges. With `--config` and `--out`, nothing is read from `--repo`, so it runs outside a repository. `--dry-run` measures and writes nothing. It prints:
+
+    { "out": "onus.lanes-model.json", "written": true, "model": "3f2a9c1e0b7d",
+      "examples": 412, "positives": 23,
+      "skipped": { "noFeatures": 80, "staleFeatures": 0, "unsettled": 12, "undecided": 35 },
+      "holdout": { "examples": 83, "positives": 5, "auc": 0.82,
+                   "atJudge": { "raised": 0.21, "recall": 0.8 }, "atHuman": { "raised": 0.04, "recall": 0.4 } },
+      "weights": [ { "feature": "kind.breaking", "weight": 1.21 }, … ] }
+
+`raised` is the share of held-out changes at or above a threshold, and `recall` the share of held-out problems at or above it. Tune `judge` and `human` with them: lower thresholds raise more changes and catch more problems. The risk is a relative score, not a calibrated probability, because the classes are balanced.
+
+**Applying it.** `onus classify`, `onus judge`, `onus ci pr`, `onus ui` and the MCP `onus_submit` tool read the model from the base commit (the submission's base; the working tree for `onus classify --report`), so a pull request cannot delete or retrain the model to avoid a raise. `--model <file>` hands in another one. A raise is listed with `source: "model"`:
+
+    model → human: the learned model puts this change's risk at 0.91 (a person from 0.85, the judge from 0.60): 2 breaking rows (+1.42), blast radius 38 (+0.97), 3 earlier problems in billing (+0.61); model 3f2a9c1e0b7d, trained on 412 outcomes
+
+When it does not raise, `learned` still holds the risk and its top factors, and the CI comment shows a **Learned risk:** line. A model file that is missing at the commit, was trained on another feature set (`stale`), or does not parse (`invalid`) is never an error: `learned.status` and `learned.note` say why, and the lane comes from rules only.
+
+**Rules of the game.** The model file and `onus.yaml` decide lanes, so a pull request that changes either goes to a person (`lanes-model-changed`, `onus-config-changed`). Retrain after a release that adds features: an older model reports `stale` until then.
+
+**What it is not.** Outcomes are shaped by the lanes changes got: a change a person reviewed was less likely to go wrong. The model learns what went wrong despite the lanes, which is the right target for raising a lane, but not a causal estimate of risk.
 
 ## The policy
 
@@ -101,7 +143,7 @@ The GitHub Action keeps these records for you with `records: true`: outcomes whe
       --lane auto-merge --verdict approve --judge 1a2b3c4d --result merged --audited
     onus outcomes summary --file outcomes.jsonl
 
-Pass `--component <id>` (repeatable) to name the components the change touched, for the history input. `onus ci pr` records them from the report, and `onus ci closed`, reverts and incidents keep them.
+Pass `--component <id>` (repeatable) to name the components the change touched, for the history input, and `--classification <file>` to keep the change's features for the learned model. `onus ci pr` records them from the report, and `onus ci closed`, reverts and incidents keep them.
 
 The summary gives each agent setup its record, and each judge configuration its record of the changes it decided (a verdict on record): merged, reverted, incidents, audited, missed. It also gives the share of changes in the human lane (the review budget), and the miss rate of human audits of automatic approvals, the number that says whether the automatic lanes can be trusted. A judge configuration id is a hash of the lane policy and the Onus version, so changing either starts a new record: that is how configurations are rotated and compared.
 

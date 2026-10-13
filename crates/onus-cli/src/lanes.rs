@@ -5,9 +5,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
-use onus_core::{Lane, LanesConfig, SemanticReport};
-use onus_lanes::classify::{Classification, ClassifyContext, area, classify};
+use onus_core::{Lane, LanesConfig, LearnedConfig, SemanticReport};
+use onus_lanes::classify::{Classification, ClassifyContext, Learned, LearnedRisk, area, classify};
 use onus_lanes::judge::{Verdict, judge_with};
+use onus_lanes::learned::{self, Model};
 use onus_lanes::outcomes::{self, Outcome};
 use onus_lanes::submission::{AgentSetup, Approval, ScopeUsed, Submission};
 
@@ -87,6 +88,49 @@ pub struct LaneArgs {
     /// itself out.
     #[arg(long, value_name = "OWNER/REPO#N")]
     change: Option<String>,
+    /// Use this model file instead of lanes.learned.model at the base commit.
+    #[arg(long, value_name = "FILE")]
+    model: Option<PathBuf>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum LanesCmd {
+    /// Fit the learned lane model to outcome records; it may only ever raise lanes.
+    #[command(after_long_help = "\
+Examples:
+  onus ci records pull --dir rec
+  onus lanes train --outcomes rec/outcomes.jsonl
+  onus lanes train --outcomes rec/outcomes.jsonl --dry-run
+  onus lanes train --outcomes outcomes.jsonl --config onus.yaml --out lanes-model.json")]
+    Train {
+        /// Outcome records (JSONL), e.g. from `onus ci records pull`.
+        #[arg(long, value_name = "FILE")]
+        outcomes: PathBuf,
+        /// Where to write the model (default: lanes.learned.model in --repo, else
+        /// onus.lanes-model.json).
+        #[arg(long, value_name = "FILE")]
+        out: Option<PathBuf>,
+        /// The repository whose onus.yaml holds lanes.learned. Not read when both
+        /// --config and --out are given.
+        #[arg(long, default_value = ".", value_name = "DIR")]
+        repo: PathBuf,
+        /// Use this onus.yaml instead: its lanes.learned thresholds are where the
+        /// held-out fifth is measured.
+        #[arg(long, value_name = "FILE")]
+        config: Option<PathBuf>,
+        /// A merged change counts as clean only after this many days without a problem.
+        #[arg(long, default_value_t = 14)]
+        settle_days: u32,
+        /// The fewest labelled changes to train on.
+        #[arg(long, default_value_t = 50)]
+        min_examples: u32,
+        /// The fewest problems among them.
+        #[arg(long, default_value_t = 10)]
+        min_positives: u32,
+        /// Measure and print, and write nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -123,6 +167,10 @@ pub enum OutcomesCmd {
         /// A component the change touched, for per-component history (repeatable).
         #[arg(long = "component", value_name = "ID")]
         components: Vec<String>,
+        /// The change's classification (onus classify), whose features the learned
+        /// lane model trains on.
+        #[arg(long, value_name = "FILE")]
+        classification: Option<PathBuf>,
     },
     /// Find reverts in git history and record them against the changes they revert.
     IngestReverts {
@@ -215,6 +263,14 @@ impl From<LaneArg> for Lane {
 }
 
 pub fn git_lines(repo: &Path, args: &[&str]) -> Result<Vec<String>> {
+    Ok(String::from_utf8_lossy(&git_bytes(repo, args)?)
+        .lines()
+        .map(str::to_string)
+        .collect())
+}
+
+/// What git prints, as it is.
+pub fn git_bytes(repo: &Path, args: &[&str]) -> Result<Vec<u8>> {
     let out = std::process::Command::new("git")
         .arg("-C")
         .arg(repo)
@@ -228,10 +284,7 @@ pub fn git_lines(repo: &Path, args: &[&str]) -> Result<Vec<String>> {
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
-    Ok(String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .map(str::to_string)
-        .collect())
+    Ok(out.stdout)
 }
 
 /// What a submission is made of, besides the change itself.
@@ -453,13 +506,15 @@ fn classify_args(args: &LaneArgs) -> Result<(Option<Submission>, LanesConfig, Cl
         &ClassifyOpts {
             outcomes: args.outcomes.as_deref(),
             change: args.change.as_deref(),
-            now: None,
+            model_file: args.model.as_deref(),
+            ..Default::default()
         },
     )?;
     Ok((submission, config, c))
 }
 
-/// Where a classification looks for history. Later inputs add fields here.
+/// Where a classification looks for history and its learned model. Later
+/// inputs add fields here.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ClassifyOpts<'a> {
     /// Outcome records: the agent setup's record and per-component history.
@@ -469,13 +524,85 @@ pub struct ClassifyOpts<'a> {
     pub change: Option<&'a str>,
     /// The end of the history window, in Unix seconds (None = now).
     pub now: Option<u64>,
+    /// The commit whose model file applies; default the submission's base,
+    /// else the working tree.
+    pub model_at: Option<&'a str>,
+    /// A model file (`--model`), over both.
+    pub model_file: Option<&'a Path>,
+}
+
+/// What `lanes.learned` found.
+#[derive(Debug)]
+pub enum ModelLoad {
+    /// `lanes.learned` is not set.
+    Off,
+    Missing(String),
+    Stale(String),
+    Invalid(String),
+    /// The model and its id.
+    Loaded(Box<Model>, String),
+}
+
+/// The learned model a classification uses, read from `--model`, else from
+/// the base commit (`opts.model_at`, else the submission's base), else from
+/// the working tree when there is no commit. Reading it from the base means
+/// a change cannot delete or retrain the model to avoid a raise. A model
+/// that is missing, stale or does not parse is never an error: the lane
+/// then comes from rules only.
+pub fn load_model(
+    repo: &Path,
+    config: &LearnedConfig,
+    opts: &ClassifyOpts,
+    submission: Option<&Submission>,
+) -> ModelLoad {
+    let only_rules = "the lane comes from rules only";
+    let (bytes, whence) = if let Some(f) = opts.model_file {
+        match std::fs::read(f) {
+            Ok(b) => (b, format!("`{}`", f.display())),
+            Err(_) => {
+                return ModelLoad::Missing(format!("no model at `{}`; {only_rules}", f.display()));
+            }
+        }
+    } else if let Some(at) = opts.model_at.or(submission.map(|s| s.base.as_str())) {
+        let short = &at[..at.len().min(12)];
+        match git_bytes(repo, &["show", &format!("{at}:{}", config.model)]) {
+            Ok(b) => (b, format!("`{}` at {short}", config.model)),
+            Err(_) => {
+                return ModelLoad::Missing(format!(
+                    "no model at `{}` in the base commit {short}; {only_rules}",
+                    config.model
+                ));
+            }
+        }
+    } else {
+        match std::fs::read(repo.join(&config.model)) {
+            Ok(b) => (b, format!("`{}`", config.model)),
+            Err(_) => {
+                return ModelLoad::Missing(format!("no model at `{}`; {only_rules}", config.model));
+            }
+        }
+    };
+    let model: Model = match serde_json::from_slice(&bytes) {
+        Ok(m) => m,
+        Err(e) => {
+            return ModelLoad::Invalid(format!(
+                "{whence} is not a lanes model ({e}); {only_rules}"
+            ));
+        }
+    };
+    if let Err(why) = model.usable() {
+        return ModelLoad::Stale(format!(
+            "{why}; retrain it with `onus lanes train`; {only_rules}"
+        ));
+    }
+    ModelLoad::Loaded(Box::new(model), learned::model_id(&bytes))
 }
 
 /// The lane of a change: its report, its submission if any, the policy,
-/// the agent setup's record and the history of the components it touches.
-/// `repo` is the worktree the policy came from.
+/// the agent setup's record, the history of the components it touches and
+/// the learned model. `repo` is the worktree the policy came from.
 pub fn classify_with(
-    _repo: &Path,
+    repo: &Path,
     report: &SemanticReport,
     submission: Option<&Submission>,
     config: &LanesConfig,
@@ -486,8 +613,9 @@ pub fn classify_with(
         Some(f) if f.exists() => outcomes::load(f)?,
         _ => Vec::new(),
     };
-    let record = match (opts.outcomes, submission) {
-        (Some(_), Some(s)) => Some(outcomes::record_for(&all, &s.agent.key())),
+    let agent = submission.map(|s| s.agent.key());
+    let record = match (opts.outcomes, &agent) {
+        (Some(_), Some(a)) => Some(outcomes::record_for(&all, a)),
         _ => None,
     };
     let areas: std::collections::BTreeSet<String> = report
@@ -497,16 +625,34 @@ pub fn classify_with(
         .map(str::to_string)
         .collect();
     let now = opts.now.unwrap_or_else(onus_doors::gateway::now);
+    let repo_name = opts.change.and_then(outcomes::repo_of);
     let history = outcomes::area_history(
         &all,
         &areas,
         &outcomes::HistoryScope {
             since: now.saturating_sub(u64::from(config.inputs.history.days) * 86_400),
             until: Some(now),
-            repo: opts.change.and_then(outcomes::repo_of),
+            repo: repo_name,
             exclude: opts.change,
         },
     );
+    // What the change looks like now, for the model and for training later.
+    let features = learned::features(
+        report,
+        submission,
+        &learned::History {
+            outcomes: &all,
+            agent: agent.as_deref(),
+            record,
+            repo: repo_name,
+            change: opts.change,
+            until: Some(now),
+        },
+    );
+    let load = match &config.learned {
+        Some(l) => load_model(repo, l, opts, submission),
+        None => ModelLoad::Off,
+    };
     // The scope the change was made under (verified when the submission was
     // made), checked against every path the change writes.
     let scope = submission.and_then(|s| s.scope.as_ref()).map(|sc| {
@@ -515,7 +661,16 @@ pub fn classify_with(
     let writable = |p: &str| scope.as_ref().is_some_and(|s| s.can_write(p));
     let writable_ref: Option<&dyn Fn(&str) -> bool> =
         scope.as_ref().map(|_| &writable as &dyn Fn(&str) -> bool);
-    Ok(classify(
+    let learned_in = match (&load, &config.learned) {
+        (ModelLoad::Loaded(model, id), Some(l)) => Some(Learned {
+            model: model.as_ref(),
+            id,
+            config: l,
+            features: &features,
+        }),
+        _ => None,
+    };
+    let mut c = classify(
         report,
         submission,
         config,
@@ -523,8 +678,19 @@ pub fn classify_with(
             record,
             areas: &history,
             writable: writable_ref,
+            learned: learned_in,
         },
-    ))
+    );
+    if let Some(l) = &config.learned {
+        match load {
+            ModelLoad::Missing(note) => c.learned = Some(LearnedRisk::ignored("missing", l, note)),
+            ModelLoad::Stale(note) => c.learned = Some(LearnedRisk::ignored("stale", l, note)),
+            ModelLoad::Invalid(note) => c.learned = Some(LearnedRisk::ignored("invalid", l, note)),
+            ModelLoad::Off | ModelLoad::Loaded(..) => {}
+        }
+    }
+    c.features = Some(features);
+    Ok(c)
 }
 
 /// The judge's verdict on a submission, with evidence re-run in containers
@@ -642,7 +808,22 @@ pub fn outcomes_cmd(cmd: OutcomesCmd) -> Result<i32> {
             missed,
             commit,
             components,
+            classification,
         } => {
+            let features = match &classification {
+                Some(p) => {
+                    let c: Classification = serde_json::from_str(&std::fs::read_to_string(p)?)
+                        .with_context(|| format!("{} is not a classification", p.display()))?;
+                    if c.features.is_none() {
+                        bail!(
+                            "{} has no features: classify the change with this onus first",
+                            p.display()
+                        );
+                    }
+                    c.features
+                }
+                None => None,
+            };
             record_outcome(
                 &file,
                 &Outcome {
@@ -663,6 +844,8 @@ pub fn outcomes_cmd(cmd: OutcomesCmd) -> Result<i32> {
                     sampled: false,
                     audit: None,
                     merged_by: None,
+                    features,
+                    caught: false,
                 },
             )?;
             Ok(0)
@@ -720,6 +903,85 @@ pub fn outcomes_cmd(cmd: OutcomesCmd) -> Result<i32> {
         OutcomesCmd::Audits { file, limit } => {
             let q = outcomes::audits(&outcomes::load(&file)?, limit);
             println!("{}", serde_json::to_string_pretty(&q)?);
+            Ok(0)
+        }
+    }
+}
+
+pub fn lanes_cmd(cmd: LanesCmd) -> Result<i32> {
+    match cmd {
+        LanesCmd::Train {
+            outcomes: file,
+            out,
+            repo,
+            config,
+            settle_days,
+            min_examples,
+            min_positives,
+            dry_run,
+        } => {
+            // With both --config and --out, nothing is read from --repo, so a
+            // hosted service can train outside a repository.
+            let learned = lanes_config(&repo, config.as_deref())?
+                .learned
+                .unwrap_or_default();
+            let out = out.unwrap_or_else(|| {
+                if repo == Path::new(".") {
+                    PathBuf::from(&learned.model)
+                } else {
+                    repo.join(&learned.model)
+                }
+            });
+            if !file.exists() {
+                bail!("{} does not exist", file.display());
+            }
+            let all = outcomes::load(&file)?;
+            let (examples, skipped) = learned::examples(&all, u64::from(settle_days) * 86_400);
+            let model = match learned::train(
+                &examples,
+                skipped,
+                &learned::TrainOptions {
+                    settle_days,
+                    min_examples,
+                    min_positives,
+                    judge_at: learned.judge,
+                    human_at: learned.human,
+                },
+            ) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("onus: {e:#}");
+                    return Ok(1);
+                }
+            };
+            let text = format!("{}\n", serde_json::to_string_pretty(&model)?);
+            if !dry_run {
+                if let Some(dir) = out.parent().filter(|d| !d.as_os_str().is_empty()) {
+                    std::fs::create_dir_all(dir)?;
+                }
+                std::fs::write(&out, &text)
+                    .with_context(|| format!("cannot write {}", out.display()))?;
+            }
+            let mut weights: Vec<(&String, f64)> = model
+                .features
+                .iter()
+                .zip(model.weights.iter().copied())
+                .collect();
+            weights.sort_by(|a, b| b.1.abs().total_cmp(&a.1.abs()).then(a.0.cmp(b.0)));
+            let summary = serde_json::json!({
+                "out": out.display().to_string(),
+                "written": !dry_run,
+                "model": learned::model_id(text.as_bytes()),
+                "examples": model.training.examples,
+                "positives": model.training.positives,
+                "skipped": model.training.skipped,
+                "holdout": model.holdout,
+                "weights": weights
+                    .iter()
+                    .map(|(f, w)| serde_json::json!({ "feature": f, "weight": w }))
+                    .collect::<Vec<_>>(),
+            });
+            println!("{}", serde_json::to_string_pretty(&summary)?);
             Ok(0)
         }
     }

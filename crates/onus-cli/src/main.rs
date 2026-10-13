@@ -424,6 +424,11 @@ Examples:
         #[command(subcommand)]
         cmd: lanes::OutcomesCmd,
     },
+    /// The learned lane model: train it from outcome records. It may only raise lanes.
+    Lanes {
+        #[command(subcommand)]
+        cmd: lanes::LanesCmd,
+    },
     /// One record of why a change was allowed through: intent, agent, token, evidence,
     /// escalations, judge, approver, rollout.
     #[command(after_long_help = "\
@@ -851,6 +856,7 @@ fn run(cli: Cli) -> Result<i32> {
         Cmd::Classify(args) => lanes::classify_cmd(args),
         Cmd::Judge(args) => lanes::judge_cmd(args),
         Cmd::Outcomes { cmd } => lanes::outcomes_cmd(cmd),
+        Cmd::Lanes { cmd } => lanes::lanes_cmd(cmd),
         Cmd::Provenance(args) => provenance::run(args),
         Cmd::Escalation { cmd } => doors::escalation(cmd),
         Cmd::RunTest(args) => doors::run_test(args),

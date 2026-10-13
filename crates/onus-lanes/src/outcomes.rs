@@ -13,8 +13,9 @@ use onus_core::{Lane, ids};
 use serde::{Deserialize, Serialize};
 
 use crate::classify::{AreaHistories, AreaHistory, Record};
+use crate::learned::Features;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Outcome {
     /// Seconds since the Unix epoch.
@@ -64,6 +65,14 @@ pub struct Outcome {
     /// Who merged it (`@login`), when the host said.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merged_by: Option<String>,
+    /// What the change looked like when it was classified: what the learned
+    /// lane model trains on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub features: Option<Features>,
+    /// A person with write access said Onus caught a problem in it
+    /// (`/onus caught`): a problem for training, like an incident.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub caught: bool,
 }
 
 /// A person's audit of a merged change.
@@ -223,7 +232,7 @@ pub fn record_for(outcomes: &[Outcome], agent: &str) -> Record {
 
 /// Changes that caused an incident at any point: reverting one later does
 /// not erase the incident from its agent setup's record.
-fn had_incident(outcomes: &[Outcome]) -> std::collections::HashSet<&str> {
+pub fn had_incident(outcomes: &[Outcome]) -> std::collections::HashSet<&str> {
     outcomes
         .iter()
         .filter(|o| o.result == "incident")
@@ -527,6 +536,8 @@ mod tests {
             sampled: false,
             audit: None,
             merged_by: None,
+            features: None,
+            caught: false,
         }
     }
 

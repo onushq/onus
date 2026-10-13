@@ -171,7 +171,7 @@ Folders named .git, .onus (where Onus keeps its records), node_modules, dist, bu
 
 ## lanes
 
-What happens to a change after it is reported: the default lane, rules that set or raise it, the built-in risk inputs, the shares of automatic merges a person audits before and after merging, the record an agent setup needs before it may auto-merge, held-out checks and an optional taste reviewer for the judge. See `onus help lanes`.
+What happens to a change after it is reported: the default lane, rules that set or raise it, the built-in risk inputs, a learned model that may raise it, the shares of automatic merges a person audits before and after merging, the record an agent setup needs before it may auto-merge, held-out checks and an optional taste reviewer for the judge. See `onus help lanes`.
 
     lanes:
       default: judge          # auto-merge, judge, human or blocked
@@ -187,8 +187,14 @@ What happens to a change after it is reported: the default lane, rules that set 
         tests: { untested: judge }             # code no test or trace reaches
         confidence: { low: judge }             # rows on parts of the map Onus could not resolve
         history: { days: 90, reverts: { judge: 1 }, incidents: { human: 1 } }
+      learned:                                 # off unless written
+        model: onus.lanes-model.json           # from onus lanes train, read at the base commit
+        judge: 0.6                             # raise to the judge at or above this risk
+        human: 0.85                            # raise to a person at or above this risk
 
 Inputs only raise a lane. A threshold of N means N or more, and the highest lane whose threshold is met applies (`judge`, `human`, `blocked`). Writing a key replaces its default as a whole: `blastRadius: { human: 10 }` has no judge threshold, and `blastRadius: {}` turns the input off. A lane of `auto-merge` turns `tests` or `confidence` off. Thresholds are at least 1 and must not go down as the lane goes up; `history.days` is 1 to 3650.
+
+The learned model also only raises a lane, and never to `blocked`. Its thresholds need `0 < judge <= human <= 1`, and the model file's name must end in `lanes-model.json`, so a change to it is a rule of the game and goes to a person.
 
 ## environment
 

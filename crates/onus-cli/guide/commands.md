@@ -108,7 +108,7 @@ Opens the web interface for the repository: everything below and above, in a bro
 ## Scopes, lanes and environments
 
 - `onus token`, `onus scope`, `onus gateway`, `onus escalate`, `onus escalation`, `onus audit`, `onus run-test`: task tokens, the git gateway, escalation and the audit log. See `onus help scopes`.
-- `onus submit`, `onus classify`, `onus judge`, `onus outcomes`: risk lanes, the judge and outcome records. `onus outcomes audits` lists the merged changes sampled for a person to audit and the audit log; `onus outcomes audit` records an audit. See `onus help lanes`.
+- `onus submit`, `onus classify`, `onus judge`, `onus outcomes`: risk lanes, the judge and outcome records. `onus outcomes audits` lists the merged changes sampled for a person to audit and the audit log; `onus outcomes audit` records an audit. `onus lanes train` fits the learned lane model to outcome records; it may only raise lanes. See `onus help lanes`.
 - `onus env`, `onus evidence`: environments and the evidence store. See `onus help environments`.
 
 ## onus ci
@@ -123,8 +123,8 @@ What the GitHub Action runs to keep outcome records on a branch (`onus help ci`)
     onus ci push --records records --since "$BEFORE"
     onus ci records push --dir records --message "acme/shop#7 closed"
 
-- `ci pr` submits, classifies and (with `--judge`) judges the change, appends to `pulls.jsonl`, writes `submission.json`, `classification.json`, `judgment.json`, `provenance.json` and the comment section `lane.md` to `--out`, and prints `{lane, verdict, agent, record, review}`. `--evidence <file>` adds test runs; `--reviews <file>` gives the pull request's GitHub reviews, for the human lane's review (`onus help ci`).
-- `ci comment` acts on `/onus approve <row>`, `/onus audit ok|miss [note]` and `/onus incident <note> [involved: a, b]` from OWNER, MEMBER or COLLABORATOR, and prints `{command, ok, reply, rerun}`. It also answers `/onus caught <note>` (from anyone) and `/onus accuracy ok|wrong <row>|missed <note>` (write access) with what was said, `verdict`, `row`, `note` and `by`, and records neither. `--report <file>` (the report's JSON) checks `wrong <row>` against the report's rows and turns a row number into its id.
+- `ci pr` submits, classifies and (with `--judge`) judges the change, appends to `pulls.jsonl`, writes `submission.json`, `classification.json`, `judgment.json`, `provenance.json` and the comment section `lane.md` to `--out`, and prints `{lane, verdict, agent, record, review, risk}` (`risk` is the learned model's, or null). `--evidence <file>` adds test runs; `--reviews <file>` gives the pull request's GitHub reviews, for the human lane's review (`onus help ci`); `--model <file>` uses that learned lane model instead of the one at the base commit (it still needs `lanes.learned`).
+- `ci comment` acts on `/onus approve <row>`, `/onus audit ok|miss [note]` and `/onus incident <note> [involved: a, b]` from OWNER, MEMBER or COLLABORATOR, and prints `{command, ok, reply, rerun}`. It also answers `/onus caught <note>` (from anyone) and `/onus accuracy ok|wrong <row>|missed <note>` (write access) with what was said, `verdict`, `row`, `note` and `by`. Accuracy is never recorded. `caught` from OWNER, MEMBER or COLLABORATOR is recorded as `caught: true` on the change's outcome, or on its pull record while it is open, and its answer says so with `recorded`. `--report <file>` (the report's JSON) checks `wrong <row>` against the report's rows and turns a row number into its id.
 - `ci closed` turns the pull request's latest record into an outcome, and samples a change approved without a person for an audit (`onus help lanes`). `--merged-by <login>` keeps who merged it on the outcome, as `@login`, for its provenance. `ci push` records reverts.
 - `ci records` takes `--remote` (default `origin`) and `--branch` (default `onus/records`).
 

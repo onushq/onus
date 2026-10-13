@@ -747,3 +747,283 @@ fn risk_inputs_and_new_floors_raise_lanes() {
             .contains(r#""components":["logger"]"#)
     );
 }
+
+#[test]
+fn a_learned_model_raises_lanes_and_never_lowers() {
+    let dir = repo();
+    let r = dir.path();
+    let yaml = std::fs::read_to_string(r.join("onus.yaml")).unwrap();
+    std::fs::write(
+        r.join("onus.yaml"),
+        format!("{yaml}  learned: {{ judge: 0.6, human: 0.85 }}\n"),
+    )
+    .unwrap();
+    git(r, &["commit", "-q", "-am", "learned lanes"]);
+
+    // A logger internal (auto-merge by the policy), and notifications
+    // starting to depend on orders (a new dependency: the judge).
+    let logger_ts = std::fs::read_to_string(r.join("packages/logger/src/logger.ts")).unwrap();
+    let logger = format!(
+        "{logger_ts}\nfunction redact(message: string): string {{\n  return message.replace(/[0-9]+/g, '#');\n}}\nvoid redact;\n"
+    );
+    let logger_files = [("packages/logger/src/logger.ts", logger.as_str())];
+    let pkg = std::fs::read_to_string(r.join("services/notifications/package.json"))
+        .unwrap()
+        .replace(
+            "\"@shop/money\": \"workspace:*\",",
+            "\"@shop/money\": \"workspace:*\",\n    \"@shop/orders\": \"workspace:*\",",
+        );
+    let eta = "import { estimateDelivery } from \"@shop/orders\";\n\nexport function etaText(days: number): string {\n  return String(estimateDelivery(new Date(), days));\n}\n";
+    let dep_files = [
+        ("services/notifications/package.json", pkg.as_str()),
+        ("services/notifications/src/eta.ts", eta),
+    ];
+    change(r, "logger", &logger_files);
+    change(r, "dep", &dep_files);
+
+    // Their features, as classify writes them.
+    let features = |branch: &str| {
+        let (code, json, err) = onus(
+            r,
+            &[
+                "report", "--base", "main", "--head", branch, "--format", "json",
+            ],
+        );
+        assert_eq!(code, 0, "{err}");
+        let report = out(r, &format!("{branch}.report.json"));
+        std::fs::write(&report, json).unwrap();
+        let (code, c, err) = onus(r, &["classify", "--report", &report]);
+        assert_eq!(code, 0, "{err}");
+        let c: serde_json::Value = serde_json::from_str(&c).unwrap();
+        assert_eq!(c["learned"]["status"], "missing", "{c}");
+        assert_eq!(c["features"]["set"], 1, "{c}");
+        c["features"].clone()
+    };
+    let (logger_f, dep_f) = (features("logger"), features("dep"));
+    assert_ne!(logger_f, dep_f);
+
+    // Settled outcomes: nearly every dependency-shaped change went wrong,
+    // nearly no logger one did.
+    let base = 1_700_000_000u64;
+    let mut lines = Vec::new();
+    for i in 0..60u64 {
+        let dep = i % 2 == 0;
+        let problem = if dep { i != 0 } else { i == 1 };
+        let result = match (problem, i % 4) {
+            (false, _) => "merged",
+            (true, 0 | 1) => "incident",
+            (true, _) => "reverted",
+        };
+        lines.push(serde_json::json!({
+            "at": base + i * 3600, "change": format!("acme/shop#{}", i + 1), "agent": "test//",
+            "lane": "judge", "result": result,
+            "features": if dep { &dep_f } else { &logger_f },
+        }));
+    }
+    // A later record without features: every merge above has settled by it.
+    lines.push(serde_json::json!({
+        "at": base + 30 * 86_400, "change": "acme/shop#100", "agent": "test//",
+        "lane": "judge", "result": "open",
+    }));
+    let text =
+        |lines: &[serde_json::Value]| lines.iter().map(|l| format!("{l}\n")).collect::<String>();
+    let outcomes = out(r, "outcomes.jsonl");
+    std::fs::write(&outcomes, text(&lines)).unwrap();
+
+    let model_file = r.join("onus.lanes-model.json");
+    let (code, dry, err) = onus(r, &["lanes", "train", "--outcomes", &outcomes, "--dry-run"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!model_file.exists());
+    let dry: serde_json::Value = serde_json::from_str(&dry).unwrap();
+    assert_eq!(dry["written"], false);
+    let (code, trained, err) = onus(r, &["lanes", "train", "--outcomes", &outcomes]);
+    assert_eq!(code, 0, "{err}");
+    let trained: serde_json::Value = serde_json::from_str(&trained).unwrap();
+    assert_eq!(trained["written"], true, "{trained}");
+    assert_eq!(trained["examples"], 60, "{trained}");
+    assert_eq!(trained["positives"], 30, "{trained}");
+    assert_eq!(trained["skipped"]["noFeatures"], 1, "{trained}");
+    assert_eq!(trained["out"], "onus.lanes-model.json");
+    assert_eq!(trained["model"], dry["model"]);
+    let id = trained["model"].as_str().unwrap().to_string();
+    assert_eq!(id.len(), 12);
+    let bytes = std::fs::read(&model_file).unwrap();
+
+    // The same records in another order give the same file, byte for byte;
+    // so does training outside a repository with --config and --out.
+    let elsewhere = tempfile::tempdir().unwrap();
+    let e = elsewhere.path();
+    let mut reversed = lines.clone();
+    reversed.reverse();
+    std::fs::write(e.join("outcomes.jsonl"), text(&reversed)).unwrap();
+    std::fs::write(
+        e.join("onus.yaml"),
+        "version: 1\nlanes:\n  learned: { judge: 0.6, human: 0.85 }\n",
+    )
+    .unwrap();
+    let (code, _, err) = onus(
+        e,
+        &[
+            "lanes",
+            "train",
+            "--outcomes",
+            "outcomes.jsonl",
+            "--config",
+            "onus.yaml",
+            "--out",
+            "m/lanes-model.json",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(std::fs::read(e.join("m/lanes-model.json")).unwrap(), bytes);
+
+    // Not committed yet: the base commit has no model, so rules decide.
+    let c = lane_of(r, "dep");
+    assert_eq!(c["lane"], "judge", "{c}");
+    assert_eq!(c["learned"]["status"], "missing", "{c}");
+    assert!(
+        c["learned"]["note"]
+            .as_str()
+            .unwrap()
+            .contains("the lane comes from rules only"),
+        "{c}"
+    );
+
+    // A model handed to `onus ci pr` applies without being committed.
+    let rec = out(r, "records");
+    let ci_out = out(r, "ci");
+    let (code, summary, err) = onus(
+        r,
+        &[
+            "ci",
+            "pr",
+            "--base",
+            "main",
+            "--head",
+            "dep",
+            "--change",
+            "acme/shop#70",
+            "--records",
+            &rec,
+            "--out",
+            &ci_out,
+            "--model",
+            model_file.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    let summary: serde_json::Value = serde_json::from_str(&summary).unwrap();
+    assert_eq!(summary["lane"], "human", "{summary}");
+    assert!(summary["risk"].as_f64().unwrap() >= 0.85, "{summary}");
+    let c: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(Path::new(&ci_out).join("classification.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(c["learned"]["status"], "applied", "{c}");
+    assert_eq!(c["learned"]["model"], id.as_str());
+    let md = std::fs::read_to_string(Path::new(&ci_out).join("lane.md")).unwrap();
+    assert!(
+        md.contains("- model → `human`: the learned model puts"),
+        "{md}"
+    );
+    assert!(md.contains("**Learned risk:** "), "{md}");
+    assert!(md.contains(&format!("model `{id}`")), "{md}");
+    let pulls = std::fs::read_to_string(Path::new(&rec).join("pulls.jsonl")).unwrap();
+    assert!(pulls.contains("\"features\":{\"set\":1"), "{pulls}");
+    // A model file that does not parse is ignored, never an error.
+    let junk = out(r, "junk-lanes-model.json");
+    std::fs::write(&junk, "not json").unwrap();
+    let (code, summary, err) = onus(
+        r,
+        &[
+            "ci",
+            "pr",
+            "--base",
+            "main",
+            "--head",
+            "dep",
+            "--change",
+            "acme/shop#71",
+            "--records",
+            &rec,
+            "--out",
+            &ci_out,
+            "--model",
+            &junk,
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(summary.contains("\"lane\":\"judge\""), "{summary}");
+    let c: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(Path::new(&ci_out).join("classification.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(c["learned"]["status"], "invalid", "{c}");
+
+    // Committed on main: changes based on it use it.
+    git(r, &["checkout", "-q", "main"]);
+    git(r, &["add", "onus.lanes-model.json"]);
+    git(r, &["commit", "-q", "-m", "lanes model"]);
+    change(r, "logger", &logger_files);
+    change(r, "dep", &dep_files);
+    let c = lane_of(r, "logger");
+    assert_eq!(c["lane"], "auto-merge", "{c}");
+    assert_eq!(c["learned"]["status"], "applied", "{c}");
+    assert_eq!(c["learned"]["raised"], false, "{c}");
+    assert!(c["learned"]["risk"].as_f64().unwrap() < 0.6, "{c}");
+    let c = lane_of(r, "dep");
+    assert_eq!(c["lane"], "human", "{c}");
+    assert_eq!(c["learned"]["raised"], true, "{c}");
+    let applied = c["applied"].as_array().unwrap();
+    let model_step = applied.iter().find(|a| a["source"] == "model").unwrap();
+    assert_eq!(model_step["lane"], "human");
+    assert!(
+        model_step["reason"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("model {id}, trained on 60 outcomes")),
+        "{c}"
+    );
+    // The rules' reasons are all still there.
+    assert!(
+        applied
+            .iter()
+            .any(|a| a["source"] == "floor" && a["lane"] == "judge"),
+        "{c}"
+    );
+    // A floor already sends payments code to a person.
+    change(
+        r,
+        "billing",
+        &[(
+            "services/billing/src/discount.ts",
+            "export const NOTE = 'x';\n",
+        )],
+    );
+    assert_eq!(lane_of(r, "billing")["lane"], "human");
+
+    // Deleting the model in the change does not escape it: the model is read
+    // from the base, and the deletion is a rule of the game.
+    git(r, &["checkout", "-q", "-B", "drop", "dep"]);
+    git(r, &["rm", "-q", "onus.lanes-model.json"]);
+    git(r, &["commit", "-q", "-m", "drop the model"]);
+    let c = lane_of(r, "drop");
+    assert_eq!(c["lane"], "human", "{c}");
+    assert_eq!(c["learned"]["status"], "applied", "{c}");
+    assert_eq!(c["learned"]["model"], id.as_str());
+    let sub = std::fs::read_to_string(out(r, "drop.json")).unwrap();
+    assert!(
+        sub.contains("\"subkind\": \"lanes-model-changed\""),
+        "{sub}"
+    );
+
+    // Too little data.
+    let few = out(r, "few.jsonl");
+    std::fs::write(&few, text(&lines[..10])).unwrap();
+    let (code, _, err) = onus(r, &["lanes", "train", "--outcomes", &few, "--dry-run"]);
+    assert_eq!(code, 1);
+    assert!(
+        err.contains("too little data") && err.contains("at least 50"),
+        "{err}"
+    );
+}

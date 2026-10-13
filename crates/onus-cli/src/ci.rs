@@ -10,7 +10,8 @@
 //! - Someone comments `/onus approve`, `/onus audit` or `/onus incident`:
 //!   `onus ci comment` records it, for people with write access only. It
 //!   also answers `/onus caught` and `/onus accuracy` with what was said,
-//!   for a hosted service to keep, and records nothing for them.
+//!   for a hosted service to keep. `/onus caught` from someone with write
+//!   access is recorded too, for the learned lane model; accuracy is not.
 //! - The default branch moves: `onus ci push` records reverts.
 //!
 //! Records live in a folder that `onus ci records pull|push` syncs with a
@@ -74,6 +75,10 @@ pub enum CiCmd {
         /// GitHub reviews of the pull request (JSON array; see `onus help ci`).
         #[arg(long, value_name = "FILE")]
         reviews: Option<PathBuf>,
+        /// A learned lane model to use instead of lanes.learned.model at the base commit
+        /// (Onus Cloud trains one per organisation). Needs lanes.learned in the config.
+        #[arg(long, value_name = "FILE")]
+        model: Option<PathBuf>,
         /// Where to write the submission, classification, judgment, provenance and comment section.
         #[arg(long, value_name = "DIR")]
         out: PathBuf,
@@ -214,6 +219,7 @@ pub fn run(cmd: CiCmd) -> Result<i32> {
             judge,
             config,
             reviews,
+            model,
             out,
             at,
         } => pr(PrArgs {
@@ -230,6 +236,7 @@ pub fn run(cmd: CiCmd) -> Result<i32> {
             judge,
             config,
             reviews,
+            model,
             out,
             at,
         }),
@@ -348,6 +355,7 @@ struct PrArgs {
     judge: bool,
     config: Option<PathBuf>,
     reviews: Option<PathBuf>,
+    model: Option<PathBuf>,
     out: PathBuf,
     at: Option<u64>,
 }
@@ -396,7 +404,8 @@ fn pr(a: PrArgs) -> Result<i32> {
         None => Vec::new(),
     };
     let all_pulls = pulls::load(&pulls_file(&a.records))?;
-    let previous = pulls::latest(&all_pulls, &a.change);
+    let previous = pulls::latest(&all_pulls, &a.change).cloned();
+    let previous = previous.as_ref();
     let approvals = previous.map(|r| r.approvals.clone()).unwrap_or_default();
     let asked_before = previous.map(|r| r.requested.clone()).unwrap_or_default();
     let parts = lanes::SubmissionParts {
@@ -427,6 +436,9 @@ fn pr(a: PrArgs) -> Result<i32> {
             change: Some(&a.change),
             // A backfill sees the history as it was then.
             now: Some(at),
+            // The model the base commit holds, so the change cannot alter it.
+            model_at: Some(&base),
+            model_file: a.model.as_deref(),
         },
     )?;
     let judgment = (a.judge && c.lane == Lane::Judge)
@@ -482,6 +494,8 @@ fn pr(a: PrArgs) -> Result<i32> {
             reviewed_by: review.approved_by.clone(),
             // Recorded for `ci closed`; nothing shows it before the merge.
             audit_after_merge: Some(config.audit_after_merge),
+            features: c.features.clone(),
+            caught: previous.is_some_and(|r| r.caught),
         },
     )?;
     // The change's provenance while it is open: the facts from this run, with
@@ -516,6 +530,9 @@ fn pr(a: PrArgs) -> Result<i32> {
             ap.lane.as_str(),
             ap.reason
         ));
+    }
+    if let Some(l) = &c.learned {
+        md.push_str(&learned_markdown(l));
     }
     md.push_str(&format!(
         "\n**Agent:** `{}` · {} merged on record, {} incidents in its last {}{}\n",
@@ -574,9 +591,24 @@ fn pr(a: PrArgs) -> Result<i32> {
         "record": { "merged": record.changes, "recentIncidents": record.recent_incidents },
         // Always present: how a host tells this binary from one without reviews.
         "review": review,
+        "risk": c.learned.as_ref().and_then(|l| l.risk),
     });
     println!("{}", serde_json::to_string(&summary)?);
     Ok(0)
+}
+
+/// The **Learned risk:** line of the lane section.
+fn learned_markdown(l: &onus_lanes::classify::LearnedRisk) -> String {
+    match (l.risk, &l.note) {
+        (Some(risk), _) => format!(
+            "\n**Learned risk:** {risk:.2} · the judge from {:.2}, a person from {:.2} · model `{}`\n",
+            l.judge_at,
+            l.human_at,
+            l.model.as_deref().unwrap_or("?")
+        ),
+        (None, Some(note)) => format!("\n**Learned risk:** {note}\n"),
+        (None, None) => String::new(),
+    }
 }
 
 /// Whom to ask to review a change: the owners of the rows that need a
@@ -714,6 +746,8 @@ fn closed(
             sampled,
             audit: None,
             merged_by,
+            features: last.features.clone(),
+            caught: last.caught,
         },
     )?;
     println!(
@@ -748,20 +782,25 @@ pub fn comment(
     let command = words.next().unwrap_or("").to_string();
     let args: Vec<&str> = words.collect();
     let by = format!("@{author}");
+    let write_access = ["OWNER", "MEMBER", "COLLABORATOR"].contains(&association);
     if command == "caught" {
-        // Anyone may say it. Nothing is recorded: scripts/onus-metrics.sh counts
-        // the comment itself, and a hosted service keeps the note.
+        // Anyone may say it: scripts/onus-metrics.sh counts the comment
+        // itself, and a hosted service keeps the note. From someone with
+        // write access it is also recorded, as a problem the learned lane
+        // model trains on.
         let note = args.join(" ");
+        let recorded = write_access && record_caught(change, &by, &note, records)?;
         return Ok(json!({
             "command": "caught",
             "ok": true,
             "reply": null,
             "note": (!note.is_empty()).then_some(note),
             "by": by,
+            "recorded": recorded,
         }));
     }
     let reply = |ok: bool, text: String, rerun: bool| json!({ "command": command, "ok": ok, "reply": text, "rerun": rerun });
-    if !["OWNER", "MEMBER", "COLLABORATOR"].contains(&association) {
+    if !write_access {
         return Ok(reply(
             false,
             format!("Only people with write access can `/onus {command}`; nothing was recorded."),
@@ -821,6 +860,46 @@ pub fn comment(
         }
         _ => Ok(reply(false, "Onus knows `/onus approve <row>`, `/onus audit ok|miss`, `/onus incident <what happened>`, `/onus accuracy ok|wrong|missed` and `/onus caught <what>`.".into(), false)),
     }
+}
+
+/// Records `/onus caught` against the change: on its outcome when it has
+/// one, else on its pull record. False when Onus has no record of it.
+fn record_caught(change: &str, by: &str, note: &str, records: &Path) -> Result<bool> {
+    std::fs::create_dir_all(records)?;
+    let all = load_outcomes(records)?;
+    if let Some(last) = outcomes::latest(&all)
+        .into_iter()
+        .find(|o| o.change == change)
+        .cloned()
+    {
+        lanes::record_outcome(
+            &outcomes_file(records),
+            &Outcome {
+                at: now(),
+                caught: true,
+                note: Some(if note.is_empty() {
+                    format!("caught by {by}")
+                } else {
+                    format!("caught by {by}: {note}")
+                }),
+                ..last
+            },
+        )?;
+        return Ok(true);
+    }
+    let pulls = pulls::load(&pulls_file(records))?;
+    if let Some(last) = pulls::latest(&pulls, change).cloned() {
+        pulls::append(
+            &pulls_file(records),
+            &PullRecord {
+                at: now(),
+                caught: true,
+                ..last
+            },
+        )?;
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 /// `/onus accuracy ok|wrong <row>|missed <what>`: a person's check of the
