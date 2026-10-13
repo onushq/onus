@@ -91,11 +91,15 @@ pub struct Hints {
     pub intent_mismatch: bool,
     /// A person should look at this row.
     pub needs_person: bool,
-    /// Other components (not the row's own) that depend on the subject in
-    /// the head map (the base map for removed subjects). 0 for rows about a
-    /// whole component.
+    /// Other components (not the row's own) that depend on what the row
+    /// changed in the head map (the base map for removed code): the subject,
+    /// or for a component's internal row, the symbols its changed lines are
+    /// in.
     #[serde(default)]
     pub dependent_components: u32,
+    /// Those components' ids, sorted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependents: Vec<String>,
     /// How well tests and traces cover the code the row changes; absent
     /// when the row changes no code (config, dependencies, tests).
     #[serde(default, skip_serializing_if = "Option::is_none")]

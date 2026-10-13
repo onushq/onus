@@ -395,10 +395,6 @@ fn risk_inputs_and_new_floors_raise_lanes() {
         .replace(
             "kinds: [internal], components: [logger]",
             "kinds: [internal, additive], components: [logger]",
-        )
-        .replace(
-            "\ncontracts:\n",
-            "\ncontracts:\n  Logger:\n    symbol: \"logger:src/logger.ts#createLogger\"\n",
         );
     std::fs::write(r.join("onus.yaml"), yaml).unwrap();
     git(r, &["commit", "-q", "-am", "policy"]);
@@ -433,15 +429,20 @@ fn risk_inputs_and_new_floors_raise_lanes() {
     assert_eq!(c["lane"], "judge", "{c}");
     assert!(input(&c, "input", "no test exercises"), "{c}");
 
-    // `createLogger` is used by billing, notifications and orders.
-    let wider = logger_ts.replace(
-        "createLogger(name: string)",
-        "createLogger(name: string, prefix?: string)",
-    );
-    change(r, "wider", &[("packages/logger/src/logger.ts", &wider)]);
+    // A body-only edit of `createLogger`, which billing, notifications and
+    // orders use.
+    let body = logger_ts.replace("console.log(", "console.info(");
+    change(r, "wider", &[("packages/logger/src/logger.ts", &body)]);
     let c = lane_of(r, "wider");
-    assert_eq!(c["lane"], "human", "{c}");
-    assert!(input(&c, "input", "used by 3 other components"), "{c}");
+    assert_eq!(c["lane"], "judge", "{c}");
+    assert!(
+        input(
+            &c,
+            "input",
+            "is used by 3 other components (billing, notifications and orders); 3 or more go to judge"
+        ),
+        "{c}"
+    );
 
     // Third-party code new to the repository.
     let pkg = std::fs::read_to_string(r.join("packages/logger/package.json"))
@@ -510,8 +511,17 @@ fn risk_inputs_and_new_floors_raise_lanes() {
     assert_eq!(classify(200, "acme/shop#2")["lane"], "auto-merge");
     assert_eq!(classify(10, "acme/web#2")["lane"], "auto-merge");
 
-    // A body-only edit of a declared contract is a rule of the game.
-    let body = logger_ts.replace("console.log(", "console.info(");
+    // The same edit, once `createLogger` is a declared contract, is a rule
+    // of the game.
+    git(r, &["checkout", "-q", "main"]);
+    let yaml = std::fs::read_to_string(r.join("onus.yaml"))
+        .unwrap()
+        .replace(
+            "\ncontracts:\n",
+            "\ncontracts:\n  Logger:\n    symbol: \"logger:src/logger.ts#createLogger\"\n",
+        );
+    std::fs::write(r.join("onus.yaml"), yaml).unwrap();
+    git(r, &["commit", "-q", "-am", "contract"]);
     change(r, "declared", &[("packages/logger/src/logger.ts", &body)]);
     let report = out(r, "declared.report.json");
     let (code, json, err) = onus(

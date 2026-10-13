@@ -42,7 +42,7 @@ Four built-in inputs read facts Onus computes for every change. They are on by d
 
 | Input | Fires when | Default |
 |---|---|---|
-| `blastRadius` | A row changes something other components depend on (`dependentComponents` in the report). The highest lane whose threshold the count meets applies. | 3 or more components → `judge` |
+| `blastRadius` | A row changes something other components depend on (`dependentComponents` in the report), including a body-only edit of a function they call. The highest lane whose threshold the count meets applies. | 3 or more components → `judge` |
 | `tests` | A row changes code no test exercises and no runtime trace has observed (`tested: untested`). | `judge` |
 | `confidence` | A row rests on parts of the map Onus could not resolve (`confidence: low`). | `judge` |
 | `history` | A component the change touches had reverts, rollbacks or incidents in the last `days` days, read from `--outcomes`. | a revert → `judge`, an incident → `human`, over 90 days |
@@ -57,7 +57,7 @@ Four built-in inputs read facts Onus computes for every change. They are on by d
           reverts: { judge: 1 }
           incidents: { human: 1 }
 
-Test reach is per file: a file counts as tested when a test in the map exercises anything in it, and as traced when a runtime trace saw it (`onus help environments`). It is not line coverage. History counts each change once per component, from every record in the window, so a revert and an incident count at the time they were recorded. Records shared by several repositories are scoped with `--change owner/repo#N`: only that repository's changes count, and the change itself is left out. `onus ci pr` does this for you.
+Test reach is per file: a file counts as tested when a test in the map exercises anything in it, and as traced when a runtime trace saw it (`onus help environments`). It is not line coverage. History counts each change once per component, from every record in the window, so a revert and an incident count at the time they were recorded. Code outside every component counts as `root`. A backfill (`onus ci pr --at`) sees only what was recorded by then. Records shared by several repositories are scoped with `--change owner/repo#N`: only that repository's changes count, and the change itself is left out. `onus ci pr` does this for you.
 
 ## The policy
 

@@ -10,61 +10,106 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use onus_core::ids;
+use onus_core::rank::SUBKIND_INTERNAL_CHANGES;
 use onus_core::{ChangeKind, CodebaseMap, Confidence, SemanticChange, Side, TestReach};
 
 use crate::ctx::Ctx;
 
 pub fn fill(ctx: &Ctx, rows: &mut [SemanticChange]) {
-    let head_users = users(ctx, ctx.head);
-    let base_users = users(ctx, ctx.base);
+    let head = Users::new(ctx, ctx.head);
+    let base = Users::new(ctx, ctx.base);
     let files = Files::new(ctx);
     for r in rows.iter_mut() {
-        r.hints.dependent_components = dependent_components(ctx, r, &head_users, &base_users);
+        let comps = dependents(ctx, r, &head, &base);
+        r.hints.dependent_components = comps.len() as u32;
+        r.hints.dependents = comps;
         r.hints.tested = files.reach(ctx, r);
     }
 }
 
-/// Target id → the components of the files that use it.
-type Users<'m> = BTreeMap<&'m str, BTreeSet<String>>;
-
-fn users<'m>(ctx: &Ctx, map: &'m CodebaseMap) -> Users<'m> {
-    let mut out: Users = BTreeMap::new();
-    let mut component: HashMap<&str, String> = HashMap::new();
-    for e in &map.edges {
-        let comps = out.entry(e.to.as_str()).or_default();
-        for s in &e.sites {
-            let c = component
-                .entry(s.file.as_str())
-                .or_insert_with(|| ctx.component_of_path(&s.file));
-            comps.insert(c.clone());
-        }
-    }
-    out
+/// Who uses what in one map.
+struct Users<'m> {
+    /// Target id → the components of the files that use it.
+    by_target: BTreeMap<&'m str, BTreeSet<String>>,
+    /// File → the symbols in it, with their first and last lines.
+    symbols: HashMap<&'m str, Vec<(&'m str, u32, u32)>>,
 }
 
-fn dependent_components(ctx: &Ctx, r: &SemanticChange, head: &Users, base: &Users) -> u32 {
+impl<'m> Users<'m> {
+    fn new(ctx: &Ctx, map: &'m CodebaseMap) -> Self {
+        let mut by_target: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
+        let mut component: HashMap<&str, String> = HashMap::new();
+        for e in &map.edges {
+            let comps = by_target.entry(e.to.as_str()).or_default();
+            for s in &e.sites {
+                let c = component
+                    .entry(s.file.as_str())
+                    .or_insert_with(|| ctx.component_of_path(&s.file));
+                comps.insert(c.clone());
+            }
+        }
+        let mut symbols: HashMap<&str, Vec<(&str, u32, u32)>> = HashMap::new();
+        for s in &map.symbols {
+            if let Some(l) = &s.loc {
+                symbols
+                    .entry(l.file.as_str())
+                    .or_default()
+                    .push((s.id.as_str(), l.start, l.end));
+            }
+        }
+        Users { by_target, symbols }
+    }
+
+    /// The components that use `id`, and with `members`, anything in it.
+    fn of(&self, id: &str, members: bool, out: &mut BTreeSet<String>) {
+        if let Some(c) = self.by_target.get(id) {
+            out.extend(c.iter().cloned());
+        }
+        if members {
+            let prefix = format!("{id}.");
+            for (_, c) in self
+                .by_target
+                .range(prefix.as_str()..)
+                .take_while(|(to, _)| to.starts_with(&prefix))
+            {
+                out.extend(c.iter().cloned());
+            }
+        }
+    }
+}
+
+/// The other components that depend on what a row changed, sorted.
+fn dependents(ctx: &Ctx, r: &SemanticChange, head: &Users, base: &Users) -> Vec<String> {
     let subject = r.subject.as_str();
-    // A row about a whole component does not count the component's users.
-    if ctx.components.contains_key(subject) && !subject.contains(':') {
-        return 0;
-    }
-    let removed = !ctx.head_syms.contains_key(subject) && ctx.base_syms.contains_key(subject);
-    let users = if removed { base } else { head };
-    let mut comps: BTreeSet<&str> = BTreeSet::new();
-    if let Some(c) = users.get(subject) {
-        comps.extend(c.iter().map(String::as_str));
-    }
-    // Members of a class or an object count for it.
-    let prefix = format!("{subject}.");
-    for (_, c) in users
-        .range(prefix.as_str()..)
-        .take_while(|(to, _)| to.starts_with(&prefix))
-    {
-        comps.extend(c.iter().map(String::as_str));
+    let mut comps: BTreeSet<String> = BTreeSet::new();
+    if r.subkind == SUBKIND_INTERNAL_CHANGES {
+        // A component's internal row: the users of the symbols its changed
+        // lines are in, not of everything in the component. Each symbol's
+        // own component does not count.
+        for l in &r.locations {
+            let users = match l.side {
+                Side::Head => head,
+                Side::Base => base,
+            };
+            for (id, start, end) in users.symbols.get(l.file.as_str()).into_iter().flatten() {
+                if *start <= l.lines[1] && l.lines[0] <= *end {
+                    let mut used = BTreeSet::new();
+                    users.of(id, false, &mut used);
+                    used.remove(ids::component_of(id).unwrap_or("root"));
+                    comps.extend(used);
+                }
+            }
+        }
+    } else if !(ctx.components.contains_key(subject) && !subject.contains(':')) {
+        // Any other row about a whole component does not count the
+        // component's users.
+        let removed = !ctx.head_syms.contains_key(subject) && ctx.base_syms.contains_key(subject);
+        // Members of a class or an object count for it.
+        (if removed { base } else { head }).of(subject, true, &mut comps);
     }
     comps.remove(r.component.as_deref().unwrap_or("root"));
     comps.remove("root");
-    comps.len() as u32
+    comps.into_iter().collect()
 }
 
 /// The head files tests exercise and the head files traces have observed.
@@ -276,6 +321,58 @@ mod tests {
         ];
         fill(&c, &mut rows);
         assert_eq!(rows[0].hints.dependent_components, 2);
+        assert_eq!(rows[0].hints.dependents, ["billing", "orders"]);
         assert_eq!(rows[1].hints.dependent_components, 0);
+    }
+
+    #[test]
+    fn internal_rows_count_the_users_of_the_symbols_they_change() {
+        let used = "logger:src/logger.ts#createLogger";
+        let gone = "logger:src/logger.ts#old";
+        let head = map(json!({
+            "components": [component("logger"), component("billing"), component("orders")],
+            "symbols": [function(used, 1, "a")],
+            "edges": [
+                edge("billing:src/a.ts", used, "packages/billing/src/a.ts", "static"),
+                edge("logger:src/c.ts", used, "packages/logger/src/c.ts", "static"),
+            ],
+        }));
+        let base = map(json!({
+            "components": [component("logger"), component("orders")],
+            "symbols": [function(gone, 20, "b")],
+            "edges": [edge("orders:src/b.ts", gone, "packages/orders/src/b.ts", "static")],
+        }));
+        let text = TreeDiff::default();
+        let c = ctx(&base, &head, &text, None);
+        let internal = |locations: Vec<Location>| {
+            let mut r = row(ChangeKind::Internal, "logger", "logger", "");
+            r.subkind = SUBKIND_INTERNAL_CHANGES.into();
+            r.locations = locations;
+            r
+        };
+        let file = "packages/logger/src/logger.ts";
+        let mut rows = vec![
+            // A line in the body of `createLogger`.
+            internal(vec![Location::head(file, 2, 2)]),
+            // Lines outside any symbol.
+            internal(vec![Location::head(file, 10, 12)]),
+            // Lines removed from `old`, which only the base map has.
+            internal(vec![
+                Location::head(file, 10, 12),
+                Location::base(file, 21, 21),
+            ]),
+        ];
+        fill(&c, &mut rows);
+        let dependents: Vec<Vec<String>> =
+            rows.iter().map(|r| r.hints.dependents.clone()).collect();
+        assert_eq!(
+            dependents,
+            [
+                vec!["billing".to_string()],
+                vec![],
+                vec!["orders".to_string()]
+            ]
+        );
+        assert_eq!(rows[0].hints.dependent_components, 1);
     }
 }

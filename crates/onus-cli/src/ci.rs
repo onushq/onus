@@ -424,11 +424,14 @@ fn pr(a: PrArgs) -> Result<i32> {
     let all_outcomes = load_outcomes(&a.records)?;
     let record = outcomes::record_for(&all_outcomes, &agent.key());
     let lane = judgment.as_ref().map_or(c.lane, |j| j.lane);
+    // The areas the history input reads: code outside every component is
+    // `root`.
     let mut components: Vec<String> = sub
         .report
         .changes
         .iter()
-        .filter_map(|r| r.component.clone())
+        .filter_map(onus_lanes::classify::area)
+        .map(str::to_string)
         .collect();
     components.sort();
     components.dedup();

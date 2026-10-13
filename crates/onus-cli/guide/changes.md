@@ -190,7 +190,7 @@ Grouped rows keep every file and line in their evidence.
 - `novelty`: `new-vendor:<vendor>`, `new-data-egress:<kind>`, `new-dependency:<package>`, `new-package:<package>`, `secret`.
 - `confidence`: `declared` (from onus.yaml), `compiler` (confirmed by a compiler, indexer or language server), `static` (read from the code), `inferred` (from conventions) or `low` (Onus could not resolve something).
 - `rulesOfTheGame`, `intentMismatch`, `needsPerson`.
-- `dependentComponents`: other components (not the row's own) that depend on the subject. 0 for rows about a whole component, such as the per-component internal row.
+- `dependentComponents`: other components (not the row's own) that depend on what the row changed. For most rows that is the subject. For a component's internal row it is the functions and classes its changed lines are in, so a body-only edit of a widely used function counts its users. 0 for other rows about a whole component. `dependents` lists those components (absent when there are none).
 - `tested`: for rows that change code, whether tests reach the files it changes: `tested` (a test exercises every changed file), `traced` (each changed file is tested or seen in a runtime trace) or `untested`. Absent for rows that change no code. It is per file, not line coverage.
 - `owners`: the owners of the row's component, from onus.yaml or else CODEOWNERS; a row merged from several components has all of theirs. Absent when nobody owns it. Used to route a review (`onus help ci`), not to rank.
 

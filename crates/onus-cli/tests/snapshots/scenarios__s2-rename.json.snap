@@ -33,6 +33,11 @@ expression: json
         "intentMismatch": false,
         "needsPerson": false,
         "dependentComponents": 3,
+        "dependents": [
+          "billing",
+          "notifications",
+          "orders"
+        ],
         "tested": "untested",
         "owners": [
           "@team-platform"

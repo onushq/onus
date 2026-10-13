@@ -99,6 +99,9 @@ expression: json
         "intentMismatch": false,
         "needsPerson": true,
         "dependentComponents": 1,
+        "dependents": [
+          "notifications"
+        ],
         "tested": "tested",
         "owners": [
           "@team-growth"
@@ -134,6 +137,9 @@ expression: json
         "intentMismatch": false,
         "needsPerson": false,
         "dependentComponents": 1,
+        "dependents": [
+          "orders"
+        ],
         "tested": "untested",
         "owners": [
           "@team-growth"

@@ -136,11 +136,18 @@
           "$ref": "#/$defs/Confidence"
         },
         "dependentComponents": {
-          "description": "Other components (not the row's own) that depend on the subject in\nthe head map (the base map for removed subjects). 0 for rows about a\nwhole component.",
+          "description": "Other components (not the row's own) that depend on what the row\nchanged in the head map (the base map for removed code): the subject,\nor for a component's internal row, the symbols its changed lines are\nin.",
           "type": "integer",
           "format": "uint32",
           "default": 0,
           "minimum": 0
+        },
+        "dependents": {
+          "description": "Those components' ids, sorted.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         },
         "intentMismatch": {
           "description": "The change is outside the stated intent.",

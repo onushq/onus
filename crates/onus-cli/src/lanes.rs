@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
 use onus_core::{Lane, LanesConfig, SemanticReport};
-use onus_lanes::classify::{Classification, ClassifyContext, classify};
+use onus_lanes::classify::{Classification, ClassifyContext, area, classify};
 use onus_lanes::judge::{Verdict, judge_with};
 use onus_lanes::outcomes::{self, Outcome};
 use onus_lanes::submission::{AgentSetup, Approval, ScopeUsed, Submission};
@@ -491,7 +491,8 @@ pub fn classify_with(
     let areas: std::collections::BTreeSet<String> = report
         .changes
         .iter()
-        .map(|r| r.component.clone().unwrap_or_else(|| "root".into()))
+        .filter_map(area)
+        .map(str::to_string)
         .collect();
     let now = opts.now.unwrap_or_else(onus_doors::gateway::now);
     let history = outcomes::area_history(
@@ -499,6 +500,7 @@ pub fn classify_with(
         &areas,
         &outcomes::HistoryScope {
             since: now.saturating_sub(u64::from(config.inputs.history.days) * 86_400),
+            until: Some(now),
             repo: opts.change.and_then(outcomes::repo_of),
             exclude: opts.change,
         },

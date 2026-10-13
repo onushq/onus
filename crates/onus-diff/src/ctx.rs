@@ -339,6 +339,7 @@ pub fn change(
             intent_mismatch: false,
             needs_person: false,
             dependent_components: 0,
+            dependents: vec![],
             tested: None,
             owners: vec![],
         },

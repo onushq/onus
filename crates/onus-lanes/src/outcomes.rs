@@ -228,13 +228,16 @@ fn had_incident(outcomes: &[Outcome]) -> std::collections::HashSet<&str> {
         .collect()
 }
 
-/// What the history input looks at: since when, which repository's changes
-/// (`owner/repo` of `owner/repo#123`; None = all), and the change being
-/// classified (left out of its own history).
+/// What the history input looks at: from when until when, which
+/// repository's changes (`owner/repo` of `owner/repo#123`; None = all), and
+/// the change being classified (left out of its own history).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct HistoryScope<'a> {
     /// Unix seconds; earlier records do not count.
     pub since: u64,
+    /// Unix seconds; later records do not count, so a backfill sees the
+    /// history as it was then (None = no end).
+    pub until: Option<u64>,
     pub repo: Option<&'a str>,
     pub exclude: Option<&'a str>,
 }
@@ -245,7 +248,7 @@ pub fn repo_of(change: &str) -> Option<&str> {
 }
 
 /// Reverts (and rollbacks) and incidents per component among `areas`,
-/// recorded at or after `scope.since`. A change's areas are its
+/// recorded from `scope.since` to `scope.until`. A change's areas are its
 /// `components` plus the component of each `involved` id. Every record
 /// counts, not only the latest of each change: a revert and an incident are
 /// events at their own time. A change counts once per area and kind.
@@ -259,7 +262,10 @@ pub fn area_history(
     type Changes<'o> = (BTreeSet<&'o str>, BTreeSet<&'o str>);
     let mut found: BTreeMap<&str, Changes> = BTreeMap::new();
     for o in outcomes {
-        if o.at < scope.since || scope.exclude == Some(o.change.as_str()) {
+        if o.at < scope.since
+            || scope.until.is_some_and(|until| o.at > until)
+            || scope.exclude == Some(o.change.as_str())
+        {
             continue;
         }
         if let (Some(want), Some(repo)) = (scope.repo, repo_of(&o.change))
@@ -629,6 +635,7 @@ mod tests {
             &areas,
             &HistoryScope {
                 since: 50,
+                until: None,
                 repo: Some("acme/shop"),
                 exclude: Some("acme/shop#9"),
             },
@@ -650,11 +657,24 @@ mod tests {
             &areas,
             &HistoryScope {
                 since: 0,
+                until: None,
                 repo: Some("acme/web"),
                 exclude: None,
             },
         );
         assert_eq!(web["logger"].changes, ["acme/web#2"]);
+        // A backfill does not see what was recorded after its time.
+        let then = area_history(
+            &all,
+            &areas,
+            &HistoryScope {
+                since: 50,
+                until: Some(105),
+                repo: Some("acme/shop"),
+                exclude: Some("acme/shop#9"),
+            },
+        );
+        assert_eq!((then["logger"].reverts, then["logger"].incidents), (0, 1));
     }
 
     #[test]

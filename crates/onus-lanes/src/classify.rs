@@ -100,6 +100,17 @@ pub struct AreaHistory {
 /// Component → its history.
 pub type AreaHistories = BTreeMap<String, AreaHistory>;
 
+/// The area history counts a row against: its component, `root` for code
+/// outside every component, and none for a row that spans the repository
+/// (a widespread or summary row).
+pub fn area(row: &SemanticChange) -> Option<&str> {
+    match &row.component {
+        Some(c) => Some(c),
+        None if row.subject == "repository" => None,
+        None => Some("root"),
+    }
+}
+
 static NO_HISTORY: AreaHistories = BTreeMap::new();
 
 /// Everything the classifier reads besides the report, submission and
@@ -228,11 +239,17 @@ pub fn classify(
         && let Some((to, at)) = threshold_met(&inputs.blast_radius, row.hints.dependent_components)
         && to > Lane::AutoMerge
     {
+        // Reports from before `dependents` have only the count.
+        let named = if row.hints.dependents.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", some(&row.hints.dependents))
+        };
         raise(
             to,
             "input",
             format!(
-                "“{}” is used by {}; {at} or more go to {}",
+                "“{}” is used by {}{named}; {at} or more go to {}",
                 row.title,
                 plural(
                     row.hints.dependent_components,
@@ -303,10 +320,7 @@ pub fn classify(
             &mut lane,
         );
     }
-    let touched: BTreeSet<&str> = rows
-        .iter()
-        .map(|r| r.component.as_deref().unwrap_or("root"))
-        .collect();
+    let touched: BTreeSet<&str> = rows.iter().filter_map(area).collect();
     for component in touched {
         let Some(h) = ctx.areas.get(component) else {
             continue;
@@ -338,7 +352,7 @@ pub fn classify(
                 some(&h.changes)
             ),
             rows.iter()
-                .filter(|r| r.component.as_deref().unwrap_or("root") == component)
+                .filter(|r| area(r) == Some(component))
                 .map(|r| r.id.clone())
                 .collect(),
             &mut applied,
@@ -587,6 +601,7 @@ mod tests {
                 intent_mismatch: false,
                 needs_person: false,
                 dependent_components: 0,
+                dependents: vec![],
                 tested: None,
                 owners: vec![],
             },
@@ -705,18 +720,32 @@ mod tests {
     #[test]
     fn blast_radius_tests_and_confidence_raise_lanes() {
         let p = policy();
-        let wide = internal(|h| h.dependent_components = 3);
+        let wide = internal(|h| {
+            h.dependent_components = 4;
+            h.dependents = ["billing", "notifications", "orders", "web"]
+                .map(String::from)
+                .into();
+        });
         let c = classify(&wide, None, &p, &with(VETERAN));
         assert_eq!(c.lane, Lane::Judge);
         let input = inputs(&c, "input");
         assert_eq!(input.len(), 1);
         assert_eq!(input[0].rows, ["internal-changes:x"]);
         assert!(
-            input[0]
-                .reason
-                .contains("is used by 3 other components; 3 or more go to judge"),
+            input[0].reason.contains(
+                "is used by 4 other components (billing, notifications, orders and 1 more); 3 or more go to judge"
+            ),
             "{}",
             input[0].reason
+        );
+        // A report from before `dependents` has only the count.
+        let counted = internal(|h| h.dependent_components = 3);
+        let c = classify(&counted, None, &p, &with(VETERAN));
+        assert!(
+            inputs(&c, "input")[0]
+                .reason
+                .contains("is used by 3 other components; 3 or more go to judge"),
+            "{c:?}"
         );
         assert_eq!(
             lane_of(&internal(|h| h.dependent_components = 2), &p),
@@ -780,6 +809,36 @@ mod tests {
         };
         assert_eq!(lane_with("docs", revert).lane, Lane::Judge);
         assert_eq!(lane_with("billing", incident).lane, Lane::AutoMerge);
+    }
+
+    #[test]
+    fn rows_outside_every_component_have_root_history() {
+        let mut root = row(ChangeKind::Internal, "internal-changes", &[]);
+        root.component = None;
+        let mut spread = root.clone();
+        spread.subject = "repository".into();
+        assert_eq!(area(&root), Some("root"));
+        assert_eq!(area(&spread), None);
+        let areas: AreaHistories = [(
+            "root".to_string(),
+            AreaHistory {
+                incidents: 1,
+                changes: vec!["acme/shop#1".into()],
+                ..AreaHistory::default()
+            },
+        )]
+        .into();
+        let ctx = ClassifyContext {
+            areas: &areas,
+            ..with(VETERAN)
+        };
+        let c = classify(&report(vec![root]), None, &LanesConfig::default(), &ctx);
+        assert_eq!(c.lane, Lane::Human);
+        assert!(
+            inputs(&c, "input")[0]
+                .reason
+                .starts_with("`root` had 1 incident")
+        );
     }
 
     #[test]
