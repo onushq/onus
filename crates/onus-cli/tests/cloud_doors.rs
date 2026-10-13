@@ -1027,7 +1027,7 @@ fn the_map_onus_cloud_keeps_answers_as_onus_query_does() {
         &["--token", &keys.token, "--key-public", &keys.public()],
         &l.env(),
     );
-    let (failed, limited) = m.tool("onus_cloud_map", ask);
+    let (failed, limited) = m.tool("onus_cloud_map", ask.clone());
     assert!(!failed, "{limited}");
     assert!(
         limited["hidden"]
@@ -1035,6 +1035,22 @@ fn the_map_onus_cloud_keeps_answers_as_onus_query_does() {
             .unwrap()
             .contains("outside your read scope"),
         "{limited}"
+    );
+    // The remote is not GitHub's, so the repository the operator named is the
+    // task's: naming it is allowed, naming another is refused.
+    let mut named = ask.clone();
+    named["repository"] = json!("acme/shop");
+    let (failed, same) = m.tool("onus_cloud_map", named);
+    assert!(!failed, "{same}");
+    let mut other = ask;
+    other["repository"] = json!("acme/storefront");
+    let (failed, refused) = m.tool("onus_cloud_map", other);
+    assert!(failed);
+    assert!(
+        refused.as_str().unwrap().contains(
+            "your token is for this worktree's repository `acme/shop`, not `acme/storefront`"
+        ),
+        "{refused}"
     );
     drop(m);
 

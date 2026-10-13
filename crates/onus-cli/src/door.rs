@@ -63,6 +63,9 @@ pub struct Door {
     public: Option<PublicKey>,
     held: RwLock<Option<Held>>,
     door: &'static str,
+    /// The repository the operator named (`--cloud-repo`), for a worktree whose
+    /// remote is not GitHub's.
+    repository: Option<String>,
 }
 
 impl std::fmt::Debug for Door {
@@ -133,7 +136,8 @@ pub trait Facts {
     fn submission_task(&self, id: &str) -> Result<Option<String>>;
     /// The task an escalation request was filed for.
     fn escalation_task(&self, id: &str) -> Result<Option<String>>;
-    /// The GitHub repository of this worktree (`owner/name`).
+    /// The GitHub repository of this worktree (`owner/name`): the one the
+    /// operator named, else the worktree's remote.
     fn worktree_repository(&self) -> Option<String>;
     /// `details.result.<field>` of the calls to `tool` that `task` made and
     /// that were done. A broken audit log is an error, never an empty set.
@@ -169,6 +173,8 @@ pub fn ledger(log: &AuditLog, task: &str, tool: &str, field: &str) -> Result<BTr
 pub struct LocalFacts {
     pub root: PathBuf,
     pub log: PathBuf,
+    /// The repository the operator named, if any.
+    pub repository: Option<String>,
 }
 
 impl Facts for LocalFacts {
@@ -223,7 +229,9 @@ impl Facts for LocalFacts {
     }
 
     fn worktree_repository(&self) -> Option<String> {
-        crate::cloud::repository_of(&self.root)
+        self.repository
+            .clone()
+            .or_else(|| crate::cloud::repository_of(&self.root))
     }
 
     fn ledger(&self, task: &str, tool: &str, field: &str) -> Result<BTreeSet<String>> {
@@ -732,7 +740,16 @@ impl Door {
             public,
             held: RwLock::new(held),
             door: "mcp",
+            repository: None,
         })
+    }
+
+    /// The repository the task works on, named by the operator (`--cloud-repo`)
+    /// because the worktree's remote does not say it. Calls that name a
+    /// repository are checked against it.
+    pub fn with_repository(mut self, repository: Option<String>) -> Door {
+        self.repository = repository.filter(|r| !r.trim().is_empty());
+        self
     }
 
     pub fn log_path(&self) -> &Path {
@@ -764,6 +781,7 @@ impl Door {
         LocalFacts {
             root: self.root.clone(),
             log: self.log.path().to_path_buf(),
+            repository: self.repository.clone(),
         }
     }
 
@@ -1678,5 +1696,28 @@ mod tests {
         let local = Door::new(dir.path().into(), dir.path().join("b.jsonl"), None, None).unwrap();
         let mut envs = json!([{ "name": "b", "task": "x" }]);
         assert_eq!(local.filter_list("onus_envs", &mut envs, &facts()), 0);
+    }
+
+    #[test]
+    fn a_worktree_without_a_github_remote_uses_the_repository_the_operator_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = Door::new(dir.path().into(), dir.path().join("a.jsonl"), None, None).unwrap();
+        let shop = json!({ "repository": "acme/shop" });
+        let err = same_repository(&shop, &d.facts()).unwrap_err();
+        assert!(err.reason.contains("cannot be checked"), "{}", err.reason);
+        let d = d.with_repository(Some("acme/shop".into()));
+        assert!(same_repository(&shop, &d.facts()).is_ok());
+        let err =
+            same_repository(&json!({ "repository": "acme/storefront" }), &d.facts()).unwrap_err();
+        assert!(
+            err.reason.contains(
+                "your token is for this worktree's repository `acme/shop`, not `acme/storefront`"
+            ),
+            "{}",
+            err.reason
+        );
+        // An empty name is no name.
+        let d = d.with_repository(Some(" ".into()));
+        assert_eq!(d.facts().repository, None);
     }
 }

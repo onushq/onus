@@ -893,12 +893,10 @@ fn run(cli: Cli) -> Result<i32> {
                 Some(k) => Some(onus_doors::token::public_key(&doors::read_key(k)?)?),
                 None => None,
             };
-            let door = std::sync::Arc::new(onus_cli::door::Door::new(
-                canonical.clone(),
-                audit.clone(),
-                public,
-                token,
-            )?);
+            let door = std::sync::Arc::new(
+                onus_cli::door::Door::new(canonical.clone(), audit.clone(), public, token)?
+                    .with_repository(cloud_repo.clone()),
+            );
             // Every Onus Cloud call goes through one door: a login is narrowed to a scoped
             // token for this repository and task; a token or an API key is used as it is.
             let cloud_door = if no_actions {
