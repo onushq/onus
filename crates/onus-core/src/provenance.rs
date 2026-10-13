@@ -14,7 +14,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::change::{IntentCheck, ReportSummary};
-use crate::config::Lane;
+use crate::config::{Lane, MetricGuard};
 
 /// The version of the record's format.
 pub const SCHEMA: u32 = 1;
@@ -138,6 +138,13 @@ pub struct TrackRecord {
     pub merged: u32,
     /// Incidents among its recent changes.
     pub recent_incidents: u32,
+    /// Rollbacks, not planned, among its recent changes.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub recent_rollbacks: u32,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -227,7 +234,7 @@ pub struct LaneFacts {
 #[serde(rename_all = "camelCase")]
 pub struct LaneReason {
     pub lane: Lane,
-    /// `default`, `policy`, `input`, `floor`, `record` or `audit`.
+    /// `default`, `policy`, `input`, `floor`, `model`, `record` or `audit`.
     pub source: String,
     pub reason: String,
     /// The ids of the report rows behind it.
@@ -301,7 +308,7 @@ pub struct RowApproval {
     pub by: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Rollout {
     /// `open`, `merged`, `closed`, `reverted`, `rolled-back` or `incident`.
@@ -321,6 +328,106 @@ pub struct Rollout {
     /// Every outcome of the change, in order.
     #[serde(default)]
     pub history: Vec<RolloutEvent>,
+    /// Where the change is in production, from its outcomes and its deploy
+    /// and rollout stages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<RolloutStatus>,
+    /// The share of production traffic last reported (a deploy or a rollout
+    /// stage).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub percent: Option<u8>,
+    /// The plan for the change's final lane, from its pull record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<PlanFacts>,
+    /// Every deploy and rollout stage of the change, in time order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stages: Vec<StageEvent>,
+    /// Every other production signal tied to the change, in time order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub signals: Vec<SignalRef>,
+}
+
+/// Where a change is in production.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum RolloutStatus {
+    /// Still open.
+    Pending,
+    /// Closed without merging.
+    NotShipped,
+    /// Merged; no production deploy or rollout stage reported yet.
+    AwaitingDeploy,
+    /// Reaching a share of production traffic.
+    InProgress,
+    /// The last stage holds: not baked yet, or a sample is missing.
+    Holding,
+    /// At all of production traffic.
+    Complete,
+    /// Rolled back: by Onus's decision on a stage, or reported.
+    RolledBack,
+    /// Reverted after it merged.
+    Reverted,
+}
+
+/// A rollout plan, as the record keeps it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanFacts {
+    /// `none`, `canary` or `flag`.
+    pub strategy: String,
+    #[serde(default)]
+    pub steps: Vec<u8>,
+    #[serde(default)]
+    pub bake_minutes: u32,
+    #[serde(default)]
+    pub guards: Vec<MetricGuard>,
+    #[serde(default)]
+    pub automatic_rollback: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flag: Option<String>,
+    #[serde(default)]
+    pub reasons: Vec<String>,
+}
+
+/// A deploy or rollout stage reported for the change.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct StageEvent {
+    /// Unix seconds.
+    pub at: u64,
+    /// `deploy` or `rollout`.
+    pub kind: String,
+    /// The share of traffic; 100 for a deploy that names none.
+    pub percent: u8,
+    /// Onus's decision on a rollout stage: `promote`, `hold`, `rollback` or
+    /// `complete`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<String>,
+    /// Absent means production. Stages elsewhere are listed, and do not
+    /// count toward `status`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deploy: Option<String>,
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// A production signal tied to the change.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SignalRef {
+    pub id: String,
+    /// `incident`, `error-spike`, `latency`, `metric` or `rollback`.
+    pub kind: String,
+    /// Unix seconds.
+    pub at: u64,
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub severity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

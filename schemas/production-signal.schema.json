@@ -1,0 +1,307 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ProductionSignal",
+  "description": "One production signal.",
+  "type": "object",
+  "properties": {
+    "at": {
+      "description": "Unix seconds; now when left out.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0
+    },
+    "attributedBy": {
+      "description": "Written by Onus: `change` or `commit`, how the signal was tied to its\nchange. Absent when it was not.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "calls": {
+      "description": "For trace: the caller and callee pairs observed (at most 5000).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ObservedCall"
+      }
+    },
+    "change": {
+      "description": "The change it is about, `owner/repo#123`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "commit": {
+      "description": "A commit sha, or a prefix of at least 7 hex digits.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "components": {
+      "description": "Component ids of the map.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "deploy": {
+      "description": "An opaque deploy id, for grouping.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "environment": {
+      "description": "Where it happened (`production`, `staging`, …). Absent means\nproduction.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "id": {
+      "description": "Unique per source (`pagerduty:Q1ABC`, `sentry:4711`): a signal with an\nid already on record is not recorded again.",
+      "type": "string"
+    },
+    "kind": {
+      "$ref": "#/$defs/SignalKind"
+    },
+    "metrics": {
+      "description": "For error-spike, latency and metric: what moved. For rollout: the\nsamples Onus judged.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/MetricSample"
+      }
+    },
+    "note": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "rollout": {
+      "description": "For deploy: the share of traffic it reached. For rollout: the stage\nand Onus's decision.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RolloutStage"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "severity": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Severity"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "source": {
+      "description": "The system it came from (`pagerduty`, `datadog`, `argo`, `manual`).",
+      "type": "string"
+    },
+    "symbols": {
+      "description": "Symbol ids (`billing:src/a.ts#charge`); their components count too.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "kind"
+  ],
+  "$defs": {
+    "CodeRef": {
+      "description": "Where a call happened in code: the OpenTelemetry code attributes, free of\nany map.",
+      "type": "object",
+      "properties": {
+        "file": {
+          "description": "`code.filepath`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "function": {
+          "description": "`code.function`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "line": {
+          "description": "`code.lineno`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "namespace": {
+          "description": "`code.namespace`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "service": {
+          "description": "`service.name`.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "MetricSample": {
+      "description": "One measurement, and what it is compared with.",
+      "type": "object",
+      "properties": {
+        "baseline": {
+          "description": "The control or pre-deploy value.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "name": {
+          "description": "`error_rate`, `latency_p95_ms`, `checkout_conversion`, …",
+          "type": "string"
+        },
+        "unit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "value": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "value"
+      ]
+    },
+    "ObservedCall": {
+      "description": "A caller and callee seen together in a trace: a span and its parent.",
+      "type": "object",
+      "properties": {
+        "count": {
+          "description": "How many times it was seen. Default 1.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 1,
+          "minimum": 0
+        },
+        "from": {
+          "$ref": "#/$defs/CodeRef"
+        },
+        "to": {
+          "$ref": "#/$defs/CodeRef"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "from",
+        "to"
+      ]
+    },
+    "RolloutStage": {
+      "description": "A share of production traffic, and for a rollout stage, Onus's decision.",
+      "type": "object",
+      "properties": {
+        "decision": {
+          "description": "`promote`, `hold`, `rollback` or `complete`: set only by `onus ci\nrollout`. A deploy has none.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "flag": {
+          "description": "The feature flag the change ships behind.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "percent": {
+          "description": "0 to 100.",
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "percent"
+      ]
+    },
+    "Severity": {
+      "type": "string",
+      "enum": [
+        "low",
+        "medium",
+        "high",
+        "critical"
+      ]
+    },
+    "SignalKind": {
+      "oneOf": [
+        {
+          "description": "Something broke in production. Attributed, it becomes an `incident`\noutcome of its change.",
+          "type": "string",
+          "const": "incident"
+        },
+        {
+          "description": "Error rates rose.",
+          "type": "string",
+          "const": "error-spike"
+        },
+        {
+          "description": "Responses slowed.",
+          "type": "string",
+          "const": "latency"
+        },
+        {
+          "description": "A business or other metric moved.",
+          "type": "string",
+          "const": "metric"
+        },
+        {
+          "description": "The change was rolled back. Attributed, it becomes a `rolled-back`\noutcome of its change.",
+          "type": "string",
+          "const": "rollback"
+        },
+        {
+          "description": "A rollout stage and Onus's decision. Written only by `onus ci\nrollout`; `onus signals ingest` refuses it.",
+          "type": "string",
+          "const": "rollout"
+        },
+        {
+          "description": "A deploy tool says a commit reached an environment, or a share of\nits traffic.",
+          "type": "string",
+          "const": "deploy"
+        },
+        {
+          "description": "Calls observed in production traces, folded into the map.",
+          "type": "string",
+          "const": "trace"
+        }
+      ]
+    }
+  }
+}

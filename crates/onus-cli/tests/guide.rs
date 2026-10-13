@@ -85,3 +85,36 @@ fn the_docs_index_links_every_topic() {
         );
     }
 }
+
+#[test]
+fn production_lists_the_built_in_rollout_plans() {
+    let text = topic("production");
+    for lane in [
+        onus_core::Lane::AutoMerge,
+        onus_core::Lane::Judge,
+        onus_core::Lane::Human,
+    ] {
+        let plan = onus_lanes::rollout::defaults(lane).unwrap();
+        let steps: Vec<String> = plan.steps.iter().map(u8::to_string).collect();
+        let row = format!("| {} | `{}`", lane.as_str(), plan.strategy.as_str());
+        let line = text
+            .lines()
+            .find(|l| l.starts_with(&row))
+            .unwrap_or_else(|| panic!("no row for {}", lane.as_str()));
+        assert!(
+            line.contains(&format!("| {} |", steps.join(", "))),
+            "{line}"
+        );
+        assert!(
+            line.contains(&format!("| {} min |", plan.bake_minutes)),
+            "{line}"
+        );
+        for g in &plan.guards {
+            assert!(
+                line.contains(&format!("{} > {:.1}×", g.metric, g.max_ratio.unwrap())),
+                "{line}"
+            );
+        }
+    }
+    assert!(onus_lanes::rollout::defaults(onus_core::Lane::Blocked).is_none());
+}

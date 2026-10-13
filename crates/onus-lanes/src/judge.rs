@@ -432,6 +432,7 @@ mod tests {
             }],
             learned: None,
             features: None,
+            rollout: None,
         }
     }
 

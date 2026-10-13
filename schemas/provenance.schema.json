@@ -680,7 +680,7 @@
           }
         },
         "source": {
-          "description": "`default`, `policy`, `input`, `floor`, `record` or `audit`.",
+          "description": "`default`, `policy`, `input`, `floor`, `model`, `record` or `audit`.",
           "type": "string"
         }
       },
@@ -688,6 +688,103 @@
         "lane",
         "source",
         "reason"
+      ]
+    },
+    "MetricGuard": {
+      "description": "A limit on one metric during a rollout. Ratios compare the value with\nits baseline (the control, or the value before the deploy).",
+      "type": "object",
+      "properties": {
+        "max": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "maxRatio": {
+          "description": "The most `value / baseline` may be.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "metric": {
+          "description": "The metric's name, as the samples give it (`error_rate`).",
+          "type": "string"
+        },
+        "min": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "minRatio": {
+          "description": "The least `value / baseline` may be, for metrics that must not drop.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "metric"
+      ]
+    },
+    "PlanFacts": {
+      "description": "A rollout plan, as the record keeps it.",
+      "type": "object",
+      "properties": {
+        "automaticRollback": {
+          "type": "boolean",
+          "default": false
+        },
+        "bakeMinutes": {
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
+        "flag": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "guards": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/MetricGuard"
+          }
+        },
+        "reasons": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "steps": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "integer",
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0
+          }
+        },
+        "strategy": {
+          "description": "`none`, `canary` or `flag`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "strategy"
       ]
     },
     "ReportFacts": {
@@ -789,9 +886,55 @@
           "type": "boolean",
           "default": false
         },
+        "percent": {
+          "description": "The share of production traffic last reported (a deploy or a rollout\nstage).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        },
+        "plan": {
+          "description": "The plan for the change's final lane, from its pull record.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PlanFacts"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "result": {
           "description": "`open`, `merged`, `closed`, `reverted`, `rolled-back` or `incident`.",
           "type": "string"
+        },
+        "signals": {
+          "description": "Every other production signal tied to the change, in time order.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SignalRef"
+          }
+        },
+        "stages": {
+          "description": "Every deploy and rollout stage of the change, in time order.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/StageEvent"
+          }
+        },
+        "status": {
+          "description": "Where the change is in production, from its outcomes and its deploy\nand rollout stages.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RolloutStatus"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -830,6 +973,51 @@
         "result"
       ]
     },
+    "RolloutStatus": {
+      "description": "Where a change is in production.",
+      "oneOf": [
+        {
+          "description": "Still open.",
+          "type": "string",
+          "const": "pending"
+        },
+        {
+          "description": "Closed without merging.",
+          "type": "string",
+          "const": "not-shipped"
+        },
+        {
+          "description": "Merged; no production deploy or rollout stage reported yet.",
+          "type": "string",
+          "const": "awaiting-deploy"
+        },
+        {
+          "description": "Reaching a share of production traffic.",
+          "type": "string",
+          "const": "in-progress"
+        },
+        {
+          "description": "The last stage holds: not baked yet, or a sample is missing.",
+          "type": "string",
+          "const": "holding"
+        },
+        {
+          "description": "At all of production traffic.",
+          "type": "string",
+          "const": "complete"
+        },
+        {
+          "description": "Rolled back: by Onus's decision on a stage, or reported.",
+          "type": "string",
+          "const": "rolled-back"
+        },
+        {
+          "description": "Reverted after it merged.",
+          "type": "string",
+          "const": "reverted"
+        }
+      ]
+    },
     "RowApproval": {
       "type": "object",
       "properties": {
@@ -845,6 +1033,46 @@
         "by"
       ]
     },
+    "SignalRef": {
+      "description": "A production signal tied to the change.",
+      "type": "object",
+      "properties": {
+        "at": {
+          "description": "Unix seconds.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "description": "`incident`, `error-spike`, `latency`, `metric` or `rollback`.",
+          "type": "string"
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "severity": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "at",
+        "source"
+      ]
+    },
     "Stage": {
       "description": "Where the change is: still open, merged, or closed without merging.",
       "type": "string",
@@ -852,6 +1080,64 @@
         "open",
         "merged",
         "closed"
+      ]
+    },
+    "StageEvent": {
+      "description": "A deploy or rollout stage reported for the change.",
+      "type": "object",
+      "properties": {
+        "at": {
+          "description": "Unix seconds.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "decision": {
+          "description": "Onus's decision on a rollout stage: `promote`, `hold`, `rollback` or\n`complete`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "deploy": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "environment": {
+          "description": "Absent means production. Stages elsewhere are listed, and do not\ncount toward `status`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "description": "`deploy` or `rollout`.",
+          "type": "string"
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "percent": {
+          "description": "The share of traffic; 100 for a deploy that names none.",
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        },
+        "source": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "at",
+        "kind",
+        "percent",
+        "source"
       ]
     },
     "Token": {
@@ -932,6 +1218,12 @@
         },
         "recentIncidents": {
           "description": "Incidents among its recent changes.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "recentRollbacks": {
+          "description": "Rollbacks, not planned, among its recent changes.",
           "type": "integer",
           "format": "uint32",
           "minimum": 0

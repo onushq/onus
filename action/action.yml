@@ -10,7 +10,13 @@ description: Report the changes in meaning of a pull request, as a sticky commen
 #   from people with write access, and answer `/onus accuracy` (which records
 #   nothing).
 # - push (to the default branch), with records: record reverts.
-# See `onus help ci`.
+# - deployment_status or workflow_dispatch, with records and rollout-percent:
+#   a deploy reached a share of production traffic. `onus ci rollout` decides
+#   promote, hold, rollback or complete from the change's rollout plan and the
+#   samples in rollout-metrics, records the stage, and sets rollout-decision.
+#   A rollback fails the step; the deploy workflow acts on it. Onus never
+#   moves traffic.
+# See `onus help ci` and `onus help production`.
 author: Onus
 branding:
   icon: eye
@@ -98,6 +104,24 @@ inputs:
       made earlier in the job (with records).
     required: false
     default: ''
+  rollout-percent:
+    description: >-
+      With records, on deployment_status or workflow_dispatch: the share of production traffic the
+      deploy reached. Runs only the rollout step (onus ci rollout); see `onus help production`.
+    required: false
+    default: ''
+  rollout-change:
+    description: >-
+      The change being rolled out: owner/repo#123, or a commit. Default the deployment's commit
+      (github.sha).
+    required: false
+    default: ''
+  rollout-metrics:
+    description: >-
+      A JSON file of the stage's metric samples (schemas/rollout-metrics.schema.json), written by an
+      earlier step of the job.
+    required: false
+    default: ''
   plugins:
     description: >-
       A plugins file's contents (YAML), for example the Svelte plugin that ships with Onus:
@@ -154,6 +178,17 @@ outputs:
       One line of JSON about this report (sizes, counts, time taken), also
       kept in the comment for `scripts/onus-metrics.sh`.
     value: ${{ steps.report.outputs.metrics }}
+  rollout-strategy:
+    description: The rollout strategy for the change's lane with records 'true' (none, canary or flag).
+    value: ${{ steps.lane.outputs.rollout-strategy }}
+  rollout-plan:
+    description: Path of the change's rollout plan with records 'true' (`onus help production`).
+    value: ${{ steps.lane.outputs.rollout-plan }}
+  rollout-decision:
+    description: >-
+      Onus's decision on a rollout stage (promote, hold, rollback or complete), with
+      rollout-percent.
+    value: ${{ steps.rollout.outputs.rollout-decision }}
 
 runs:
   using: composite
@@ -187,6 +222,7 @@ runs:
       id: install
       if: >-
         (github.event_name == 'pull_request' && (github.event.action != 'closed' || inputs.records == 'true')) ||
+        (inputs.records == 'true' && inputs.rollout-percent != '') ||
         (inputs.records == 'true' && (github.event_name == 'push' ||
         (github.event_name == 'issue_comment' && startsWith(github.event.comment.body, '/onus'))))
       shell: bash
@@ -273,6 +309,8 @@ runs:
         FAIL_ON: ${{ inputs.fail-on }}
         CONFIG: ${{ inputs.config }}
         PLUGINS: ${{ inputs.plugins }}
+        RECORDS: ${{ inputs.records }}
+        RECORDS_BRANCH: ${{ inputs.records-branch }}
         # Passed through the environment, never pasted into the script, so a
         # pull request body cannot inject commands.
         PR_BODY: ${{ github.event.pull_request.body }}
@@ -308,6 +346,14 @@ runs:
         # Releases before 0.2 have no map cache.
         if [ "$CACHE" = true ] && "$ONUS" report --help | grep -q -- --cache-dir; then
           args+=(--cache-dir "$CACHE_DIR")
+        fi
+        # With records, production traces kept in them join the map; the lane
+        # step reuses the folder.
+        if [ "$RECORDS" = true ] && "$ONUS" signals --help > /dev/null 2>&1; then
+          "$ONUS" ci records pull --dir "$RUNNER_TEMP/onus-records" --branch "$RECORDS_BRANCH"
+          if [ -s "$RUNNER_TEMP/onus-records/signals.jsonl" ]; then
+            args+=(--traces "$RUNNER_TEMP/onus-records/signals.jsonl")
+          fi
         fi
         # Milliseconds; perl is on every GitHub runner, `date +%N` is not.
         ms() { perl -MTime::HiRes=time -e 'printf "%d\n", time * 1000'; }
@@ -380,7 +426,10 @@ runs:
           dir="$RUNNER_TEMP/onus-records"
           out="$RUNNER_TEMP/onus/ci"
           printf '%s' "$PR_BODY" > "$RUNNER_TEMP/onus/pr-body.md"
-          "$ONUS" ci records pull --dir "$dir" --branch "$RECORDS_BRANCH"
+          # The report step pulled them already, with releases that keep signals.
+          if [ ! -d "$dir" ]; then
+            "$ONUS" ci records pull --dir "$dir" --branch "$RECORDS_BRANCH"
+          fi
           args=(--base "$BASE" --head "$HEAD" --change "$CHANGE" --branch "$BRANCH" --author "$AUTHOR"
             --body-file "$RUNNER_TEMP/onus/pr-body.md" --report "$REPORT" --records "$dir" --out "$out")
           [ -n "$CONFIG" ] && args+=(--config "$CONFIG")
@@ -397,6 +446,10 @@ runs:
           cat "$out/lane.md" >> "$GITHUB_STEP_SUMMARY"
           echo "lane=$(jq -r .lane <<< "$summary")" >> "$GITHUB_OUTPUT"
           if [ -f "$out/provenance.json" ]; then echo "provenance=$out/provenance.json" >> "$GITHUB_OUTPUT"; fi
+          if [ -f "$out/rollout.json" ]; then
+            echo "rollout-strategy=$(jq -r '.rollout.strategy // empty' <<< "$summary")" >> "$GITHUB_OUTPUT"
+            echo "rollout-plan=$out/rollout.json" >> "$GITHUB_OUTPUT"
+          fi
           exit 0
         fi
         if ! "$ONUS" classify --help > /dev/null 2>&1; then
@@ -609,3 +662,38 @@ runs:
         fi
         "$ONUS" ci push "${args[@]}"
         "$ONUS" ci records push --dir "$dir" --branch "$RECORDS_BRANCH" --message "Reverts on ${GITHUB_REF_NAME}"
+
+    - name: Rollout stage
+      id: rollout
+      if: inputs.records == 'true' && inputs.rollout-percent != ''
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        ONUS: ${{ steps.install.outputs.onus }}
+        RECORDS_BRANCH: ${{ inputs.records-branch }}
+        PERCENT: ${{ inputs.rollout-percent }}
+        CHANGE: ${{ inputs.rollout-change }}
+        METRICS: ${{ inputs.rollout-metrics }}
+        DEPLOY: ${{ github.event.deployment.id }}
+      run: |
+        set -euo pipefail
+        dir="$RUNNER_TEMP/onus-records"
+        "$ONUS" ci records pull --dir "$dir" --branch "$RECORDS_BRANCH"
+        args=(--percent "$PERCENT" --records "$dir")
+        case "$CHANGE" in
+          *#*) args+=(--change "$CHANGE") ;;
+          "") args+=(--commit "$GITHUB_SHA") ;;
+          *) args+=(--commit "$CHANGE") ;;
+        esac
+        [ -n "$METRICS" ] && args+=(--metrics "$METRICS")
+        [ -n "$DEPLOY" ] && args+=(--deploy "$DEPLOY")
+        code=0
+        decision=$("$ONUS" ci rollout "${args[@]}") || code=$?
+        if [ "$code" -ne 0 ] && [ "$code" -ne 2 ] && [ "$code" -ne 3 ]; then exit "$code"; fi
+        "$ONUS" ci records push --dir "$dir" --branch "$RECORDS_BRANCH" --message "Rollout at $PERCENT%"
+        echo "rollout-decision=$(jq -r .decision <<< "$decision")" >> "$GITHUB_OUTPUT"
+        echo "$decision" >> "$GITHUB_STEP_SUMMARY"
+        if [ "$code" -eq 2 ]; then
+          echo "::error::Onus decided to roll back: $(jq -r '.reasons | join("; ")' <<< "$decision")"
+          exit 2
+        fi

@@ -116,7 +116,8 @@ Examples:
         /// Import a SCIP index of this directory (repeatable). Runs nothing.
         #[arg(long, value_name = "FILE")]
         scip: Vec<PathBuf>,
-        /// Add the calls in these OpenTelemetry traces (OTLP JSON) to the map (repeatable).
+        /// Add the calls in these OpenTelemetry traces (OTLP JSON, or the records'
+        /// signals.jsonl) to the map (repeatable).
         #[arg(long, value_name = "FILE")]
         traces: Vec<PathBuf>,
         #[command(flatten)]
@@ -156,7 +157,8 @@ Examples:
         /// Import a SCIP index of the head directory (repeatable).
         #[arg(long, value_name = "FILE")]
         head_scip: Vec<PathBuf>,
-        /// Add the calls in these OpenTelemetry traces (OTLP JSON) to both maps (repeatable).
+        /// Add the calls in these OpenTelemetry traces (OTLP JSON, or the records'
+        /// signals.jsonl) to both maps (repeatable).
         #[arg(long, value_name = "FILE")]
         traces: Vec<PathBuf>,
         #[command(flatten)]
@@ -202,7 +204,8 @@ Examples:
         /// Import a SCIP index of the head ref (repeatable). Runs nothing.
         #[arg(long, value_name = "FILE")]
         head_scip: Vec<PathBuf>,
-        /// Add the calls in these OpenTelemetry traces (OTLP JSON) to both maps (repeatable).
+        /// Add the calls in these OpenTelemetry traces (OTLP JSON, or the records'
+        /// signals.jsonl) to both maps (repeatable).
         #[arg(long, value_name = "FILE")]
         traces: Vec<PathBuf>,
         /// Keep the base ref's map in this folder and reuse it on the next run against the
@@ -428,6 +431,17 @@ Examples:
     Lanes {
         #[command(subcommand)]
         cmd: lanes::LanesCmd,
+    },
+    /// Production signals: incidents, error spikes, rollbacks and traces, kept with the
+    /// records.
+    #[command(after_long_help = "\
+Examples:
+  onus signals ingest --records rec --file pagerduty-export.json
+  onus signals traces --records rec --file otel-export.json --source otel-prod
+  onus signals areas --records rec --days 30")]
+    Signals {
+        #[command(subcommand)]
+        cmd: signals::SignalsCmd,
     },
     /// One record of why a change was allowed through: intent, agent, token, evidence,
     /// escalations, judge, approver, rollout.
@@ -657,6 +671,7 @@ mod envs;
 mod lanes;
 mod provenance;
 mod records;
+mod signals;
 mod ui;
 
 fn main() -> ExitCode {
@@ -711,9 +726,21 @@ fn run(cli: Cli) -> Result<i32> {
             let mut map = onus_cli::build_with(&dir, cfg, None, &providers.load()?, &scip)?;
             if !traces.is_empty() {
                 let stats = onus_cli::add_traces(&mut map, &traces)?;
+                // Spans read from OTLP, and calls kept in the records.
+                let read = match (stats.spans, stats.calls) {
+                    (0, c) if c > 0 => format!("{c} recorded calls"),
+                    (s, 0) => format!("{s} spans, {} resolved", stats.resolved),
+                    (s, c) => format!("{s} spans, {} resolved, {c} recorded calls", stats.resolved),
+                };
                 eprintln!(
-                    "onus: traces: {} spans, {} resolved, {} traced calls added, {} confirmed",
-                    stats.spans, stats.resolved, stats.edges_added, stats.edges_confirmed
+                    "onus: traces: {read}, {} traced calls added, {} confirmed{}",
+                    stats.edges_added,
+                    stats.edges_confirmed,
+                    if stats.edges_upgraded > 0 {
+                        format!(", {} upgraded", stats.edges_upgraded)
+                    } else {
+                        String::new()
+                    }
                 );
             }
             if json {
@@ -858,6 +885,7 @@ fn run(cli: Cli) -> Result<i32> {
         Cmd::Outcomes { cmd } => lanes::outcomes_cmd(cmd),
         Cmd::Lanes { cmd } => lanes::lanes_cmd(cmd),
         Cmd::Provenance(args) => provenance::run(args),
+        Cmd::Signals { cmd } => signals::run(cmd),
         Cmd::Escalation { cmd } => doors::escalation(cmd),
         Cmd::RunTest(args) => doors::run_test(args),
         Cmd::Env { cmd } => envs::env_cmd(cmd),

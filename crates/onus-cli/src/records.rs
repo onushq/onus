@@ -11,9 +11,9 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result, bail};
 
 /// The files kept on the branch.
-pub const FILES: &[&str] = &["outcomes.jsonl", "pulls.jsonl"];
+pub const FILES: &[&str] = &["outcomes.jsonl", "pulls.jsonl", "signals.jsonl"];
 
-const README: &str = "# Onus records\n\nOutcome records (`outcomes.jsonl`) and pull request records (`pulls.jsonl`)\nkept by the Onus GitHub Action. Each line is one record; the files only grow.\nRead them with `onus outcomes summary --file outcomes.jsonl` or in `onus ui`.\n";
+const README: &str = "# Onus records\n\nOutcome records (`outcomes.jsonl`), pull request records (`pulls.jsonl`) and\nproduction signals (`signals.jsonl`) kept by the Onus GitHub Action. Each line\nis one record; the files only grow. Read them with\n`onus outcomes summary --file outcomes.jsonl`, `onus signals areas --records .`\nor in `onus ui`.\n";
 
 fn git(repo: &Path, args: &[&str]) -> Command {
     let mut c = Command::new("git");

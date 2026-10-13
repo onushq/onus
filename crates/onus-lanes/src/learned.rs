@@ -192,9 +192,15 @@ pub struct History<'a> {
 }
 
 /// A record that makes its change a problem: an incident, a revert or
-/// rollback, an audit's miss, or a person's `/onus caught`.
+/// rollback (not a planned one), an audit's miss, or a person's `/onus
+/// caught`.
 fn problem(o: &Outcome) -> bool {
-    matches!(o.result.as_str(), "incident" | "reverted" | "rolled-back") || o.missed || o.caught
+    let bad = match o.result.as_str() {
+        "incident" | "reverted" => true,
+        "rolled-back" => !o.planned,
+        _ => false,
+    };
+    bad || o.missed || o.caught
 }
 
 /// One earlier change, from all its records.
@@ -363,7 +369,9 @@ pub fn label(o: &Outcome, had_problem: bool, through: u64, settle_secs: u64) -> 
     if had_problem || problem(o) {
         return Some(true);
     }
-    (o.result == "merged" && o.at.saturating_add(settle_secs) <= through).then_some(false)
+    // A planned rollback (a flag turned off on purpose) is no problem.
+    let merged = o.result == "merged" || (o.result == "rolled-back" && o.planned);
+    (merged && o.at.saturating_add(settle_secs) <= through).then_some(false)
 }
 
 /// One labelled change.
@@ -994,6 +1002,8 @@ mod tests {
             merged_by: None,
             features: None,
             caught: false,
+            signal: None,
+            planned: false,
         }
     }
 
@@ -1117,6 +1127,11 @@ mod tests {
         for result in ["incident", "reverted", "rolled-back"] {
             assert_eq!(label_of(&with(result, 29 * day), false), Some(true));
         }
+        let planned = Outcome {
+            planned: true,
+            ..with("rolled-back", day)
+        };
+        assert_eq!(label_of(&planned, false), Some(false));
         let missed = Outcome {
             missed: true,
             ..with("merged", 29 * day)

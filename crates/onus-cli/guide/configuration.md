@@ -171,7 +171,7 @@ Folders named .git, .onus (where Onus keeps its records), node_modules, dist, bu
 
 ## lanes
 
-What happens to a change after it is reported: the default lane, rules that set or raise it, the built-in risk inputs, a learned model that may raise it, the shares of automatic merges a person audits before and after merging, the record an agent setup needs before it may auto-merge, held-out checks and an optional taste reviewer for the judge. See `onus help lanes`.
+What happens to a change after it is reported: the default lane, rules that set or raise it, the built-in risk inputs, a learned model that may raise it, the shares of automatic merges a person audits before and after merging, the record an agent setup needs before it may auto-merge, held-out checks and an optional taste reviewer for the judge, and how each lane's changes meet production traffic. See `onus help lanes` and `onus help production`.
 
     lanes:
       default: judge          # auto-merge, judge, human or blocked
@@ -191,10 +191,20 @@ What happens to a change after it is reported: the default lane, rules that set 
         model: onus.lanes-model.json           # from onus lanes train, read at the base commit
         judge: 0.6                             # raise to the judge at or above this risk
         human: 0.85                            # raise to a person at or above this risk
+      rollout:                                 # each lane optional; built-in plans otherwise
+        judge:
+          strategy: canary                     # none, canary or flag
+          steps: [5, 25, 100]                  # % of traffic
+          bakeMinutes: 30
+          guards:
+            - { metric: error_rate, maxRatio: 1.5 }
+            - { metric: checkout_conversion, minRatio: 0.97 }
 
 Inputs only raise a lane. A threshold of N means N or more, and the highest lane whose threshold is met applies (`judge`, `human`, `blocked`). Writing a key replaces its default as a whole: `blastRadius: { human: 10 }` has no judge threshold, and `blastRadius: {}` turns the input off. A lane of `auto-merge` turns `tests` or `confidence` off. Thresholds are at least 1 and must not go down as the lane goes up; `history.days` is 1 to 3650.
 
 The learned model also only raises a lane, and never to `blocked`. Its thresholds need `0 < judge <= human <= 1`, and the model file's name must end in `lanes-model.json`, so a change to it is a rule of the game and goes to a person.
+
+`rollout` sets the plan of `auto-merge`, `judge` and `human` changes; a lane left out keeps its built-in plan (`onus help production` has the table), and `blocked` has none. Steps go up strictly from 1 to 100 and end at 100, and `none` takes no steps. A guard names a `metric` and at least one of `max`, `min` (on the value), `maxRatio` and `minRatio` (on the value over its baseline).
 
 ## environment
 

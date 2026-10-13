@@ -1,0 +1,28 @@
+# 0016. Production signals and a rollout plan per lane
+
+Status: Accepted (2026-10-13)
+
+## Context
+
+The manifesto's "Production is the final judge" asks for a safe way in (canaries, flags and percentage rollouts), a fast way out (automatic rollback when error rates, latency or business metrics move the wrong way), a record of how each change rolled out, and a learning loop: "Incidents and rollbacks become training data for the classifier", trust is "earned per agent and per area", and "production traces reveal real dependencies that static analysis missed".
+
+Outcome records already accepted `rolled-back`, but nothing wrote it. Incidents came in only by hand, against a change id. Nothing kept what monitoring or deploy tools saw, nothing tied a signal that knows only a commit to its change, lanes said nothing about how a change should meet traffic, and production traces were read per run and forgotten. ADR 0014 added per-area history, from outcomes only.
+
+## Decision
+
+1. **Signals are a third records file.** `signals.jsonl` sits beside `pulls.jsonl` and `outcomes.jsonl`, grows by whole lines, and travels on the records branch the same way. One vendor-neutral shape (`schemas/production-signal.schema.json`) is both the input and the stored line: `incident`, `error-spike`, `latency`, `metric`, `rollback`, `deploy`, `rollout` and `trace`. A signal is kept once per `id`. `onus signals ingest` reads JSON, arrays or JSON Lines and refuses the whole input on one malformed signal.
+2. **Attribution by change, then by commit.** A signal is tied to the change it names when that change is on record, else to the change whose landed commit or pull request head its commit matches (either may be a prefix), the most recent when several do. A signal tied to no change is still kept, and counts toward its components. `change` and `attributedBy` on the stored line are Onus's: a posted `attributedBy` is dropped, and so is a posted `change` that is not on record, so a signal cannot claim a tie Onus did not find.
+3. **Incidents and rollbacks become outcomes through the existing logic.** An `incident` or `rollback` tied to a change appends an `incident` or `rolled-back` outcome built from the change's latest outcome or pull record, naming the signal (`signal`). The agent setup's track record, summaries and dashboards count it without another step. Area history (ADR 0014) also reads the signals: incidents and rollbacks tied to no change, and error spikes. Deploys, rollout stages and traces are not history.
+4. **Non-planned rollbacks count like incidents.** A `rolled-back` outcome keeps an agent setup out of auto-merge (`Record.recent_rollbacks`, a `record` reason) and counts against its components. A rollback marked `planned` (a flag turned off on purpose) counts against neither: it stays a merged change in the track record and a clean one for the learned model, and a later rollback that was not planned still counts.
+5. **A rollout plan per lane, built in.** Every classification carries the plan for its lane: a strategy (`none`, `canary`, `flag`), steps in percent of traffic, a bake time, and metric guards on values or ratios to a baseline. `lanes.rollout` in onus.yaml replaces a lane's plan; a blocked change has none. A change touching a component with incidents, reverts or rollbacks in the history window gets the next stricter lane's plan; in the human lane, twice the bake time. `onus ci pr` writes it, keeps it on the pull record and shows it in the comment.
+6. **Onus decides; it never moves traffic.** `onus ci rollout` takes a stage and its samples and decides `rollback` (a guard breached; it wins), `hold` (a sample or baseline missing, or not baked), `complete` or `promote`, with exit codes a deploy tool acts on. It records the stage as a `rollout` signal and, on rollback, the `rolled-back` outcome. Only Onus writes `rollout` signals: ingest refuses them, and a posted `deploy` may not carry a decision, so a signal cannot pass for a decision Onus made. No vendor SDK, no network.
+7. **The provenance record says where the change is in production.** `rollout.status`, the share of traffic last reported, the plan, every deploy and rollout stage and the other signals tied to the change, all computed by `onus_lanes::provenance::build` from the records. Only production stages count toward the status.
+8. **Production traces upgrade only guesses.** `onus signals traces` keeps the calls an OTLP export observed as one `trace` signal. `--traces` reads `signals.jsonl` too. A call the map had at `inferred` or `low` that production observed becomes `traced`; static, compiler and declared edges stay, and traced edges are only added.
+
+## Consequences
+
+- A hosted service stores, routes and shows these facts; the binary computes every one of them: attribution, derived outcomes, area history, plans, stage decisions, rollout status and edge upgrades.
+- A signal tied to no change names no repository, so in a records folder shared by several repositories (Onus Cloud keeps one per organisation) it counts toward its components in each of them.
+- A deploy that names only a commit holding several merged changes is attributed to the change that landed as that commit. Walking a deploy range is a later improvement.
+- Records written before this keep working: every new field is optional and left out when empty. A change recorded before plans gets the plan its lane gets now from `onus ci rollout`: the repository's `lanes.rollout` and its components' history. Every binary that pushes the records branch must know `signals.jsonl`, or its push drops the file.
+- The data a learned model needs (ADR 0015) now includes production's verdict; rules still come first.

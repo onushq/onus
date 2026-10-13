@@ -19,6 +19,7 @@ pub mod provider;
 pub mod rank;
 pub mod schema;
 pub mod secrets;
+pub mod signal;
 
 pub use change::*;
 pub use config::*;

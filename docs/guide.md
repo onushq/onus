@@ -14,6 +14,7 @@ The guide ships inside the `onus` binary: `onus help <topic>` prints any of thes
 | [agents](../crates/onus-cli/guide/agents.md) | The map for coding agents: `onus mcp`, its tools, many agents and worktrees |
 | [scopes](../crates/onus-cli/guide/scopes.md) | Task tokens, the git gateway, escalation with evidence and the audit log |
 | [lanes](../crates/onus-cli/guide/lanes.md) | Risk lanes, change submissions, the learned model, the verifying judge, outcome records and provenance |
+| [production](../crates/onus-cli/guide/production.md) | Production signals, rollout plans per lane and automatic rollback |
 | [web-interface](../crates/onus-cli/guide/web-interface.md) | The web interface: onus ui opens all of it in your browser |
 | [environments](../crates/onus-cli/guide/environments.md) | Environments built from a commit, the evidence store, and traces into the map |
 | [cloud](../crates/onus-cli/guide/cloud.md) | Onus Cloud from the CLI: `onus login`, scoped tokens, hosted environments, evidence, escalations, the maps it keeps and agents |

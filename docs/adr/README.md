@@ -19,3 +19,4 @@ Short records of decisions that are significant or hard to reverse. Propose a ne
 | [0013](0013-outcome-records-from-ci.md) | Outcome records kept by CI on a branch of the repository | Accepted |
 | [0014](0014-built-in-risk-inputs.md) | Built-in risk inputs that only raise a lane | Accepted |
 | [0015](0015-learned-lanes-only-raise.md) | A learned model that only raises a lane, read from the base commit | Accepted |
+| [0016](0016-production-signals-and-rollout.md) | Production signals in the records, a rollout plan per lane, and decisions Onus makes but never executes | Accepted |

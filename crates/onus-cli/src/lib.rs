@@ -57,8 +57,9 @@ pub struct DiffOptions {
     /// Called before the base map is built, for a base tree written only
     /// partly (see [`materialize_pair`]).
     pub complete_base: Option<BaseCompleter>,
-    /// OpenTelemetry traces (OTLP JSON) whose calls are added to both maps
-    /// (ADR 0010), so a traced call is a fact of both trees, not a change.
+    /// OpenTelemetry traces (OTLP JSON, or the records' `signals.jsonl`) whose
+    /// calls are added to both maps (ADR 0010), so a traced call is a fact of
+    /// both trees, not a change.
     pub traces: Vec<PathBuf>,
 }
 
@@ -509,8 +510,22 @@ pub fn diff_dirs(base: &Path, head: &Path, opts: &DiffOptions) -> Result<Outcome
         let b = add_traces(&mut base_map, &opts.traces)?;
         let h = add_traces(&mut head_map, &opts.traces)?;
         notes.push(format!(
-            "traces: {} spans; {} traced calls added to the base map, {} to the head map",
-            h.spans, b.edges_added, h.edges_added
+            "traces: {}; {} traced calls added to the base map, {} to the head map{}",
+            match (h.spans, h.calls) {
+                (0, c) if c > 0 => format!("{c} recorded calls"),
+                (s, 0) => format!("{s} spans"),
+                (s, c) => format!("{s} spans, {c} recorded calls"),
+            },
+            b.edges_added,
+            h.edges_added,
+            if h.edges_upgraded > 0 {
+                format!(
+                    "; {} guessed calls confirmed in the head map",
+                    h.edges_upgraded
+                )
+            } else {
+                String::new()
+            }
         ));
     }
     let report = onus_diff::diff(&DiffInput {

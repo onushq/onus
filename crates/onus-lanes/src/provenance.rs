@@ -8,7 +8,8 @@
 //! escalations, lane reasons, judge, doors) come from the fresh inputs when
 //! they are given, and otherwise from an earlier record (`from`). Facts from
 //! after it closed (stage, merge commit, approval, rollout) are recomputed on
-//! every build from the records.
+//! every build from the records, production signals included: the rollout
+//! status, its stages and the signals tied to the change.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -17,9 +18,11 @@ use anyhow::{Context, Result};
 use onus_core::Lane;
 use onus_core::provenance::{
     Agent, Approval, ApprovedBy, Commits, DoorEntry, Doors, Escalation, Evidence, Gap, Intent,
-    IntentSource, Judge, JudgeStep, LaneFacts, LaneReason, ProvenanceRecord, ReportFacts, Rollout,
-    RolloutEvent, RowApproval, SCHEMA, Stage, Token, TokenSource, TrackRecord,
+    IntentSource, Judge, JudgeStep, LaneFacts, LaneReason, PlanFacts, ProvenanceRecord,
+    ReportFacts, Rollout, RolloutEvent, RolloutStatus, RowApproval, SCHEMA, SignalRef, Stage,
+    StageEvent, Token, TokenSource, TrackRecord,
 };
+use onus_core::signal::{ProductionSignal, SignalKind};
 use onus_doors::audit::{AuditLog, Entry};
 use onus_doors::escalation::Request;
 use sha2::{Digest, Sha256};
@@ -28,6 +31,7 @@ use crate::classify::Classification;
 use crate::judge::{Judgment, StepStatus, Verdict};
 use crate::outcomes::{self, Outcome};
 use crate::pulls::{self, PullRecord};
+use crate::rollout::RolloutPlan;
 use crate::submission::{AgentSetup, Submission};
 
 /// What a record is built from. Everything but the change is optional.
@@ -49,6 +53,8 @@ pub struct Inputs<'a> {
     pub policy: Option<String>,
     pub pulls: &'a [PullRecord],
     pub outcomes: &'a [Outcome],
+    /// Production signals (`signals.jsonl`); those of this change are used.
+    pub signals: &'a [ProductionSignal],
     /// A token the caller verified ([`TokenSource::Token`]).
     pub token: Option<Token>,
     /// The door log's entries, and whether its hash chain verified.
@@ -73,6 +79,7 @@ impl<'a> Inputs<'a> {
             policy: None,
             pulls: &[],
             outcomes: &[],
+            signals: &[],
             token: None,
             audit: None,
             requests: &[],
@@ -217,7 +224,59 @@ fn agent_of(setup: &AgentSetup, detected_from: &str, outcomes: &[Outcome]) -> Ag
         record: Some(TrackRecord {
             merged: r.changes,
             recent_incidents: r.recent_incidents,
+            recent_rollbacks: r.recent_rollbacks,
         }),
+    }
+}
+
+fn plan_facts(p: &RolloutPlan) -> PlanFacts {
+    PlanFacts {
+        strategy: p.strategy.as_str().into(),
+        steps: p.steps.clone(),
+        bake_minutes: p.bake_minutes,
+        guards: p.guards.clone(),
+        automatic_rollback: p.automatic_rollback,
+        flag: p.flag.clone(),
+        reasons: p.reasons.clone(),
+    }
+}
+
+/// Whether a stage counts toward the rollout status: production only.
+fn in_production(e: &StageEvent) -> bool {
+    e.environment
+        .as_deref()
+        .is_none_or(|env| env == "production")
+}
+
+/// Where the change is in production, and the share of traffic, from its
+/// stage, its latest outcome and its production stages (first rule that
+/// applies).
+fn status_of(
+    stage: Stage,
+    last: Option<&Outcome>,
+    stages: &[StageEvent],
+) -> (RolloutStatus, Option<u8>) {
+    let counted: Vec<&StageEvent> = stages.iter().filter(|e| in_production(e)).collect();
+    let last_stage = counted.last();
+    let percent = last_stage.map(|e| e.percent);
+    match stage {
+        Stage::Open => return (RolloutStatus::Pending, None),
+        Stage::Closed => return (RolloutStatus::NotShipped, None),
+        Stage::Merged => {}
+    }
+    match last.map(|o| o.result.as_str()) {
+        Some("rolled-back") => return (RolloutStatus::RolledBack, percent),
+        Some("reverted") => return (RolloutStatus::Reverted, percent),
+        _ => {}
+    }
+    let Some(e) = last_stage else {
+        return (RolloutStatus::AwaitingDeploy, None);
+    };
+    match e.decision.as_deref() {
+        Some("rollback") => (RolloutStatus::RolledBack, percent),
+        Some("hold") => (RolloutStatus::Holding, percent),
+        Some("complete") | None if e.percent >= 100 => (RolloutStatus::Complete, Some(100)),
+        _ => (RolloutStatus::InProgress, percent),
     }
 }
 
@@ -469,6 +528,51 @@ pub fn build(i: Inputs) -> ProvenanceRecord {
         (None, None) => (Stage::Open, None),
     };
     let last = lines.last();
+    // Production: the change's deploy and rollout stages, and its other
+    // signals, in time order.
+    let mut mine: Vec<&ProductionSignal> = i
+        .signals
+        .iter()
+        .filter(|s| s.change.as_deref() == Some(i.change))
+        .collect();
+    mine.sort_by_key(|s| s.at.unwrap_or(0));
+    let stages: Vec<StageEvent> = mine
+        .iter()
+        .filter(|s| matches!(s.kind, SignalKind::Deploy | SignalKind::Rollout))
+        .map(|s| StageEvent {
+            at: s.at.unwrap_or(0),
+            kind: s.kind.as_str().into(),
+            // A deploy that names no share reached all of the environment.
+            percent: s.rollout.as_ref().map_or(100, |r| r.percent),
+            decision: s.rollout.as_ref().and_then(|r| r.decision.clone()),
+            environment: s.environment.clone(),
+            deploy: s.deploy.clone(),
+            source: s.source.clone(),
+            note: s.note.clone(),
+        })
+        .collect();
+    let signals: Vec<SignalRef> = mine
+        .iter()
+        .filter(|s| {
+            !matches!(
+                s.kind,
+                SignalKind::Deploy | SignalKind::Rollout | SignalKind::Trace
+            )
+        })
+        .map(|s| SignalRef {
+            id: s.id.clone(),
+            kind: s.kind.as_str().into(),
+            at: s.at.unwrap_or(0),
+            source: s.source.clone(),
+            severity: s.severity.map(|v| v.as_str().to_string()),
+            note: s.note.clone(),
+        })
+        .collect();
+    let (status, percent) = status_of(stage, last.copied(), &stages);
+    let plan = pull
+        .and_then(|p| p.rollout.as_ref())
+        .map(plan_facts)
+        .or_else(|| from.and_then(|f| f.rollout.plan.clone()));
     let rollout = Rollout {
         result: last.map_or_else(|| "open".to_string(), |o| o.result.clone()),
         commit: first.and_then(|o| o.commit.clone()),
@@ -484,6 +588,11 @@ pub fn build(i: Inputs) -> ProvenanceRecord {
                 involved: o.involved.clone(),
             })
             .collect(),
+        status: Some(status),
+        percent,
+        plan,
+        stages,
+        signals,
     };
     let commits = Commits {
         merge: (stage == Stage::Merged)
@@ -727,6 +836,7 @@ mod tests {
             }],
             learned: None,
             features: None,
+            rollout: None,
         }
     }
 
@@ -764,6 +874,7 @@ mod tests {
             audit_after_merge: None,
             features: None,
             caught: false,
+            rollout: None,
         }
     }
 
@@ -788,6 +899,8 @@ mod tests {
             merged_by: None,
             features: None,
             caught: false,
+            signal: None,
+            planned: false,
         }
     }
 
@@ -1178,5 +1291,175 @@ mod tests {
         let mut resealed = changed;
         seal(&mut resealed);
         assert!(digest_ok(&resealed));
+    }
+
+    fn stage(
+        id: &str,
+        kind: SignalKind,
+        at: u64,
+        percent: Option<u8>,
+        decision: Option<&str>,
+    ) -> ProductionSignal {
+        let mut s: ProductionSignal =
+            serde_json::from_value(serde_json::json!({ "id": id, "kind": kind })).unwrap();
+        s.at = Some(at);
+        s.change = Some(CHANGE.into());
+        s.source = "argo".into();
+        s.rollout = percent.map(|percent| onus_core::signal::RolloutStage {
+            percent,
+            decision: decision.map(str::to_string),
+            flag: None,
+        });
+        s
+    }
+
+    fn status(results: &[&str], signals: &[ProductionSignal]) -> (RolloutStatus, Option<u8>) {
+        let p = pull(Lane::Judge, Some("approve"));
+        let lines: Vec<Outcome> = results
+            .iter()
+            .enumerate()
+            .map(|(n, r)| outcome(&p, r, 10 + n as u64))
+            .collect();
+        let r = build(Inputs {
+            pulls: std::slice::from_ref(&p),
+            outcomes: &lines,
+            signals,
+            ..Inputs::new(CHANGE, 100)
+        });
+        (r.rollout.status.unwrap(), r.rollout.percent)
+    }
+
+    #[test]
+    fn rollout_status_follows_stages_and_outcomes() {
+        use RolloutStatus::*;
+        let deploy = |id: &str, at: u64, percent: Option<u8>| {
+            stage(id, SignalKind::Deploy, at, percent, None)
+        };
+        let decided = |id: &str, at: u64, percent: u8, decision: &str| {
+            stage(id, SignalKind::Rollout, at, Some(percent), Some(decision))
+        };
+        let mut staging = deploy("d:staging", 30, None);
+        staging.environment = Some("staging".into());
+        let at25 = deploy("d:25", 20, Some(25));
+        let one = std::slice::from_ref(&at25);
+        assert_eq!(status(&[], one), (Pending, None));
+        assert_eq!(status(&["closed"], one), (NotShipped, None));
+        assert_eq!(
+            status(&["merged", "rolled-back"], one),
+            (RolledBack, Some(25))
+        );
+        assert_eq!(status(&["merged", "reverted"], &[]), (Reverted, None));
+        // A staging deploy is listed and does not count.
+        assert_eq!(status(&["merged"], &[]), (AwaitingDeploy, None));
+        assert_eq!(
+            status(&["merged"], &[staging.clone()]),
+            (AwaitingDeploy, None)
+        );
+        assert_eq!(
+            status(
+                &["merged"],
+                &[at25.clone(), decided("r:1", 25, 25, "rollback")]
+            ),
+            (RolledBack, Some(25))
+        );
+        assert_eq!(
+            status(&["merged"], &[decided("r:1", 25, 5, "hold")]),
+            (Holding, Some(5))
+        );
+        assert_eq!(
+            status(&["merged"], &[decided("r:1", 25, 100, "complete")]),
+            (Complete, Some(100))
+        );
+        // A deploy that names no share reached all of production.
+        assert_eq!(
+            status(&["merged"], &[deploy("d:all", 20, None)]),
+            (Complete, Some(100))
+        );
+        assert_eq!(
+            status(&["merged", "incident"], &[at25.clone(), staging.clone()]),
+            (InProgress, Some(25))
+        );
+        assert_eq!(
+            status(&["merged"], &[decided("r:1", 25, 5, "promote")]),
+            (InProgress, Some(5))
+        );
+        // In time order, whatever the file order.
+        assert_eq!(
+            status(&["merged"], &[deploy("d:100", 40, Some(100)), at25.clone()]),
+            (Complete, Some(100))
+        );
+        let p = pull(Lane::Judge, Some("approve"));
+        let lines = [outcome(&p, "merged", 10)];
+        let r = build(Inputs {
+            pulls: std::slice::from_ref(&p),
+            outcomes: &lines,
+            signals: &[at25, staging],
+            ..Inputs::new(CHANGE, 100)
+        });
+        let kinds: Vec<(&str, Option<&str>)> = r
+            .rollout
+            .stages
+            .iter()
+            .map(|e| (e.kind.as_str(), e.environment.as_deref()))
+            .collect();
+        assert_eq!(kinds, [("deploy", None), ("deploy", Some("staging"))]);
+        assert!(digest_ok(&r));
+    }
+
+    #[test]
+    fn signals_are_listed_on_their_change_only() {
+        let mut incident = stage("pd:1", SignalKind::Incident, 50, None, None);
+        incident.severity = Some(onus_core::signal::Severity::High);
+        incident.note = Some("checkout 500s".into());
+        let mut other = incident.clone();
+        other.id = "pd:2".into();
+        other.change = Some("acme/shop#8".into());
+        let mut loose = incident.clone();
+        loose.id = "pd:3".into();
+        loose.change = None;
+        let deploy = stage("d:1", SignalKind::Deploy, 40, Some(10), None);
+        let mut p = pull(Lane::Judge, Some("approve"));
+        p.rollout = Some(crate::rollout::plan(
+            Lane::Judge,
+            &submission().report,
+            Some(CHANGE),
+            None,
+            &Default::default(),
+            90,
+        ));
+        let lines = [outcome(&p, "merged", 10)];
+        let r = build(Inputs {
+            pulls: std::slice::from_ref(&p),
+            outcomes: &lines,
+            signals: &[incident, other, loose, deploy],
+            ..Inputs::new(CHANGE, 100)
+        });
+        let ids: Vec<&str> = r.rollout.signals.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, ["pd:1"]);
+        assert_eq!(r.rollout.signals[0].severity.as_deref(), Some("high"));
+        assert_eq!(r.rollout.stages.len(), 1);
+        assert_eq!(
+            (r.rollout.status, r.rollout.percent),
+            (Some(RolloutStatus::InProgress), Some(10))
+        );
+        let plan = r.rollout.plan.as_ref().unwrap();
+        assert_eq!(
+            (plan.strategy.as_str(), plan.steps.as_slice()),
+            ("canary", &[5, 25, 100][..])
+        );
+        // Kept from an earlier record when the pull record has none.
+        let rebuilt = build(Inputs {
+            from: Some(r.clone()),
+            outcomes: &lines,
+            ..Inputs::new(CHANGE, 200)
+        });
+        assert_eq!(rebuilt.rollout.plan, r.rollout.plan);
+        // A record from before these fields still reads.
+        let mut json = serde_json::to_value(&r).unwrap();
+        for k in ["status", "percent", "plan", "stages", "signals"] {
+            json["rollout"].as_object_mut().unwrap().remove(k);
+        }
+        let old: ProvenanceRecord = serde_json::from_value(json).unwrap();
+        assert!(old.rollout.status.is_none() && old.rollout.stages.is_empty());
     }
 }

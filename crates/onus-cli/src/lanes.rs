@@ -6,11 +6,14 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
 use onus_core::{Lane, LanesConfig, LearnedConfig, SemanticReport};
-use onus_lanes::classify::{Classification, ClassifyContext, Learned, LearnedRisk, area, classify};
+use onus_lanes::classify::{
+    AreaHistories, Classification, ClassifyContext, Learned, LearnedRisk, area, classify,
+};
 use onus_lanes::judge::{Verdict, judge_with};
 use onus_lanes::learned::{self, Model};
-use onus_lanes::outcomes::{self, Outcome};
+use onus_lanes::outcomes::{self, HistoryScope, Outcome};
 use onus_lanes::submission::{AgentSetup, Approval, ScopeUsed, Submission};
+use onus_lanes::{rollout, signals};
 
 #[derive(Debug, Args)]
 pub struct AgentArgs {
@@ -171,6 +174,10 @@ pub enum OutcomesCmd {
         /// lane model trains on.
         #[arg(long, value_name = "FILE")]
         classification: Option<PathBuf>,
+        /// With --result rolled-back: rolled back on purpose (a flag turned off as
+        /// planned). It counts against neither the agent setup nor the components.
+        #[arg(long)]
+        planned: bool,
     },
     /// Find reverts in git history and record them against the changes they revert.
     IngestReverts {
@@ -598,9 +605,121 @@ pub fn load_model(
     ModelLoad::Loaded(Box::new(model), learned::model_id(&bytes))
 }
 
+/// The history of `areas` in the window ending at `now`: reverts, rollbacks
+/// and incidents from the outcome records, and the production signals kept
+/// beside them (`signals.jsonl` in the same folder).
+pub fn area_histories(
+    all: &[Outcome],
+    signals_file: Option<&Path>,
+    areas: &std::collections::BTreeSet<String>,
+    scope: &HistoryScope,
+) -> Result<AreaHistories> {
+    let mut history = outcomes::area_history(all, areas, scope);
+    if let Some(f) = signals_file {
+        signals::extend_history(&mut history, &signals::load(f)?, areas, scope);
+    }
+    Ok(history)
+}
+
+/// The signals file beside an outcomes file.
+fn signals_beside(outcomes_file: &Path) -> PathBuf {
+    outcomes_file
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join(signals::FILE)
+}
+
+/// Every component on record in a records folder (outcomes and signals)
+/// with its history in the window: what `onus signals areas` and `onus ui`
+/// show.
+pub fn areas_for(records: &Path, scope: &HistoryScope) -> Result<AreaHistories> {
+    let all = outcomes::load(&records.join("outcomes.jsonl"))?;
+    let sigs = signals::load(&records.join(signals::FILE))?;
+    Ok(areas_from(&all, &sigs, scope))
+}
+
+/// [`areas_for`], from records already read.
+pub fn areas_from(
+    all: &[Outcome],
+    sigs: &[onus_core::signal::ProductionSignal],
+    scope: &HistoryScope,
+) -> AreaHistories {
+    let component = |i: &String| onus_core::ids::component_of(i).unwrap_or(i).to_string();
+    let wanted: std::collections::BTreeSet<String> = all
+        .iter()
+        .flat_map(|o| {
+            o.components
+                .iter()
+                .cloned()
+                .chain(o.involved.iter().map(component))
+        })
+        .chain(sigs.iter().flat_map(|s| {
+            s.components
+                .iter()
+                .cloned()
+                .chain(s.symbols.iter().map(component))
+        }))
+        .collect();
+    let mut history = outcomes::area_history(all, &wanted, scope);
+    signals::extend_history(&mut history, sigs, &wanted, scope);
+    history
+}
+
+/// The window and repository the history input reads for a change
+/// classified at `now`.
+pub fn history_scope<'a>(
+    config: &LanesConfig,
+    opts: &ClassifyOpts<'a>,
+    now: u64,
+) -> HistoryScope<'a> {
+    HistoryScope {
+        since: now.saturating_sub(u64::from(config.inputs.history.days) * 86_400),
+        until: Some(now),
+        repo: opts.change.and_then(outcomes::repo_of),
+        exclude: opts.change,
+    }
+}
+
+/// The rollout plan of a change in `lane`: the history of the components it
+/// touches, as [`classify_with`] reads it, tightens it. For a lane the judge
+/// changed after classifying.
+pub fn rollout_plan(
+    lane: Lane,
+    report: &SemanticReport,
+    config: &LanesConfig,
+    opts: &ClassifyOpts,
+) -> Result<rollout::RolloutPlan> {
+    let all = match opts.outcomes {
+        Some(f) if f.exists() => outcomes::load(f)?,
+        _ => Vec::new(),
+    };
+    let areas: std::collections::BTreeSet<String> = report
+        .changes
+        .iter()
+        .filter_map(area)
+        .map(str::to_string)
+        .collect();
+    let now = opts.now.unwrap_or_else(onus_doors::gateway::now);
+    let history = area_histories(
+        &all,
+        opts.outcomes.map(signals_beside).as_deref(),
+        &areas,
+        &history_scope(config, opts, now),
+    )?;
+    Ok(rollout::plan(
+        lane,
+        report,
+        opts.change,
+        config.rollout.as_ref(),
+        &history,
+        config.inputs.history.days,
+    ))
+}
+
 /// The lane of a change: its report, its submission if any, the policy,
 /// the agent setup's record, the history of the components it touches and
-/// the learned model. `repo` is the worktree the policy came from.
+/// the learned model, with the rollout plan for that lane. `repo` is the
+/// worktree the policy came from.
 pub fn classify_with(
     repo: &Path,
     report: &SemanticReport,
@@ -626,16 +745,13 @@ pub fn classify_with(
         .collect();
     let now = opts.now.unwrap_or_else(onus_doors::gateway::now);
     let repo_name = opts.change.and_then(outcomes::repo_of);
-    let history = outcomes::area_history(
+    // Production signals kept beside the outcomes count too.
+    let history = area_histories(
         &all,
+        opts.outcomes.map(signals_beside).as_deref(),
         &areas,
-        &outcomes::HistoryScope {
-            since: now.saturating_sub(u64::from(config.inputs.history.days) * 86_400),
-            until: Some(now),
-            repo: repo_name,
-            exclude: opts.change,
-        },
-    );
+        &history_scope(config, opts, now),
+    )?;
     // What the change looks like now, for the model and for training later.
     let features = learned::features(
         report,
@@ -690,6 +806,14 @@ pub fn classify_with(
         }
     }
     c.features = Some(features);
+    c.rollout = Some(rollout::plan(
+        c.lane,
+        report,
+        opts.change,
+        config.rollout.as_ref(),
+        &history,
+        config.inputs.history.days,
+    ));
     Ok(c)
 }
 
@@ -720,7 +844,22 @@ pub fn judge_cmd(args: LaneArgs) -> Result<i32> {
         bail!("the judge needs a submission (onus submit)");
     };
     let j = judge_submission(&args.repo, &sub, &c, &config);
-    let out = serde_json::json!({ "classification": c, "judgment": j });
+    // The plan for the final lane: the judge may have moved it.
+    let rollout = if j.lane == c.lane {
+        c.rollout.clone()
+    } else {
+        Some(rollout_plan(
+            j.lane,
+            &sub.report,
+            &config,
+            &ClassifyOpts {
+                outcomes: args.outcomes.as_deref(),
+                change: args.change.as_deref(),
+                ..Default::default()
+            },
+        )?)
+    };
+    let out = serde_json::json!({ "classification": c, "judgment": j, "rollout": rollout });
     println!("{}", serde_json::to_string_pretty(&out)?);
     Ok(match j.verdict {
         Verdict::Approve => 0,
@@ -789,6 +928,8 @@ pub fn record_incident(
             result: "incident".into(),
             involved,
             note: Some(note),
+            signal: None,
+            planned: false,
             ..last
         },
     )
@@ -809,7 +950,11 @@ pub fn outcomes_cmd(cmd: OutcomesCmd) -> Result<i32> {
             commit,
             components,
             classification,
+            planned,
         } => {
+            if planned && result != "rolled-back" {
+                bail!("--planned is for --result rolled-back");
+            }
             let features = match &classification {
                 Some(p) => {
                     let c: Classification = serde_json::from_str(&std::fs::read_to_string(p)?)
@@ -846,6 +991,8 @@ pub fn outcomes_cmd(cmd: OutcomesCmd) -> Result<i32> {
                     merged_by: None,
                     features,
                     caught: false,
+                    signal: None,
+                    planned,
                 },
             )?;
             Ok(0)

@@ -10,7 +10,7 @@ use onus_lanes::classify::Classification;
 use onus_lanes::judge::Judgment;
 use onus_lanes::provenance::{self, Inputs};
 use onus_lanes::submission::Submission;
-use onus_lanes::{outcomes, pulls};
+use onus_lanes::{outcomes, pulls, signals};
 
 use crate::{doors, lanes, ui};
 
@@ -19,12 +19,16 @@ pub struct ProvenanceArgs {
     /// The change: owner/repo#123 (as onus ci records it), or any id the outcome records use.
     #[arg(long)]
     change: Option<String>,
-    /// A records folder (pulls.jsonl, outcomes.jsonl), as `onus ci` keeps it.
+    /// A records folder (pulls.jsonl, outcomes.jsonl, signals.jsonl), as `onus ci` keeps it.
     #[arg(long, value_name = "DIR")]
     records: Option<PathBuf>,
     /// Outcome records, instead of <records>/outcomes.jsonl.
     #[arg(long, value_name = "FILE")]
     outcomes: Option<PathBuf>,
+    /// Production signals, instead of <records>/signals.jsonl: the rollout's status,
+    /// stages and the signals tied to the change.
+    #[arg(long, value_name = "FILE")]
+    signals: Option<PathBuf>,
     /// An earlier provenance.json of this change (from onus ci pr): its facts from while
     /// the change was open are kept.
     #[arg(long, value_name = "FILE")]
@@ -203,6 +207,14 @@ pub fn run(args: ProvenanceArgs) -> Result<i32> {
         Some(f) => outcomes::load(f)?,
         None => Vec::new(),
     };
+    let signals_file = args
+        .signals
+        .clone()
+        .or_else(|| args.records.as_ref().map(|d| d.join(signals::FILE)));
+    let signals = match &signals_file {
+        Some(f) => signals::load(f)?,
+        None => Vec::new(),
+    };
     // A token that does not verify is an error, never a gap.
     let token = match (&args.token, &args.key_public) {
         (Some(t), Some(key)) => {
@@ -248,6 +260,7 @@ pub fn run(args: ProvenanceArgs) -> Result<i32> {
         policy: judgment.as_ref().map(|j| j.judge.clone()),
         pulls: &pulls,
         outcomes: &outcomes,
+        signals: &signals,
         token,
         audit,
         requests: &requests,

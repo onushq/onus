@@ -61,6 +61,11 @@ pub const TOPICS: &[Topic] = &[
         text: include_str!("../guide/lanes.md"),
     },
     Topic {
+        name: "production",
+        summary: "Production signals, rollout plans per lane and automatic rollback",
+        text: include_str!("../guide/production.md"),
+    },
+    Topic {
         name: "web-interface",
         summary: "The web interface: onus ui opens all of it in your browser",
         text: include_str!("../guide/web-interface.md"),
@@ -105,6 +110,8 @@ const ALIASES: &[(&str, &str)] = &[
     ("scip", "plugins"),
     ("lsp", "plugins"),
     ("provenance", "lanes"),
+    ("signals", "production"),
+    ("rollout", "production"),
 ];
 
 pub fn find(name: &str) -> Option<&'static Topic> {

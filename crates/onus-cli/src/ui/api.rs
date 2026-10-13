@@ -905,6 +905,9 @@ fn outcomes(state: &State) -> Answer {
         if matches!(o.result.as_str(), "reverted" | "rolled-back") {
             *w.entry("reverted").or_default() += 1;
         }
+        if o.result == "rolled-back" {
+            *w.entry("rolledBack").or_default() += 1;
+        }
         if incidents.contains(o.change.as_str()) {
             *w.entry("incidents").or_default() += 1;
         }
@@ -932,11 +935,14 @@ fn outcomes(state: &State) -> Answer {
         .into_iter()
         .map(|k| {
             let r = outcomes::record_for(&all, k);
-            let eligible = r.changes >= config.min_record && r.recent_incidents == 0;
+            let eligible = r.changes >= config.min_record
+                && r.recent_incidents == 0
+                && r.recent_rollbacks == 0;
             json!({
                 "agent": k,
                 "merged": r.changes,
                 "recentIncidents": r.recent_incidents,
+                "recentRollbacks": r.recent_rollbacks,
                 "eligible": eligible,
                 "needs": config.min_record.saturating_sub(r.changes),
             })
@@ -954,6 +960,33 @@ fn outcomes(state: &State) -> Answer {
     let mut in_flight: Vec<&onus_lanes::pulls::PullRecord> = open.into_values().collect();
     in_flight.sort_by_key(|p| std::cmp::Reverse(p.at));
 
+    // Each component's history in the history input's window, production
+    // signals included: beside the outcomes file, else on the records branch.
+    let signals_file = state
+        .outcomes
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join(onus_lanes::signals::FILE);
+    let signals: Vec<onus_core::signal::ProductionSignal> = if signals_file.exists() {
+        onus_lanes::signals::load(&signals_file)?
+    } else {
+        let text = branch_file(state, onus_lanes::signals::FILE)
+            .map(|(_, t)| t)
+            .unwrap_or_default();
+        onus_lanes::signals::first_of_each(parse_lines(&text))
+    };
+    let now = onus_doors::gateway::now();
+    let areas = lanes::areas_from(
+        &all,
+        &signals,
+        &outcomes::HistoryScope {
+            since: now.saturating_sub(u64::from(config.inputs.history.days) * 86_400),
+            until: Some(now),
+            repo: None,
+            exclude: None,
+        },
+    );
+
     Ok(json!({
         "file": state.outcomes,
         "source": source,
@@ -965,6 +998,8 @@ fn outcomes(state: &State) -> Answer {
         "agents": agents,
         "minRecord": config.min_record,
         "inFlight": in_flight,
+        "areas": areas,
+        "historyDays": config.inputs.history.days,
     }))
 }
 
@@ -1027,6 +1062,8 @@ fn outcomes_record(state: &State, body: Value) -> Answer {
             merged_by: None,
             features: None,
             caught: false,
+            signal: None,
+            planned: false,
         },
     )?;
     outcomes(state)

@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use onus_core::hash::sha256_hex;
-use onus_core::{Lane, OnusConfig, Thresholds};
+use onus_core::{Lane, OnusConfig, RolloutConfig, RolloutStrategy, Thresholds};
 
 use crate::MapError;
 
@@ -150,6 +150,17 @@ pub fn validate(config: &OnusConfig) -> Result<(), MapError> {
                 );
             }
         }
+        if let Some(policy) = &lanes.rollout {
+            for lane in [Lane::AutoMerge, Lane::Judge, Lane::Human] {
+                if let Some(r) = policy.get(lane) {
+                    rollout(
+                        &format!("lanes.rollout.{}", lane.as_str()),
+                        r,
+                        &mut problems,
+                    );
+                }
+            }
+        }
     }
     if let Some(events) = &config.extractors.events {
         for p in events.publish.iter().chain(&events.subscribe) {
@@ -162,6 +173,37 @@ pub fn validate(config: &OnusConfig) -> Result<(), MapError> {
         Ok(())
     } else {
         Err(MapError::Config(problems.join("; ")))
+    }
+}
+
+/// Steps ascend strictly from 1 to 100 and end at 100; `none` has none;
+/// every guard sets a limit.
+fn rollout(key: &str, r: &RolloutConfig, problems: &mut Vec<String>) {
+    let steps = &r.steps;
+    if r.strategy == RolloutStrategy::None {
+        if !steps.is_empty() {
+            problems.push(format!("{key}: strategy none takes no steps"));
+        }
+    } else {
+        if steps.last() != Some(&100) {
+            problems.push(format!("{key}: the steps must end at 100, found {steps:?}"));
+        }
+        if steps.iter().any(|s| !(1..=100).contains(s)) {
+            problems.push(format!(
+                "{key}: each step is a share of traffic from 1 to 100, found {steps:?}"
+            ));
+        }
+        if steps.windows(2).any(|w| w[1] <= w[0]) {
+            problems.push(format!("{key}: the steps must go up, found {steps:?}"));
+        }
+    }
+    for g in &r.guards {
+        if g.max.is_none() && g.min.is_none() && g.max_ratio.is_none() && g.min_ratio.is_none() {
+            problems.push(format!(
+                "{key}: the guard on {} sets no limit (max, min, maxRatio or minRatio)",
+                g.metric
+            ));
+        }
     }
 }
 
@@ -269,5 +311,44 @@ extractors:
             ("onus.lanes-model.json", 0.6, 0.85)
         );
         assert!(parse("version: 1\nlanes:\n  learned: { model: ops/lanes-model.json }\n").is_ok());
+    }
+
+    #[test]
+    fn rollout_plans_have_ascending_steps_that_end_at_100() {
+        let rollout = |lane: &str, plan: &str| {
+            parse(&format!(
+                "version: 1\nlanes:\n  rollout:\n    {lane}: {plan}\n"
+            ))
+        };
+        let ok = rollout(
+            "judge",
+            "{ strategy: canary, steps: [5, 25, 100], bakeMinutes: 30, guards: [{ metric: error_rate, maxRatio: 1.5 }, { metric: checkout_conversion, minRatio: 0.97 }] }",
+        )
+        .unwrap();
+        let policy = ok.config.lanes.unwrap().rollout.unwrap();
+        assert_eq!(policy.judge.unwrap().steps, [5, 25, 100]);
+        assert!(rollout("auto-merge", "{ strategy: none }").is_ok());
+        let err = |lane: &str, plan: &str| rollout(lane, plan).unwrap_err().to_string();
+        assert!(
+            err("judge", "{ strategy: canary, steps: [25, 5, 100] }")
+                .contains("lanes.rollout.judge: the steps must go up, found [25, 5, 100]")
+        );
+        assert!(
+            err("human", "{ strategy: flag, steps: [1, 5, 25] }")
+                .contains("lanes.rollout.human: the steps must end at 100, found [1, 5, 25]")
+        );
+        assert!(
+            err("auto-merge", "{ strategy: none, steps: [100] }")
+                .contains("lanes.rollout.auto-merge: strategy none takes no steps")
+        );
+        assert!(err("judge", "{ strategy: canary, steps: [0, 100] }").contains("from 1 to 100"));
+        assert!(
+            err(
+                "judge",
+                "{ strategy: canary, steps: [100], guards: [{ metric: error_rate }] }"
+            )
+            .contains("the guard on error_rate sets no limit")
+        );
+        assert!(rollout("blocked", "{ strategy: none }").is_err());
     }
 }

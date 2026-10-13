@@ -8,6 +8,7 @@ use crate::map::CodebaseMap;
 use crate::plugins::PluginsFile;
 use crate::protocol::PluginProtocol;
 use crate::provenance::ProvenanceRecord;
+use crate::signal::{ProductionSignal, RolloutMetrics};
 
 /// `(file name, pretty JSON)` for every published schema, in a fixed order.
 pub fn all_schemas() -> Vec<(&'static str, String)> {
@@ -35,6 +36,14 @@ pub fn all_schemas() -> Vec<(&'static str, String)> {
         (
             "provenance.schema.json",
             serde_json::to_string_pretty(&schema_for!(ProvenanceRecord)),
+        ),
+        (
+            "production-signal.schema.json",
+            serde_json::to_string_pretty(&schema_for!(ProductionSignal)),
+        ),
+        (
+            "rollout-metrics.schema.json",
+            serde_json::to_string_pretty(&schema_for!(RolloutMetrics)),
         ),
     ]
     .into_iter()

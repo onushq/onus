@@ -512,6 +512,17 @@
           "default": 10,
           "minimum": 0
         },
+        "rollout": {
+          "description": "How each lane's changes meet production traffic: built-in plans\nunless written, one lane at a time (`onus help production`).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RolloutPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "rules": {
           "description": "Rules, in any order: a rule with `match: every` can set a lower\nstarting lane when every row of the change matches it; every other\nrule and the hard floors only move a change up.",
           "type": "array",
@@ -557,6 +568,50 @@
         }
       },
       "additionalProperties": false
+    },
+    "MetricGuard": {
+      "description": "A limit on one metric during a rollout. Ratios compare the value with\nits baseline (the control, or the value before the deploy).",
+      "type": "object",
+      "properties": {
+        "max": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "maxRatio": {
+          "description": "The most `value / baseline` may be.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "metric": {
+          "description": "The metric's name, as the samples give it (`error_rate`).",
+          "type": "string"
+        },
+        "min": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "minRatio": {
+          "description": "The least `value / baseline` may be, for metrics that must not drop.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "metric"
+      ]
     },
     "OneOrMany": {
       "anyOf": [
@@ -625,6 +680,101 @@
         }
       },
       "additionalProperties": false
+    },
+    "RolloutConfig": {
+      "description": "How a change meets traffic: in steps, each baked for a while, rolled\nback when a guard is breached.",
+      "type": "object",
+      "properties": {
+        "bakeMinutes": {
+          "description": "How long each step runs healthy before the next.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
+        "guards": {
+          "description": "The metrics that roll the change back.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/MetricGuard"
+          }
+        },
+        "steps": {
+          "description": "Shares of traffic in percent: strictly ascending, from 1 to 100, the\nlast one 100. None for `none`.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "integer",
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0
+          }
+        },
+        "strategy": {
+          "$ref": "#/$defs/RolloutStrategy"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "strategy"
+      ]
+    },
+    "RolloutPolicy": {
+      "description": "The rollout plan of each lane. A lane left out keeps its built-in plan.",
+      "type": "object",
+      "properties": {
+        "auto-merge": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RolloutConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "human": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RolloutConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "judge": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RolloutConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "RolloutStrategy": {
+      "oneOf": [
+        {
+          "description": "No staged rollout.",
+          "type": "string",
+          "const": "none"
+        },
+        {
+          "description": "A share of traffic at a time.",
+          "type": "string",
+          "const": "canary"
+        },
+        {
+          "description": "Behind a feature flag, turned up a share of traffic at a time.",
+          "type": "string",
+          "const": "flag"
+        }
+      ]
     },
     "RuleConfig": {
       "type": "object",

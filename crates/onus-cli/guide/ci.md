@@ -45,7 +45,7 @@ Inputs, all optional:
 - `feedback`: `true` (the default) ends the comment with a line asking for a 👍 or 👎 reaction and for `/onus caught` replies (see below).
 - `github-token`: the token for the download and the comment. Default: the workflow's token.
 
-Outputs: `report` (path of the JSON report), `markdown` (path of the Markdown report), `meaning-changes` and `needs-attention` (counts from the report's summary), and `metrics` (one line of JSON: changed files and lines, rows, findings and the time the report took).
+Outputs: `report` (path of the JSON report), `markdown` (path of the Markdown report), `meaning-changes` and `needs-attention` (counts from the report's summary), and `metrics` (one line of JSON: changed files and lines, rows, findings and the time the report took). With `records: true` also `lane`, `provenance`, `rollout-strategy` (`none`, `canary` or `flag`) and `rollout-plan` (the path of `rollout.json`), and with `rollout-percent`, `rollout-decision` (see "Rollouts" below).
 
 Notes:
 
@@ -57,7 +57,7 @@ Notes:
 
 ## Outcome records on every pull request
 
-With `records: true`, the action keeps the track record lanes depend on without anyone typing an outcome. The records live on a branch of the repository, `onus/records` (input `records-branch`), as two files that only grow by whole lines: `pulls.jsonl` (what Onus knew about each pull request while it was open) and `outcomes.jsonl` (what happened to it). Nothing outside the repository is needed.
+With `records: true`, the action keeps the track record lanes depend on without anyone typing an outcome. The records live on a branch of the repository, `onus/records` (input `records-branch`), as three files that only grow by whole lines: `pulls.jsonl` (what Onus knew about each pull request while it was open), `outcomes.jsonl` (what happened to it) and `signals.jsonl` (what production said: incidents, rollbacks, deploys, rollout stages and traces, `onus help production`). Nothing outside the repository is needed.
 
     name: Onus
     on:
@@ -88,7 +88,7 @@ With `records: true`, the action keeps the track record lanes depend on without 
 
 What happens on each event:
 
-- **Opened or pushed:** the change is submitted with the report as its evidence, classified with the policy, the risk inputs (including the reverts and incidents of the components it touches, from this repository's records), the hard floors and its agent setup's record, and judged when the lane is `judge` and `judge: true`. The comment shows the lane, why, the agent setup's record and an `/onus approve` command for each row that needs a person. The latest classification is appended to `pulls.jsonl`, with the components the change touched, the change's features (what the learned lane model trains on), and the judge configuration and its verdict when the judge decided. With `lanes.learned`, the model is read from the base commit, and the comment shows its risk on a **Learned risk:** line (`onus help lanes`). The change's provenance record is written to `provenance.json` (output `provenance`; `onus help provenance`).
+- **Opened or pushed:** the change is submitted with the report as its evidence, classified with the policy, the risk inputs (including the reverts and incidents of the components it touches, from this repository's records), the hard floors and its agent setup's record, and judged when the lane is `judge` and `judge: true`. The comment shows the lane, why, the agent setup's record and an `/onus approve` command for each row that needs a person. The latest classification is appended to `pulls.jsonl`, with the components the change touched, the change's features (what the learned lane model trains on), and the judge configuration and its verdict when the judge decided. With `lanes.learned`, the model is read from the base commit, and the comment shows its risk on a **Learned risk:** line (`onus help lanes`). The change's provenance record is written to `provenance.json` (output `provenance`; `onus help provenance`), and its rollout plan to `rollout.json` (outputs `rollout-strategy` and `rollout-plan`), which the comment shows on a **Rollout:** line (`onus help production`). Production traces kept in the records (`signals.jsonl`) are passed to `onus report --traces`, so the report's map includes the calls production observed.
 - **Merged or closed:** the pull request's latest record becomes an outcome (`merged` or `closed`), with the commit it landed as, who merged it (`mergedBy`), the components it touched and its features. Running twice records it once. The provenance record is rebuilt from the records (output `provenance`); upload it with `actions/upload-artifact` to keep it.
 - **A push to the default branch:** commits that revert a merged change (`This reverts commit …`) are recorded against it; a reverted change no longer counts toward its agent setup's record.
 - **A `/onus` comment** from someone with write access (owner, member or collaborator); anyone else's is answered with a 😕 and ignored:
@@ -99,6 +99,26 @@ What happens on each event:
       /onus incident SMS sent twice involved: notifications, notifications:src/sms.ts#sendSms
 
   `approve` records a person's approval of a row and re-runs the check, so the lane updates. `audit` records a human audit of a merged change, the miss rate that says whether the automatic lanes can be trusted, and clears the change from the audit queue (`onus outcomes audits`, `onus help lanes`). `incident` marks a merged change as having caused one, with the components and symbols involved: an agent setup with an incident among its last 20 changes cannot auto-merge, and `onus outcomes backlog` lists where incidents happen. The action reacts with 👍 and replies with what it recorded. `/onus accuracy` is answered the same way but records nothing (see "Accuracy checks" below). `/onus caught <what>` from someone with write access is recorded too, as `caught: true` on the change's outcome, or on its pull record while it is open: the learned lane model counts it as a problem, like an incident (`onus help lanes`).
+
+### Rollouts
+
+A deploy workflow reports each stage of a rollout, and Onus decides from the change's plan and the metric samples:
+
+    on: deployment_status
+    jobs:
+      rollout:
+        if: github.event.deployment_status.state == 'success'
+        runs-on: ubuntu-latest
+        steps:
+          - uses: actions/checkout@v7
+          - run: ./scripts/canary-metrics.sh > "$RUNNER_TEMP/canary.json"
+          - uses: onushq/onus/action@v0.10.0
+            with:
+              records: true
+              rollout-percent: ${{ github.event.deployment.payload.percent }}
+              rollout-metrics: ${{ runner.temp }}/canary.json
+
+`rollout-change` names the change (`owner/repo#123`) or a commit; by default the deployment's commit. The step runs `onus ci rollout`, records the stage and pushes the records, and sets `rollout-decision`: `promote`, `hold`, `rollback` or `complete`. A rollback fails the step, and the change's `rolled-back` outcome is already recorded. `workflow_dispatch` with the same inputs works too. Onus never moves traffic: the workflow does, on the decision. See `onus help production`.
 
 ### Reviews in the human lane
 
@@ -152,7 +172,7 @@ Each outcome is kept against an agent setup. Onus reads it from what git and Git
 
 - Pull requests from forks get a read-only token on `pull_request` events, so they are classified but not recorded.
 - Concurrent runs merge their records by taking every line from both sides, each as many times as the side that holds it most, and retry the push when another run pushed first. So a line one run wrote twice is kept twice, and a line two runs each wrote once is kept once.
-- The `onus ci` commands the action runs work in any CI system: `onus ci pr`, `onus ci closed`, `onus ci comment`, `onus ci push` and `onus ci records pull|push` (see `onus help commands` and `onus ci --help`).
+- The `onus ci` commands the action runs work in any CI system: `onus ci pr`, `onus ci closed`, `onus ci comment`, `onus ci push`, `onus ci rollout`, `onus ci rollback` and `onus ci records pull|push` (see `onus help commands` and `onus ci --help`).
 
 ## Caching the base map
 

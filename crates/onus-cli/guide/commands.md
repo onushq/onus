@@ -110,6 +110,7 @@ Opens the web interface for the repository: everything below and above, in a bro
 - `onus token`, `onus scope`, `onus gateway`, `onus escalate`, `onus escalation`, `onus audit`, `onus run-test`: task tokens, the git gateway, escalation and the audit log. See `onus help scopes`.
 - `onus submit`, `onus classify`, `onus judge`, `onus outcomes`: risk lanes, the judge and outcome records. `onus outcomes audits` lists the merged changes sampled for a person to audit and the audit log; `onus outcomes audit` records an audit. `onus lanes train` fits the learned lane model to outcome records; it may only raise lanes. See `onus help lanes`.
 - `onus env`, `onus evidence`: environments and the evidence store. See `onus help environments`.
+- `onus signals ingest|traces|areas`: production signals kept with the records, production traces for the map, and each component's history. See `onus help production`.
 
 ## onus ci
 
@@ -121,11 +122,14 @@ What the GitHub Action runs to keep outcome records on a branch (`onus help ci`)
     onus ci comment --change acme/shop#7 --body-file comment.md --author lead --association MEMBER --records records
     onus ci closed --change acme/shop#7 --merged --commit "$SHA" --merged-by mike --records records
     onus ci push --records records --since "$BEFORE"
+    onus ci rollout --commit "$SHA" --percent 25 --metrics canary.json --records records
+    onus ci rollback --change acme/shop#7 --reason "checkout 500s" --records records
     onus ci records push --dir records --message "acme/shop#7 closed"
 
-- `ci pr` submits, classifies and (with `--judge`) judges the change, appends to `pulls.jsonl`, writes `submission.json`, `classification.json`, `judgment.json`, `provenance.json` and the comment section `lane.md` to `--out`, and prints `{lane, verdict, agent, record, review, risk}` (`risk` is the learned model's, or null). `--evidence <file>` adds test runs; `--reviews <file>` gives the pull request's GitHub reviews, for the human lane's review (`onus help ci`); `--model <file>` uses that learned lane model instead of the one at the base commit (it still needs `lanes.learned`).
+- `ci pr` submits, classifies and (with `--judge`) judges the change, appends to `pulls.jsonl`, writes `submission.json`, `classification.json`, `judgment.json`, `provenance.json`, `rollout.json` and the comment section `lane.md` to `--out`, and prints `{lane, verdict, agent, record, review, rollout, risk}` (`record.recentRollbacks` counts its agent setup's recent rollbacks; `rollout` is the plan's strategy, steps, bake time and whether it rolls back automatically; `risk` is the learned model's, or null). `--evidence <file>` adds test runs; `--reviews <file>` gives the pull request's GitHub reviews, for the human lane's review (`onus help ci`); `--model <file>` uses that learned lane model instead of the one at the base commit (it still needs `lanes.learned`).
 - `ci comment` acts on `/onus approve <row>`, `/onus audit ok|miss [note]` and `/onus incident <note> [involved: a, b]` from OWNER, MEMBER or COLLABORATOR, and prints `{command, ok, reply, rerun}`. It also answers `/onus caught <note>` (from anyone) and `/onus accuracy ok|wrong <row>|missed <note>` (write access) with what was said, `verdict`, `row`, `note` and `by`. Accuracy is never recorded. `caught` from OWNER, MEMBER or COLLABORATOR is recorded as `caught: true` on the change's outcome, or on its pull record while it is open, and its answer says so with `recorded`. `--report <file>` (the report's JSON) checks `wrong <row>` against the report's rows and turns a row number into its id.
 - `ci closed` turns the pull request's latest record into an outcome, and samples a change approved without a person for an audit (`onus help lanes`). `--merged-by <login>` keeps who merged it on the outcome, as `@login`, for its provenance. `ci push` records reverts.
+- `ci rollout` (`--change` or `--commit`) prints the change's rollout plan (for a change recorded before plans, from `lanes.rollout` in `--repo` or `--config`); with `--percent` (and `--metrics`, the stage's samples) it decides `promote`, `hold`, `rollback` or `complete`, records the stage, records a `rolled-back` outcome on `rollback`, and exits 0 for promote or complete, 2 for rollback and 3 for hold. `ci rollback` records a rollback decided elsewhere; `--planned` marks one done on purpose, which counts against no one. See `onus help production`.
 - `ci records` takes `--remote` (default `origin`) and `--branch` (default `onus/records`).
 
 ## onus provenance
@@ -137,7 +141,7 @@ One record of why a change was allowed through: the intent, the agent and model,
     onus provenance --verify p.json
 
 - `--change <id>`: the change, as the records name it. Default: the change of `--from`, else the submission's head commit.
-- `--records <dir>` (or `--outcomes <file>`): the pull and outcome records, for the stage, approver and rollout.
+- `--records <dir>` (or `--outcomes <file>`): the pull and outcome records and production signals, for the stage, approver and rollout. `--signals <file>` reads the signals from another file.
 - `--from <file>`: an earlier record of the change; its facts from while the change was open are kept.
 - `--submission <file>` or `--submission-id <id>`, `--classification <file>`, `--judgment <file>`: what was handed in and decided. `--submission-id` reads `.onus/submissions` of `--repo`, with the judgment, audit log, escalations and outcomes beside it.
 - `--token <token>` with `--key-public <file>`: a task token, verified (an error when it does not verify) and never kept; `--audit <file>`, `--escalations <dir>` and `--task <id>`: the door log, escalation requests, and whose door decisions to include.

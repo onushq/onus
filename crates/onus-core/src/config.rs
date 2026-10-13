@@ -138,6 +138,10 @@ pub struct LanesConfig {
     /// (`onus help lanes`). Off unless written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub learned: Option<LearnedConfig>,
+    /// How each lane's changes meet production traffic: built-in plans
+    /// unless written, one lane at a time (`onus help production`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollout: Option<RolloutPolicy>,
 }
 
 fn default_lane() -> Lane {
@@ -164,6 +168,7 @@ impl Default for LanesConfig {
             taste: None,
             inputs: RiskInputs::default(),
             learned: None,
+            rollout: None,
         }
     }
 }
@@ -206,6 +211,88 @@ impl Default for LearnedConfig {
             human: default_human_at(),
         }
     }
+}
+
+/// The rollout plan of each lane. A lane left out keeps its built-in plan.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct RolloutPolicy {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_merge: Option<RolloutConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub judge: Option<RolloutConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub human: Option<RolloutConfig>,
+}
+
+impl RolloutPolicy {
+    /// The lane's entry, if written.
+    pub fn get(&self, lane: Lane) -> Option<&RolloutConfig> {
+        match lane {
+            Lane::AutoMerge => self.auto_merge.as_ref(),
+            Lane::Judge => self.judge.as_ref(),
+            Lane::Human => self.human.as_ref(),
+            Lane::Blocked => None,
+        }
+    }
+}
+
+/// How a change meets traffic: in steps, each baked for a while, rolled
+/// back when a guard is breached.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct RolloutConfig {
+    pub strategy: RolloutStrategy,
+    /// Shares of traffic in percent: strictly ascending, from 1 to 100, the
+    /// last one 100. None for `none`.
+    #[serde(default)]
+    pub steps: Vec<u8>,
+    /// How long each step runs healthy before the next.
+    #[serde(default)]
+    pub bake_minutes: u32,
+    /// The metrics that roll the change back.
+    #[serde(default)]
+    pub guards: Vec<MetricGuard>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum RolloutStrategy {
+    /// No staged rollout.
+    None,
+    /// A share of traffic at a time.
+    Canary,
+    /// Behind a feature flag, turned up a share of traffic at a time.
+    Flag,
+}
+
+impl RolloutStrategy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RolloutStrategy::None => "none",
+            RolloutStrategy::Canary => "canary",
+            RolloutStrategy::Flag => "flag",
+        }
+    }
+}
+
+/// A limit on one metric during a rollout. Ratios compare the value with
+/// its baseline (the control, or the value before the deploy).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct MetricGuard {
+    /// The metric's name, as the samples give it (`error_rate`).
+    pub metric: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<f64>,
+    /// The most `value / baseline` may be.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_ratio: Option<f64>,
+    /// The least `value / baseline` may be, for metrics that must not drop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_ratio: Option<f64>,
 }
 
 /// The built-in risk inputs of the classifier. They are on by default and
@@ -607,6 +694,23 @@ mod tests {
         assert_eq!(on, LearnedConfig::default());
         assert_eq!(on.model, "onus.lanes-model.json");
         assert!(lanes(r#"{"learned": {"raise": 1}}"#).is_err());
+    }
+
+    #[test]
+    fn rollout_plans_are_written_per_lane() {
+        assert_eq!(lanes("{}").unwrap().rollout, None);
+        let l = lanes(
+            r#"{"rollout": {"judge": {"strategy": "canary", "steps": [5, 25, 100], "bakeMinutes": 30,
+                "guards": [{"metric": "checkout_conversion", "minRatio": 0.97}]}}}"#,
+        )
+        .unwrap();
+        let p = l.rollout.unwrap();
+        let judge = p.get(Lane::Judge).unwrap();
+        assert_eq!(judge.strategy, RolloutStrategy::Canary);
+        assert_eq!(judge.guards[0].min_ratio, Some(0.97));
+        assert!(p.get(Lane::AutoMerge).is_none() && p.get(Lane::Blocked).is_none());
+        assert!(lanes(r#"{"rollout": {"blocked": {"strategy": "none"}}}"#).is_err());
+        assert!(lanes(r#"{"rollout": {"judge": {"strategy": "big-bang"}}}"#).is_err());
     }
 
     #[test]

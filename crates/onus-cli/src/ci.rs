@@ -13,9 +13,14 @@
 //!   for a hosted service to keep. `/onus caught` from someone with write
 //!   access is recorded too, for the learned lane model; accuracy is not.
 //! - The default branch moves: `onus ci push` records reverts.
+//! - A deploy tool reports a rollout stage with its metric samples: `onus ci
+//!   rollout` decides promote, hold, rollback or complete against the
+//!   change's rollout plan, and records the stage. Onus never moves traffic;
+//!   the tool acts on the exit code.
+//! - A rollback decided elsewhere: `onus ci rollback` records it.
 //!
 //! Records live in a folder that `onus ci records pull|push` syncs with a
-//! branch of the repository.
+//! branch of the repository: pull requests, outcomes and production signals.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -23,11 +28,15 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use clap::Subcommand;
 use onus_core::provenance::IntentSource;
+use onus_core::signal::{ProductionSignal, RolloutMetrics, RolloutStage, SignalKind};
 use onus_core::{Lane, SemanticReport};
+use onus_core::{MetricGuard, RolloutStrategy};
 use onus_lanes::outcomes::{self, Outcome};
 use onus_lanes::provenance;
 use onus_lanes::pulls::{self, PullRecord};
 use onus_lanes::review::{self, Review, ReviewState};
+use onus_lanes::rollout::{self, Decision, RolloutPlan};
+use onus_lanes::signals;
 use onus_lanes::submission::Approval;
 use onus_map::discover::{CODEOWNERS_PATHS, Codeowners};
 use serde_json::json;
@@ -137,6 +146,64 @@ pub enum CiCmd {
         /// Only commits after this one.
         #[arg(long, value_name = "REF")]
         since: Option<String>,
+    },
+    /// A deploy tool reports a rollout stage: Onus decides promote, hold,
+    /// rollback or complete from the change's plan and the metric samples. Exit
+    /// 0 promote or complete, 2 rollback, 3 hold. Without --percent, prints the plan.
+    #[command(group = clap::ArgGroup::new("which").required(true).args(["change", "commit"]))]
+    Rollout {
+        /// The change, as `owner/repo#123`.
+        #[arg(long)]
+        change: Option<String>,
+        /// Or the commit deployed (a sha, or at least 7 hex digits of one).
+        #[arg(long)]
+        commit: Option<String>,
+        /// The share of production traffic the stage runs at.
+        #[arg(long, value_parser = clap::value_parser!(u8).range(0..=100))]
+        percent: Option<u8>,
+        /// The stage's metric samples (schemas/rollout-metrics.schema.json).
+        #[arg(long, value_name = "FILE")]
+        metrics: Option<PathBuf>,
+        /// The deploy tool's id for this deploy, kept with the stage.
+        #[arg(long)]
+        deploy: Option<String>,
+        #[arg(long, value_name = "DIR")]
+        records: PathBuf,
+        /// The repository whose onus.yaml sets the plan of a change recorded before
+        /// rollout plans (lanes.rollout).
+        #[arg(long, default_value = ".", value_name = "DIR")]
+        repo: PathBuf,
+        /// The onus.yaml to read instead of the one in --repo.
+        #[arg(long, value_name = "FILE")]
+        config: Option<PathBuf>,
+        /// When, in seconds since 1970; now when left out.
+        #[arg(long, value_name = "SECONDS")]
+        at: Option<u64>,
+    },
+    /// A change was rolled back, by a person or the deploy tool's own analysis.
+    #[command(group = clap::ArgGroup::new("which").required(true).args(["change", "commit"]))]
+    Rollback {
+        /// The change, as `owner/repo#123`.
+        #[arg(long)]
+        change: Option<String>,
+        /// Or the commit rolled back.
+        #[arg(long)]
+        commit: Option<String>,
+        /// What happened.
+        #[arg(long)]
+        reason: String,
+        /// Rolled back on purpose (a flag turned off as planned): it counts
+        /// against neither the agent setup nor the components.
+        #[arg(long)]
+        planned: bool,
+        /// Components and symbols involved (repeatable).
+        #[arg(long = "involved", value_name = "ID")]
+        involved: Vec<String>,
+        #[arg(long, value_name = "DIR")]
+        records: PathBuf,
+        /// When, in seconds since 1970; now when left out.
+        #[arg(long, value_name = "SECONDS")]
+        at: Option<u64>,
     },
     /// Sync the records folder with a branch of the repository.
     Records {
@@ -301,6 +368,44 @@ pub fn run(cmd: CiCmd) -> Result<i32> {
             println!("{found} reverts found, {added} recorded");
             Ok(0)
         }
+        CiCmd::Rollout {
+            change,
+            commit,
+            percent,
+            metrics,
+            deploy,
+            records,
+            repo,
+            config,
+            at,
+        } => rollout_stage(RolloutArgs {
+            change,
+            commit,
+            percent,
+            metrics,
+            deploy,
+            records,
+            repo,
+            config,
+            at: at.unwrap_or_else(now),
+        }),
+        CiCmd::Rollback {
+            change,
+            commit,
+            reason,
+            planned,
+            involved,
+            records,
+            at,
+        } => rollback(
+            change.as_deref(),
+            commit.as_deref(),
+            &reason,
+            planned,
+            involved,
+            &records,
+            at.unwrap_or_else(now),
+        ),
         CiCmd::Records { cmd } => match cmd {
             RecordsCmd::Pull {
                 repo,
@@ -443,6 +548,29 @@ fn pr(a: PrArgs) -> Result<i32> {
     )?;
     let judgment = (a.judge && c.lane == Lane::Judge)
         .then(|| lanes::judge_submission(&a.repo, &sub, &c, &config));
+    // The plan for the final lane: the judge may have moved it.
+    let plan = match (&judgment, &c.rollout) {
+        (Some(j), _) if j.lane != c.lane => lanes::rollout_plan(
+            j.lane,
+            &sub.report,
+            &config,
+            &lanes::ClassifyOpts {
+                outcomes: Some(&outcomes_file(&a.records)),
+                change: Some(&a.change),
+                now: Some(at),
+                ..Default::default()
+            },
+        )?,
+        (_, Some(p)) => p.clone(),
+        (_, None) => rollout::plan(
+            c.lane,
+            &sub.report,
+            Some(&a.change),
+            config.rollout.as_ref(),
+            &Default::default(),
+            config.inputs.history.days,
+        ),
+    };
     std::fs::write(
         a.out.join("submission.json"),
         serde_json::to_vec_pretty(&sub)?,
@@ -454,6 +582,10 @@ fn pr(a: PrArgs) -> Result<i32> {
     if let Some(j) = &judgment {
         std::fs::write(a.out.join("judgment.json"), serde_json::to_vec_pretty(j)?)?;
     }
+    std::fs::write(
+        a.out.join("rollout.json"),
+        serde_json::to_vec_pretty(&plan)?,
+    )?;
     let all_outcomes = load_outcomes(&a.records)?;
     let record = outcomes::record_for(&all_outcomes, &agent.key());
     let lane = judgment.as_ref().map_or(c.lane, |j| j.lane);
@@ -496,6 +628,7 @@ fn pr(a: PrArgs) -> Result<i32> {
             audit_after_merge: Some(config.audit_after_merge),
             features: c.features.clone(),
             caught: previous.is_some_and(|r| r.caught),
+            rollout: Some(plan.clone()),
         },
     )?;
     // The change's provenance while it is open: the facts from this run, with
@@ -509,6 +642,7 @@ fn pr(a: PrArgs) -> Result<i32> {
         policy: Some(onus_lanes::judge::judge_id(&config)),
         pulls: &pulls::load(&pulls_file(&a.records))?,
         outcomes: &all_outcomes,
+        signals: &signals::load(&a.records.join(signals::FILE))?,
         ..provenance::Inputs::new(&a.change, at)
     });
     std::fs::write(
@@ -535,17 +669,23 @@ fn pr(a: PrArgs) -> Result<i32> {
         md.push_str(&learned_markdown(l));
     }
     md.push_str(&format!(
-        "\n**Agent:** `{}` · {} merged on record, {} incidents in its last {}{}\n",
+        "\n**Agent:** `{}` · {} merged on record, {} incidents in its last {}{}{}\n",
         agent.key(),
         record.changes,
         record.recent_incidents,
         outcomes::RECENT,
+        if record.recent_rollbacks > 0 {
+            format!(" · {} recent rollbacks", record.recent_rollbacks)
+        } else {
+            String::new()
+        },
         if record.changes < config.min_record {
             format!(" · auto-merge needs {} merged", config.min_record)
         } else {
             String::new()
         }
     ));
+    md.push_str(&rollout_markdown(&plan));
     if let Some(j) = &judgment {
         md.push_str(&format!("\n**Judge:** `{}`\n", verdict_name(j.verdict)));
         for r in &j.reasons {
@@ -588,13 +728,74 @@ fn pr(a: PrArgs) -> Result<i32> {
         "lane": lane.as_str(),
         "verdict": judgment.as_ref().map(|j| j.verdict),
         "agent": agent.key(),
-        "record": { "merged": record.changes, "recentIncidents": record.recent_incidents },
+        "record": {
+            "merged": record.changes,
+            "recentIncidents": record.recent_incidents,
+            "recentRollbacks": record.recent_rollbacks,
+        },
+        "rollout": {
+            "strategy": plan.strategy,
+            "steps": plan.steps,
+            "bakeMinutes": plan.bake_minutes,
+            "automaticRollback": plan.automatic_rollback,
+        },
         // Always present: how a host tells this binary from one without reviews.
         "review": review,
         "risk": c.learned.as_ref().and_then(|l| l.risk),
     });
     println!("{}", serde_json::to_string(&summary)?);
     Ok(0)
+}
+
+/// A guard as the comment says it: `error_rate > 1.5× baseline`.
+fn guard_text(g: &MetricGuard) -> String {
+    let mut parts = Vec::new();
+    if let Some(r) = g.max_ratio {
+        parts.push(format!("{} > {r}× baseline", g.metric));
+    }
+    if let Some(r) = g.min_ratio {
+        parts.push(format!("{} < {r}× baseline", g.metric));
+    }
+    if let Some(m) = g.max {
+        parts.push(format!("{} > {m}", g.metric));
+    }
+    if let Some(m) = g.min {
+        parts.push(format!("{} < {m}", g.metric));
+    }
+    parts.join(" or ")
+}
+
+/// The **Rollout:** paragraph of the lane section, with the reasons after
+/// the lane's own plan.
+fn rollout_markdown(p: &RolloutPlan) -> String {
+    let mut md = String::from("\n**Rollout:** ");
+    if p.strategy == RolloutStrategy::None {
+        md.push_str(&format!("`none`: {}.\n", p.reasons.join("; ")));
+        return md;
+    }
+    md.push_str(&format!("`{}`", p.strategy.as_str()));
+    if let Some(flag) = &p.flag {
+        md.push_str(&format!(" behind `{flag}`"));
+    }
+    let steps: Vec<String> = p.steps.iter().map(|s| format!("{s}%")).collect();
+    md.push_str(&format!(
+        " {}, {} min at each step; ",
+        steps.join(" → "),
+        p.bake_minutes
+    ));
+    if p.automatic_rollback {
+        let guards: Vec<String> = p.guards.iter().map(guard_text).collect();
+        md.push_str(&format!(
+            "rolls back automatically when {}.\n",
+            guards.join(" or ")
+        ));
+    } else {
+        md.push_str("no automatic rollback: no metric guards.\n");
+    }
+    for r in p.reasons.iter().skip(1) {
+        md.push_str(&format!("- {r}\n"));
+    }
+    md
 }
 
 /// The **Learned risk:** line of the lane section.
@@ -748,6 +949,8 @@ fn closed(
             merged_by,
             features: last.features.clone(),
             caught: last.caught,
+            signal: None,
+            planned: false,
         },
     )?;
     println!(
@@ -877,6 +1080,7 @@ fn record_caught(change: &str, by: &str, note: &str, records: &Path) -> Result<b
             &Outcome {
                 at: now(),
                 caught: true,
+                signal: None,
                 note: Some(if note.is_empty() {
                     format!("caught by {by}")
                 } else {
@@ -979,11 +1183,246 @@ fn report_row(report: &SemanticReport, row: &str) -> Option<String> {
 
 /// Fails unless `s` is a change id, `owner/repo#123`.
 pub fn check_change(s: &str) -> Result<()> {
-    let ok = s
-        .split_once('#')
-        .is_some_and(|(repo, n)| repo.contains('/') && n.parse::<u64>().is_ok());
-    if !ok {
+    if !signals::is_change(s) {
         bail!("`{s}` is not a change: write owner/repo#123");
     }
     Ok(())
+}
+
+struct RolloutArgs {
+    change: Option<String>,
+    commit: Option<String>,
+    percent: Option<u8>,
+    metrics: Option<PathBuf>,
+    deploy: Option<String>,
+    records: PathBuf,
+    repo: PathBuf,
+    config: Option<PathBuf>,
+    at: u64,
+}
+
+/// The change a deploy event is about, and how it was found (`change` or
+/// `commit`): one on record, or an error.
+fn resolve_change(
+    change: Option<&str>,
+    commit: Option<&str>,
+    outcomes: &[Outcome],
+    pulls: &[PullRecord],
+) -> Result<(String, &'static str)> {
+    if let Some(c) = change {
+        check_change(c)?;
+    }
+    if let Some(c) = commit
+        && !signals::is_commit(c)
+    {
+        bail!("`{c}` is not a commit: write at least 7 hex digits");
+    }
+    let probe = ProductionSignal {
+        change: change.map(str::to_string),
+        commit: commit.map(str::to_string),
+        ..signal("probe", SignalKind::Rollout, 0)
+    };
+    match signals::attribute(&probe, outcomes, pulls) {
+        (Some(c), Some(by)) => Ok((c, by)),
+        _ => bail!(
+            "{} is not on record: no pull request or outcome names it",
+            change.or(commit).unwrap_or_default()
+        ),
+    }
+}
+
+/// A bare signal written by Onus itself.
+fn signal(id: &str, kind: SignalKind, at: u64) -> ProductionSignal {
+    ProductionSignal {
+        id: id.into(),
+        kind,
+        at: Some(at),
+        source: "onus".into(),
+        severity: None,
+        change: None,
+        commit: None,
+        deploy: None,
+        environment: None,
+        components: vec![],
+        symbols: vec![],
+        note: None,
+        metrics: vec![],
+        calls: vec![],
+        rollout: None,
+        attributed_by: None,
+    }
+}
+
+/// `onus ci rollout`: the plan, or the decision on one stage.
+fn rollout_stage(a: RolloutArgs) -> Result<i32> {
+    let (outcomes_path, signals_path) = (outcomes_file(&a.records), a.records.join(signals::FILE));
+    let all = load_outcomes(&a.records)?;
+    let pulls = pulls::load(&pulls_file(&a.records))?;
+    let (change, by) = resolve_change(a.change.as_deref(), a.commit.as_deref(), &all, &pulls)?;
+    let pull = pulls::latest(&pulls, &change);
+    let last = outcomes::latest(&all)
+        .into_iter()
+        .find(|o| o.change == change);
+    let lane = pull.map(|p| p.lane).or(last.map(|o| o.lane));
+    if lane == Some(Lane::Blocked) {
+        bail!("{change} is in the blocked lane: a blocked change has no rollout");
+    }
+    let plan = match pull.and_then(|p| p.rollout.clone()) {
+        Some(p) => p,
+        // Records from before rollout plans: the plan the lane gets now,
+        // from the repository's policy and its components' history.
+        None => {
+            let config = lanes::lanes_config(&a.repo, a.config.as_deref())?;
+            let components = pull
+                .map(|p| p.components.clone())
+                .or(last.map(|o| o.components.clone()))
+                .unwrap_or_default();
+            let history = lanes::area_histories(
+                &all,
+                Some(&signals_path),
+                &components.iter().cloned().collect(),
+                &lanes::history_scope(
+                    &config,
+                    &lanes::ClassifyOpts {
+                        change: Some(&change),
+                        ..Default::default()
+                    },
+                    a.at,
+                ),
+            )?;
+            rollout::plan_for(
+                lane.unwrap_or(Lane::Judge),
+                components,
+                rollout::flag_key(Some(&change), ""),
+                config.rollout.as_ref(),
+                &history,
+                config.inputs.history.days,
+            )
+        }
+    };
+    let Some(percent) = a.percent else {
+        println!("{}", serde_json::to_string_pretty(&plan)?);
+        return Ok(0);
+    };
+    let samples = match &a.metrics {
+        Some(p) => {
+            let m: RolloutMetrics = serde_json::from_str(&std::fs::read_to_string(p)?)
+                .with_context(|| {
+                    format!(
+                        "{} is not rollout metrics (schemas/rollout-metrics.schema.json)",
+                        p.display()
+                    )
+                })?;
+            m.metrics
+        }
+        None => Vec::new(),
+    };
+    let on_record = signals::load(&signals_path)?;
+    // The stage started when it was first reported.
+    let started = on_record
+        .iter()
+        .filter(|s| {
+            s.kind == SignalKind::Rollout
+                && s.change.as_deref() == Some(change.as_str())
+                && s.rollout.as_ref().is_some_and(|r| r.percent == percent)
+        })
+        .filter_map(|s| s.at)
+        .min()
+        .unwrap_or(a.at);
+    let d = rollout::evaluate(&change, &plan, percent, &samples, started, a.at);
+    let id = format!("rollout:{change}:{percent}:{}", a.at);
+    if !on_record.iter().any(|s| s.id == id) {
+        signals::append(
+            &signals_path,
+            &ProductionSignal {
+                change: Some(change.clone()),
+                commit: a.commit.clone(),
+                deploy: a.deploy.clone(),
+                components: plan.components.clone(),
+                note: Some(d.reasons.join("; ")),
+                metrics: samples,
+                rollout: Some(RolloutStage {
+                    percent,
+                    decision: Some(d.decision.as_str().into()),
+                    flag: plan.flag.clone(),
+                }),
+                attributed_by: Some(by.into()),
+                ..signal(&id, SignalKind::Rollout, a.at)
+            },
+        )?;
+    }
+    if d.decision == Decision::Rollback {
+        let rolled = outcomes::latest(&all)
+            .into_iter()
+            .any(|o| o.change == change && o.result == "rolled-back" && !o.planned);
+        if !rolled && let Some(o) = signals::outcome_of(&change, &all, &pulls, a.at, "rolled-back")
+        {
+            lanes::record_outcome(
+                &outcomes_path,
+                &Outcome {
+                    note: Some(d.reasons.join("; ")),
+                    involved: plan.components.clone(),
+                    signal: Some(id),
+                    ..o
+                },
+            )?;
+        }
+    }
+    println!("{}", serde_json::to_string(&d)?);
+    Ok(match d.decision {
+        Decision::Promote | Decision::Complete => 0,
+        Decision::Rollback => 2,
+        Decision::Hold => 3,
+    })
+}
+
+/// `onus ci rollback`: a rollback decided elsewhere.
+fn rollback(
+    change: Option<&str>,
+    commit: Option<&str>,
+    reason: &str,
+    planned: bool,
+    involved: Vec<String>,
+    records: &Path,
+    at: u64,
+) -> Result<i32> {
+    let all = load_outcomes(records)?;
+    let pulls = pulls::load(&pulls_file(records))?;
+    let (change, _) = resolve_change(change, commit, &all, &pulls)?;
+    // A rollback that was not planned still counts after a planned one.
+    if outcomes::latest(&all)
+        .into_iter()
+        .any(|o| o.change == change && o.result == "rolled-back" && (planned || !o.planned))
+    {
+        println!("{change}: already rolled back");
+        return Ok(0);
+    }
+    if planned {
+        // On purpose: an outcome that counts against no one, and no signal.
+        let Some(o) = signals::outcome_of(&change, &all, &pulls, at, "rolled-back") else {
+            bail!("{change} is not on record");
+        };
+        lanes::record_outcome(
+            &outcomes_file(records),
+            &Outcome {
+                note: Some(reason.to_string()),
+                involved,
+                planned: true,
+                ..o
+            },
+        )?;
+    } else {
+        signals::ingest(
+            records,
+            vec![ProductionSignal {
+                change: Some(change.clone()),
+                note: Some(reason.to_string()),
+                components: involved,
+                ..signal(&format!("rollback:{change}:{at}"), SignalKind::Rollback, at)
+            }],
+            at,
+        )?;
+    }
+    println!("{change}: rolled back");
+    Ok(0)
 }

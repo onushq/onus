@@ -14,8 +14,12 @@
 //! 5. Raise it with the learned model, when `lanes.learned` is set: at or
 //!    above its thresholds a change goes to the judge or a person. It never
 //!    lowers a lane and never blocks (ADR 0015).
-//! 6. A setup with too short a record may not auto-merge, and a share of
-//!    the remaining auto-merges is audited by a person.
+//! 6. A setup with too short a record, or whose recent changes caused
+//!    incidents or were rolled back, may not auto-merge, and a share of the
+//!    remaining auto-merges is audited by a person.
+//!
+//! `classify_with` then attaches the rollout plan for the final lane
+//! (`rollout::plan`, ADR 0016).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -27,6 +31,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::learned::{Factor, Features, Model, Prediction};
+use crate::rollout::RolloutPlan;
 use crate::submission::Submission;
 
 /// One reason the lane is what it is.
@@ -55,6 +60,9 @@ pub struct Classification {
     /// for training.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub features: Option<Features>,
+    /// How the change should meet production traffic, for its lane.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollout: Option<RolloutPlan>,
 }
 
 /// The learned model's view of a change.
@@ -147,17 +155,32 @@ pub struct Record {
     pub changes: u32,
     /// Incidents among its recent changes.
     pub recent_incidents: u32,
+    /// Recent changes rolled back, not on purpose.
+    pub recent_rollbacks: u32,
 }
 
 /// Reverts (rollbacks included) and incidents recorded against one
-/// component in the history window.
+/// component in the history window, and the production signals that name
+/// it (`signals::extend_history`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AreaHistory {
     pub reverts: u32,
     pub incidents: u32,
-    /// The changes behind them, sorted.
+    /// The changes behind them, sorted; a signal tied to no change stands
+    /// for itself by its id.
     pub changes: Vec<String>,
+    /// Error spikes, latency and metric signals (medium severity or more,
+    /// or none given).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub error_spikes: u32,
+    /// When the latest of them was recorded (Unix seconds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_at: Option<u64>,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 /// Component → its history.
@@ -613,6 +636,20 @@ pub fn classify(
             &mut lane,
         );
     }
+    if lane == Lane::AutoMerge && record.is_some_and(|r| r.recent_rollbacks > 0) {
+        let n = record.map_or(0, |r| r.recent_rollbacks);
+        raise(
+            Lane::Judge,
+            "record",
+            format!(
+                "the agent setup's changes were rolled back {} among its recent changes",
+                plural(n, "time", "times")
+            ),
+            vec![],
+            &mut applied,
+            &mut lane,
+        );
+    }
     if lane == Lane::AutoMerge {
         let changes = record.map_or(0, |r| r.changes);
         if changes < config.min_record {
@@ -647,6 +684,7 @@ pub fn classify(
         applied,
         learned,
         features: None,
+        rollout: None,
     }
 }
 
@@ -797,6 +835,7 @@ mod tests {
     const VETERAN: Option<Record> = Some(Record {
         changes: 50,
         recent_incidents: 0,
+        recent_rollbacks: 0,
     });
 
     fn lane_of(r: &SemanticReport, p: &LanesConfig) -> Lane {
@@ -1022,6 +1061,7 @@ mod tests {
                 reverts: 2,
                 incidents: 1,
                 changes: vec!["acme/shop#1".into()],
+                ..AreaHistory::default()
             },
         )]
         .into();
@@ -1219,6 +1259,35 @@ mod tests {
         let c = with_model(&payments, &p, &model(20.0, &[]), &config);
         assert_eq!(c.lane, Lane::Human);
         assert!(inputs(&c, "model").is_empty());
+    }
+
+    #[test]
+    fn a_setup_whose_changes_were_rolled_back_does_not_auto_merge() {
+        let p = policy();
+        let docs = report(vec![row(ChangeKind::Internal, "internal-changes", &[])]);
+        let rolled = Some(Record {
+            recent_rollbacks: 1,
+            ..VETERAN.unwrap()
+        });
+        let c = classify(&docs, None, &p, &with(rolled));
+        assert_eq!(c.lane, Lane::Judge);
+        let record = inputs(&c, "record");
+        assert_eq!(record.len(), 1);
+        assert_eq!(
+            record[0].reason,
+            "the agent setup's changes were rolled back 1 time among its recent changes"
+        );
+        // A floor stays where it is.
+        let payments = report(vec![row(
+            ChangeKind::Internal,
+            "internal-changes",
+            &["payments"],
+        )]);
+        let c = classify(&payments, None, &p, &with(rolled));
+        assert_eq!(c.lane, Lane::Human);
+        assert!(inputs(&c, "record").is_empty());
+        // The plan is attached by classify_with, not here.
+        assert!(c.rollout.is_none());
     }
 
     #[test]

@@ -10,6 +10,7 @@ use onus_core::Lane;
 use serde::{Deserialize, Serialize};
 
 use crate::learned::Features;
+use crate::rollout::RolloutPlan;
 use crate::submission::{AgentSetup, Approval};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -52,6 +53,9 @@ pub struct PullRecord {
     /// (`/onus caught`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub caught: bool,
+    /// The rollout plan for its final lane.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollout: Option<RolloutPlan>,
 }
 
 pub fn load(path: &Path) -> Result<Vec<PullRecord>> {
@@ -260,6 +264,7 @@ mod tests {
             audit_after_merge: None,
             features: None,
             caught: false,
+            rollout: None,
         };
         append(&path, &rec(Lane::Human, 1)).unwrap();
         append(&path, &rec(Lane::Judge, 2)).unwrap();

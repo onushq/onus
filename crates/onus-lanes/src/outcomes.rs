@@ -31,7 +31,7 @@ pub struct Outcome {
     /// `approve`, `reject` or `escalate`, if a judge decided.
     #[serde(default)]
     pub verdict: Option<String>,
-    /// `merged`, `reverted`, `incident`, `closed` or `open`.
+    /// `merged`, `reverted`, `rolled-back`, `incident`, `closed` or `open`.
     pub result: String,
     /// A person audited it after an automatic approval.
     #[serde(default)]
@@ -73,6 +73,14 @@ pub struct Outcome {
     /// (`/onus caught`): a problem for training, like an incident.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub caught: bool,
+    /// The production signal that produced this outcome (`signals.jsonl`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signal: Option<String>,
+    /// A rollback done on purpose (a flag turned off as planned), not
+    /// because production moved: it counts against neither the agent setup
+    /// nor the components.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub planned: bool,
 }
 
 /// A person's audit of a merged change.
@@ -122,6 +130,7 @@ pub fn audit_record(
             missed,
             note: note.map(str::to_string),
         }),
+        signal: None,
         ..last.clone()
     })
 }
@@ -212,20 +221,24 @@ pub fn load(path: &Path) -> Result<Vec<Outcome>> {
 pub const RECENT: usize = 20;
 
 /// An agent setup's record: changes still merged (not reverted, no
-/// incident), and incidents among its last [`RECENT`] changes.
+/// incident; a planned rollback still counts as merged), and incidents and
+/// rollbacks among its last [`RECENT`] changes.
 pub fn record_for(outcomes: &[Outcome], agent: &str) -> Record {
     let had = had_incident(outcomes);
+    let rolled = had_rollback(outcomes);
     let mine: Vec<&Outcome> = latest(outcomes)
         .into_iter()
         .filter(|o| o.agent == agent)
         .collect();
+    let recent = || mine.iter().rev().take(RECENT);
     Record {
-        changes: mine.iter().filter(|o| o.result == "merged").count() as u32,
-        recent_incidents: mine
+        changes: mine
             .iter()
-            .rev()
-            .take(RECENT)
-            .filter(|o| had.contains(o.change.as_str()))
+            .filter(|o| o.result == "merged" || (o.result == "rolled-back" && o.planned))
+            .count() as u32,
+        recent_incidents: recent().filter(|o| had.contains(o.change.as_str())).count() as u32,
+        recent_rollbacks: recent()
+            .filter(|o| rolled.contains(o.change.as_str()))
             .count() as u32,
     }
 }
@@ -236,6 +249,16 @@ pub fn had_incident(outcomes: &[Outcome]) -> std::collections::HashSet<&str> {
     outcomes
         .iter()
         .filter(|o| o.result == "incident")
+        .map(|o| o.change.as_str())
+        .collect()
+}
+
+/// Changes rolled back at any point, not on purpose: like an incident, a
+/// later revert does not erase it.
+pub fn had_rollback(outcomes: &[Outcome]) -> std::collections::HashSet<&str> {
+    outcomes
+        .iter()
+        .filter(|o| o.result == "rolled-back" && !o.planned)
         .map(|o| o.change.as_str())
         .collect()
 }
@@ -263,15 +286,16 @@ pub fn repo_of(change: &str) -> Option<&str> {
 /// recorded from `scope.since` to `scope.until`. A change's areas are its
 /// `components` plus the component of each `involved` id. Every record
 /// counts, not only the latest of each change: a revert and an incident are
-/// events at their own time. A change counts once per area and kind.
-/// Records of a bare commit (no `#`) count for every repository.
+/// events at their own time. A change counts once per area and kind. A
+/// planned rollback does not count. Records of a bare commit (no `#`) count
+/// for every repository.
 pub fn area_history(
     outcomes: &[Outcome],
     areas: &BTreeSet<String>,
     scope: &HistoryScope,
 ) -> AreaHistories {
-    // Area → (reverted changes, changes with incidents).
-    type Changes<'o> = (BTreeSet<&'o str>, BTreeSet<&'o str>);
+    // Area → (reverted changes, changes with incidents, latest time).
+    type Changes<'o> = (BTreeSet<&'o str>, BTreeSet<&'o str>, u64);
     let mut found: BTreeMap<&str, Changes> = BTreeMap::new();
     for o in outcomes {
         if o.at < scope.since
@@ -286,6 +310,7 @@ pub fn area_history(
             continue;
         }
         let revert = match o.result.as_str() {
+            "rolled-back" if o.planned => continue,
             "reverted" | "rolled-back" => true,
             "incident" => false,
             _ => continue,
@@ -297,17 +322,18 @@ pub fn area_history(
             .chain(o.involved.iter().map(|i| ids::component_of(i).unwrap_or(i)))
             .filter(|c| areas.contains(*c));
         for c in touched {
-            let (reverts, incidents) = found.entry(c).or_default();
+            let (reverts, incidents, last) = found.entry(c).or_default();
             if revert {
                 reverts.insert(&o.change);
             } else {
                 incidents.insert(&o.change);
             }
+            *last = (*last).max(o.at);
         }
     }
     found
         .into_iter()
-        .map(|(c, (reverts, incidents))| {
+        .map(|(c, (reverts, incidents, last))| {
             let changes: BTreeSet<&str> = reverts.union(&incidents).copied().collect();
             (
                 c.to_string(),
@@ -315,6 +341,8 @@ pub fn area_history(
                     reverts: reverts.len() as u32,
                     incidents: incidents.len() as u32,
                     changes: changes.into_iter().map(str::to_string).collect(),
+                    error_spikes: 0,
+                    last_at: Some(last),
                 },
             )
         })
@@ -389,6 +417,8 @@ pub fn ingest_reverts(outcomes: &[Outcome], reverts: &[Revert], at: u64) -> Vec<
         added.push(Outcome {
             at,
             result: "reverted".into(),
+            signal: None,
+            planned: false,
             note: Some(format!(
                 "reverted by {} ({})",
                 &r.revert[..12.min(r.revert.len())],
@@ -430,6 +460,9 @@ pub struct Tally {
     /// Sampled for a person to audit when they merged.
     #[serde(default)]
     pub sampled: u32,
+    /// Rolled back in production (also counted in `reverted`).
+    #[serde(default)]
+    pub rolled_back: u32,
 }
 
 impl Tally {
@@ -438,7 +471,11 @@ impl Tally {
         match o.result.as_str() {
             "merged" => self.merged += 1,
             // A flag turned off or a rollout rolled back undoes a change too.
-            "reverted" | "rolled-back" => self.reverted += 1,
+            "reverted" => self.reverted += 1,
+            "rolled-back" => {
+                self.reverted += 1;
+                self.rolled_back += 1;
+            }
             _ => {}
         }
         if incident {
@@ -538,6 +575,8 @@ mod tests {
             merged_by: None,
             features: None,
             caught: false,
+            signal: None,
+            planned: false,
         }
     }
 
@@ -662,6 +701,8 @@ mod tests {
                 reverts: 1,
                 incidents: 1,
                 changes: vec!["acme/shop#1".into()],
+                error_spikes: 0,
+                last_at: Some(120),
             }
         );
         assert_eq!((h["billing"].reverts, h["billing"].incidents), (1, 1));
@@ -887,5 +928,66 @@ mod tests {
         }];
         let added = ingest_reverts(&[merged], &reverts, 5);
         assert_eq!(added[0].merged_by.as_deref(), Some("@mike"));
+    }
+
+    #[test]
+    fn rollbacks_count_against_the_setup_unless_planned() {
+        let at = |change: &str, result: &str, planned: bool| Outcome {
+            change: change.into(),
+            planned,
+            ..o("a/b/c", Lane::AutoMerge, result, false, false)
+        };
+        let all = vec![
+            at("acme/shop#1", "merged", false),
+            at("acme/shop#2", "merged", false),
+            at("acme/shop#3", "merged", false),
+            at("acme/shop#1", "rolled-back", false),
+            // A flag turned off as planned.
+            at("acme/shop#2", "rolled-back", true),
+            // Rolled back, then reverted: still a rollback.
+            at("acme/shop#3", "rolled-back", false),
+            at("acme/shop#3", "reverted", false),
+        ];
+        // The planned one still counts as merged.
+        let r = record_for(&all, "a/b/c");
+        assert_eq!(
+            (r.changes, r.recent_incidents, r.recent_rollbacks),
+            (1, 0, 2)
+        );
+        let s = summarize(&all);
+        assert_eq!((s.total.rolled_back, s.total.reverted), (2, 3));
+        // A planned rollback is no history either.
+        let with = |c: &str, result: &str, planned: bool| Outcome {
+            components: vec!["billing".into()],
+            ..at(c, result, planned)
+        };
+        let areas: BTreeSet<String> = ["billing".to_string()].into();
+        let h = area_history(
+            &[
+                with("acme/shop#1", "rolled-back", false),
+                with("acme/shop#2", "rolled-back", true),
+            ],
+            &areas,
+            &HistoryScope::default(),
+        );
+        assert_eq!(h["billing"].reverts, 1);
+        assert_eq!(h["billing"].changes, ["acme/shop#1"]);
+    }
+
+    #[test]
+    fn lines_without_signal_or_planned_stay_the_same() {
+        let old = r#"{"at":1,"change":"x","agent":"a//","judge":null,"lane":"judge","verdict":null,"result":"rolled-back","audited":false,"missed":false}"#;
+        let o: Outcome = serde_json::from_str(old).unwrap();
+        assert_eq!((o.signal.as_deref(), o.planned), (None, false));
+        assert_eq!(serde_json::to_string(&o).unwrap(), old);
+        let mut from = o.clone();
+        from.signal = Some("rollout:x:25:9".into());
+        from.planned = true;
+        let line = serde_json::to_string(&from).unwrap();
+        assert!(
+            line.ends_with(r#","signal":"rollout:x:25:9","planned":true}"#),
+            "{line}"
+        );
+        assert_eq!(serde_json::from_str::<Outcome>(&line).unwrap(), from);
     }
 }

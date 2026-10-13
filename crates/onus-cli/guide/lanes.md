@@ -35,7 +35,9 @@ The answer is the lane and every rule that applied, in order. Each entry has a `
    - **Human:** rows in sensitive code (`auth`, `payments`, `pii`, or any label of medium or high sensitivity), security-sensitive rows, rules of the game (tests, CI, policies, `onus.yaml`, and edits to the code of a declared contract), rows outside the stated intent, and third-party code new to the repository (an npm package no component used before).
    - **Judge:** a new dependency never auto-merges: a package new to a component, or a new dependency between components.
 5. The learned model (`lanes.learned`, below), read from the base commit: at or above its thresholds it raises a lower lane to `judge` or `human`. It never lowers a lane and never blocks.
-6. An agent setup with fewer than `minRecord` merged changes on record cannot auto-merge. A share (`auditRate`) of the remaining auto-merges is sent to a person before merging, chosen by a hash of the head commit.
+6. An agent setup with fewer than `minRecord` merged changes on record, or with an incident or a rollback among its recent changes, cannot auto-merge. A share (`auditRate`) of the remaining auto-merges is sent to a person before merging, chosen by a hash of the head commit.
+
+Every classification also carries the change's `rollout` plan for its lane: how it should meet production traffic, and when it rolls back (`onus help production`).
 
 ## Risk inputs
 
@@ -46,7 +48,7 @@ Four built-in inputs read facts Onus computes for every change. They are on by d
 | `blastRadius` | A row changes something other components depend on (`dependentComponents` in the report), including a body-only edit of a function they call. The highest lane whose threshold the count meets applies. | 3 or more components → `judge` |
 | `tests` | A row changes code no test exercises and no runtime trace has observed (`tested: untested`). | `judge` |
 | `confidence` | A row rests on parts of the map Onus could not resolve (`confidence: low`). | `judge` |
-| `history` | A component the change touches had reverts, rollbacks or incidents in the last `days` days, read from `--outcomes`. | a revert → `judge`, an incident → `human`, over 90 days |
+| `history` | A component the change touches had reverts, rollbacks or incidents in the last `days` days, read from `--outcomes` and the production signals beside it (`signals.jsonl`). A planned rollback does not count. | a revert → `judge`, an incident → `human`, over 90 days |
 
     lanes:
       inputs:
@@ -78,7 +80,7 @@ Once outcome records show which changes went wrong, a model can learn from them.
 
 **What it learns from.** Every classification computes a fixed set of features from the report (rows of each kind, blast radius, dependent components, lines and files, novelty, sensitive code, rows that need a person, map confidence, test reach, unverified contracts, rule violations, a stated intent), the submission (passing and failing test runs) and the records (earlier changes and problems in the same components, the agent setup's record). `onus ci pr` keeps them on the pull record, `onus ci closed` copies them onto the outcome, and reverts, incidents and audits keep them. `onus outcomes record --classification <file>` copies them from a classification, for outcomes recorded by hand.
 
-**What counts as a problem.** A change that had an incident, was reverted or rolled back, whose audit found a miss, or about which a person with write access said `/onus caught` (`onus help ci`). A merged change counts as clean once it is `--settle-days` old (default 14) at the latest record's time, so reverts and incidents have had time to show. Open changes, changes closed without a catch, unsettled merges and records without features are left out, and the output says how many.
+**What counts as a problem.** A change that had an incident, was reverted or rolled back (a planned rollback is not a problem: it counts as a clean merge), whose audit found a miss, or about which a person with write access said `/onus caught` (`onus help ci`). A merged change counts as clean once it is `--settle-days` old (default 14) at the latest record's time, so reverts and incidents have had time to show. Open changes, changes closed without a catch, unsettled merges and records without features are left out, and the output says how many.
 
 **Training.** A logistic regression on standardized features, class-balanced and L2-regularised, fitted by gradient descent from zero with a fixed number of steps. There is no randomness: the same records in any line order give the same file, byte for byte. A fifth of the changes, chosen by a hash of their ids, is held out: a first fit without them is measured on them, then the model is fitted on everything. It refuses with "too little data" (exit 1) below `--min-examples` (default 50) labelled changes or `--min-positives` (10) problems, or when the part left after holding out the fifth lacks problems or clean merges. With `--config` and `--out`, nothing is read from `--repo`, so it runs outside a repository. `--dry-run` measures and writes nothing. It prints:
 
@@ -170,7 +172,7 @@ What happens after merging changes the record:
       --involved notifications --involved "notifications:src/sms.ts#sendSms" --note "SMS sent twice"
     onus outcomes backlog --file outcomes.jsonl
 
-Reverts are found from commit messages (`This reverts commit …`) and recorded against the change they undo; a reverted change no longer counts toward its agent setup's record. A change turned off by a feature flag or a rolled-back rollout is recorded with `onus outcomes record --result rolled-back` and counts the same way. An agent setup with an incident among its last 20 changes cannot auto-merge. `backlog` lists the components and symbols incidents involved, most often first: where the next held-out tests should go. Onus does not write tests.
+Reverts are found from commit messages (`This reverts commit …`) and recorded against the change they undo; a reverted change no longer counts toward its agent setup's record. A change turned off by a feature flag or a rolled-back rollout is recorded with `onus ci rollback`, `onus ci rollout` or `onus outcomes record --result rolled-back` and counts the same way, unless it was `--planned`: a planned rollback still counts as a merged change. An agent setup with an incident or a rollback among its last 20 changes cannot auto-merge. Incidents and rollbacks also come straight from production: `onus signals ingest` records signals from monitoring and deploy tools and turns those tied to a change into its outcomes (`onus help production`). `backlog` lists the components and symbols incidents involved, most often first: where the next held-out tests should go. Onus does not write tests.
 
 ## Provenance
 
@@ -187,13 +189,13 @@ Every change carries one record of why it was allowed through: the intent, the a
 |---|---|
 | `stage` | `open`, `merged` or `closed`. |
 | `intent` | Where the intent came from (`pull-request` or `submission`), its sha256, and the report's intent check. |
-| `agent` | The agent setup, how it was recognised (`trailer`, `branch`, `bot`, `co-author`, `person`, `submission`), and its track record. |
+| `agent` | The agent setup, how it was recognised (`trailer`, `branch`, `bot`, `co-author`, `person`, `submission`), and its track record (`merged`, `recentIncidents`, `recentRollbacks`). |
 | `token` | The task, rights, attenuations, expiry and a 16-digit fingerprint. Never the token itself. `source` says where it came from: `token` (verified by this run), `submission` (verified when the submission was made) or `audit` (the door log's `mint` entry, widened by grants). |
 | `evidence` | Each test run: command, commit, image, exit code, manifest, and whether it ran at the head commit. |
 | `escalations` | Each request: kind, scopes, best evidence grade, and the last decision in the door log, by whom (`policy` for an automatic grant). |
 | `lane`, `judge` | The final lane, every rule that applied, the lane policy's hash, and the judge's verdict, steps and reasons. |
 | `approval` | Who or what approved it (below), the people, the rows they approved, and who merged it. |
-| `rollout` | The result now, the merge commit and time, whether a person audited it, and every outcome in order. |
+| `rollout` | The result now, the merge commit and time, whether a person audited it, and every outcome in order. From production: `status` (`pending`, `not-shipped`, `awaiting-deploy`, `in-progress`, `holding`, `complete`, `rolled-back` or `reverted`), the `percent` of traffic last reported, the `plan`, every deploy and rollout stage (`stages`) and the other signals tied to it (`signals`). `onus help production` has the rules. |
 | `doors` | The door log's decisions for the task, and whether its hash chain is intact. |
 | `gaps` | What the record cannot vouch for, and how to fill it. |
 

@@ -534,6 +534,25 @@ fn a_pull_request_is_recorded_from_open_to_revert() {
     assert_eq!(pulls.last().unwrap()["caught"], true);
     git(&r, &["checkout", "-q", "main"]);
 
+    // Production signals travel with them.
+    let signal = t.join("signal.json");
+    std::fs::write(
+        &signal,
+        r#"{"id":"datadog:1","kind":"metric","components":["notifications"]}"#,
+    )
+    .unwrap();
+    onus(
+        &r,
+        &[
+            "signals",
+            "ingest",
+            "--records",
+            rs,
+            "--file",
+            signal.to_str().unwrap(),
+        ],
+    );
+
     // Two runs pushing at once: both sets of lines end up on the branch.
     std::fs::write(
         rec2.join("outcomes.jsonl"),
@@ -557,6 +576,9 @@ fn a_pull_request_is_recorded_from_open_to_revert() {
         all.contains("acme/shop#9") && all.contains("reverted by"),
         "{all}"
     );
+    let signals = lines(&rec3.join("signals.jsonl"));
+    assert_eq!(signals.len(), 1);
+    assert_eq!(signals[0]["id"], "datadog:1");
 }
 
 #[test]
