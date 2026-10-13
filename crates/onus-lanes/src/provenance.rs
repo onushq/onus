@@ -1,8 +1,9 @@
 //! Builds a change's provenance record (`onus_core::provenance`) from the
 //! facts Onus keeps about it: the submission, classification and judgment
 //! from while it was open, the pull and outcome records, the token, the door
-//! log and escalation requests. Every field is computed here, the approver
-//! included, so a host only stores and shows the result.
+//! log and escalation requests, and the escalations Onus Cloud decided with
+//! the door's inspection of the token. Every field is computed here, the
+//! approver included, so a host only stores and shows the result.
 //!
 //! Facts from while the change was open (intent, report, token, evidence,
 //! escalations, lane reasons, judge, doors) come from the fresh inputs when
@@ -14,13 +15,14 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use onus_core::Lane;
 use onus_core::provenance::{
-    Agent, Approval, ApprovedBy, Commits, DoorEntry, Doors, Escalation, Evidence, Gap, Intent,
-    IntentSource, Judge, JudgeStep, LaneFacts, LaneReason, PlanFacts, ProvenanceRecord,
-    ReportFacts, Rollout, RolloutEvent, RolloutStatus, RowApproval, SCHEMA, SignalRef, Stage,
-    StageEvent, Token, TokenSource, TrackRecord,
+    Agent, Approval, ApprovedBy, CloudState, Commits, DoorEntry, Doors, Escalation,
+    EscalationDecision, Evidence, Gap, Intent, IntentSource, Judge, JudgeStep, LaneFacts,
+    LaneReason, Moment, PlanFacts, ProvenanceRecord, ReportFacts, Rollout, RolloutEvent,
+    RolloutStatus, RowApproval, SCHEMA, SignalRef, Stage, StageEvent, Token, TokenInspection,
+    TokenSource, TrackRecord,
 };
 use onus_core::signal::{ProductionSignal, SignalKind};
 use onus_doors::audit::{AuditLog, Entry};
@@ -60,6 +62,22 @@ pub struct Inputs<'a> {
     /// The door log's entries, and whether its hash chain verified.
     pub audit: Option<(Vec<Entry>, bool)>,
     pub requests: &'a [Request],
+    /// Escalations as Onus Cloud keeps them, with their decisions. Given and
+    /// empty, Onus Cloud has none for the change.
+    pub decisions: Option<&'a [EscalationDecision]>,
+    /// What of Onus Cloud's escalations could not be read, one note each.
+    /// While any is unread, escalations are a gap.
+    pub unread: &'a [String],
+    /// The door's inspection of the task token ([`TokenSource::Inspection`]).
+    pub inspection: Option<TokenInspection>,
+    /// Why an inspection that was given could not be read: the token gap
+    /// says so.
+    pub inspection_unread: Option<&'a str>,
+    /// The change's branch and commits (base excluded): an escalation in
+    /// Onus Cloud that names no pull request is this change's when its
+    /// `ref` or `commit` names one of them.
+    pub branch: Option<&'a str>,
+    pub commits: &'a [String],
     /// The task whose door decisions to include (default: the token's).
     pub task: Option<&'a str>,
 }
@@ -83,6 +101,12 @@ impl<'a> Inputs<'a> {
             token: None,
             audit: None,
             requests: &[],
+            decisions: None,
+            unread: &[],
+            inspection: None,
+            inspection_unread: None,
+            branch: None,
+            commits: &[],
             task: None,
         }
     }
@@ -208,6 +232,315 @@ fn escalation(id: &str, requests: &[Request], entries: &[Entry], listed: bool) -
         by,
         at: decided.map(|e| e.at),
         reason: decided.map(|e| e.reason.clone()).filter(|r| !r.is_empty()),
+        cloud_id: None,
+    }
+}
+
+/// Unix seconds of a time Onus Cloud gave.
+fn seconds(m: &Moment) -> Option<u64> {
+    match m {
+        Moment::Seconds(n) => Some(*n),
+        Moment::Date(d) => onus_doors::token::parse_rfc3339(d),
+    }
+}
+
+const NOT_A_TOKEN: &str =
+    "give the door's inspection of the task token ({task, rights, expires}), never the token";
+
+/// A raw task token given where only its inspection belongs. It is always
+/// refused, even where other unreadable input is only warned about.
+#[derive(Debug)]
+pub struct HoldsToken(String);
+
+impl std::fmt::Display for HoldsToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {NOT_A_TOKEN}", self.0)
+    }
+}
+
+impl std::error::Error for HoldsToken {}
+
+/// Escalations as Onus Cloud keeps them, as far as they could be read.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CloudEscalations {
+    pub list: Vec<EscalationDecision>,
+    /// One note for each escalation that could not be read, naming it.
+    pub unread: Vec<String>,
+}
+
+/// Reads escalations as Onus Cloud keeps them: a JSON array
+/// (`schemas/escalation-decisions.schema.json`), or the API's
+/// `{"escalations": [...]}`, whose views put the decision under
+/// `decision: {by: {id, name}, at, answer}`. An escalation that cannot be
+/// read is left out with a note, so one bad entry never stops a run. A file
+/// that is not such a list is an error, and one that holds a token is
+/// [`HoldsToken`].
+pub fn parse_decisions(text: &str) -> Result<CloudEscalations> {
+    let mut v: serde_json::Value = serde_json::from_str(text)
+        .context("not JSON: give a JSON array of escalations as Onus Cloud keeps them")?;
+    if let Some(list) = v.get_mut("escalations") {
+        v = list.take();
+    }
+    let Some(items) = v.as_array_mut() else {
+        bail!("not a JSON array of escalations");
+    };
+    if let Some((n, e)) = items
+        .iter()
+        .enumerate()
+        .find(|(_, e)| e["token"].is_string())
+    {
+        return Err(HoldsToken(format!("escalation {} holds a token", name_of(e, n))).into());
+    }
+    let mut read = CloudEscalations::default();
+    for (n, e) in items.iter_mut().enumerate() {
+        let name = name_of(e, n);
+        let Some(o) = e.as_object_mut() else {
+            read.unread
+                .push(format!("escalation {name}: not a JSON object"));
+            continue;
+        };
+        // An API view: the decision is nested, the request's input is not.
+        if let Some(d) = o.remove("decision").filter(|d| d.is_object()) {
+            for (key, value) in [
+                ("decidedBy", &d["by"]["id"]),
+                ("decidedByName", &d["by"]["name"]),
+                ("decidedAt", &d["at"]),
+                ("answer", &d["answer"]),
+            ] {
+                if !o.contains_key(key) && !value.is_null() {
+                    o.insert(key.into(), value.clone());
+                }
+            }
+        }
+        // A stored row: what was sent is under `input`.
+        if let Some(input) = o.remove("input").filter(|i| i.is_object()) {
+            for key in ["scopes", "reason"] {
+                if !o.contains_key(key) && !input[key].is_null() {
+                    o.insert(key.into(), input[key].clone());
+                }
+            }
+        }
+        if o.get("scopes").is_some_and(|s| s.is_null()) {
+            o.remove("scopes");
+        }
+        let d: EscalationDecision = match serde_json::from_value(e.clone()) {
+            Ok(d) => d,
+            Err(err) => {
+                let base = serde_json::json!({ "id": "x", "state": "waiting" });
+                read.unread.push(format!(
+                    "escalation {name}: {}",
+                    why_unread::<EscalationDecision>(e, base, &err)
+                ));
+                continue;
+            }
+        };
+        if [&d.decided_at, &d.expires_at]
+            .into_iter()
+            .flatten()
+            .any(|at| seconds(at).is_none())
+        {
+            read.unread.push(format!(
+                "escalation {name}: a time is neither Unix seconds nor an RFC 3339 date in UTC"
+            ));
+            continue;
+        }
+        read.list.push(d);
+    }
+    Ok(read)
+}
+
+/// How an entry is named in a note: its id when that looks like one, else
+/// its place in the list. Input is never echoed beyond that.
+fn name_of(e: &serde_json::Value, n: usize) -> String {
+    match e["id"].as_str() {
+        Some(id)
+            if (1..=64).contains(&id.len())
+                && id
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':')) =>
+        {
+            id.to_string()
+        }
+        _ => format!("#{}", n + 1),
+    }
+}
+
+/// Why `v` could not be read as a `T`, naming the field and what it should
+/// be, never the value: a value may be anything, a token included. `base`
+/// holds what `T` needs, so each field can be tried on its own.
+fn why_unread<T: serde::de::DeserializeOwned>(
+    v: &serde_json::Value,
+    base: serde_json::Value,
+    err: &serde_json::Error,
+) -> String {
+    // serde names what it expected after the value it found, and the value
+    // may itself hold ", expected ".
+    let expected = |e: &serde_json::Error| {
+        let text = e.to_string();
+        if text.starts_with("missing field") {
+            return Some(text);
+        }
+        let (_, rest) = text.rsplit_once(", expected ")?;
+        Some(format!("expected {rest}"))
+    };
+    let Some(o) = v.as_object() else {
+        return "not a JSON object".into();
+    };
+    for (key, value) in o {
+        let mut one = base.clone();
+        one[key.as_str()] = value.clone();
+        if let Err(e) = serde_json::from_value::<T>(one) {
+            return match expected(&e) {
+                Some(why) => format!("`{key}` cannot be read ({why})"),
+                None => format!("`{key}` cannot be read"),
+            };
+        }
+    }
+    expected(err)
+        .filter(|why| why.starts_with("missing field"))
+        .unwrap_or_else(|| "it cannot be read".into())
+}
+
+/// Whether `text` is a raw token rather than JSON: a Biscuit is one run of
+/// base64url, alone or as a JSON string.
+fn is_raw_token(text: &str) -> bool {
+    let t = text.trim();
+    let t = serde_json::from_str::<String>(t).unwrap_or_else(|_| t.to_string());
+    t.len() >= 16
+        && t.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '=' | '+' | '/'))
+}
+
+/// Reads the door's inspection of a task token (`{task, rights, expires}`,
+/// as `onus token inspect` prints it). A token itself is [`HoldsToken`].
+pub fn parse_inspection(text: &str) -> Result<TokenInspection> {
+    if is_raw_token(text) {
+        return Err(HoldsToken("this is a token".into()).into());
+    }
+    let v: serde_json::Value =
+        serde_json::from_str(text).map_err(|_| anyhow::anyhow!("not JSON: {NOT_A_TOKEN}"))?;
+    serde_json::from_value(v.clone()).map_err(|e| {
+        let why = why_unread::<TokenInspection>(&v, serde_json::json!({ "task": "x" }), &e);
+        anyhow::anyhow!("not an inspection ({why}): {NOT_A_TOKEN}")
+    })
+}
+
+/// Whether a decision from Onus Cloud is about the escalation `e`.
+fn is_about(d: &EscalationDecision, e: &Escalation) -> bool {
+    let id = e.id.as_str();
+    d.id == id
+        || d.client_request_id.as_deref() == Some(id)
+        || d.request_id.as_deref() == Some(id)
+        || e.cloud_id.as_deref() == Some(d.id.as_str())
+}
+
+/// The task an escalation in Onus Cloud was filed for.
+fn task_of(d: &EscalationDecision) -> Option<&str> {
+    d.task
+        .as_deref()
+        .or_else(|| d.token.as_ref().map(|t| t.task.as_str()))
+}
+
+/// Whether a decision, as the record names it, is final.
+fn is_final(decision: &str) -> bool {
+    !matches!(decision, "open" | "needs-person")
+}
+
+/// The decision Onus Cloud keeps on an escalation, as the record names it.
+/// A final decision made here (the submission's grant, the door log's)
+/// stands against one Onus Cloud has not made yet, and Onus Cloud's fills
+/// what it left out. When both are final and differ, Onus Cloud's is
+/// recorded, since it decided, and the disagreement is returned as a note.
+/// A stored row still waiting past its expiry at `now` has expired, as
+/// Onus Cloud shows it.
+fn decide_from_cloud(e: &mut Escalation, d: &EscalationDecision, now: u64) -> Option<String> {
+    let expired = d
+        .expires_at
+        .as_ref()
+        .and_then(seconds)
+        .is_some_and(|t| t < now);
+    let decision = match d.state {
+        CloudState::Waiting if expired => "expired",
+        CloudState::Waiting => "needs-person",
+        CloudState::Assessing => "open",
+        CloudState::Granted => "granted",
+        CloudState::Denied => "denied",
+        CloudState::Resolved => "answered",
+        CloudState::Withdrawn => "withdrawn",
+        CloudState::Expired => "expired",
+        CloudState::Failed => "failed",
+    };
+    let by = d.decided_by.as_deref().map(|by| {
+        if by == "system:policy" {
+            "policy".to_string()
+        } else {
+            d.decided_by_name
+                .clone()
+                .filter(|n| !n.trim().is_empty())
+                .unwrap_or_else(|| by.to_string())
+        }
+    });
+    let at = d.decided_at.as_ref().and_then(seconds);
+    // The decider's reason, as the door log keeps it; never the agent's.
+    let reason = d.answer.clone().filter(|r| !r.is_empty());
+    let mut note = None;
+    if is_final(&e.decision) && is_final(decision) && e.decision != decision {
+        note = Some(format!(
+            "escalation {} is {decision} in Onus Cloud but was {} by the submission or the door log; Onus Cloud's decision is recorded",
+            e.id, e.decision
+        ));
+        e.decision = decision.to_string();
+        e.by = by;
+        e.at = at;
+        e.reason = reason;
+    } else if !is_final(&e.decision) && (is_final(decision) || e.decision == "open") {
+        // Onus Cloud's decision, with what it left out kept from here.
+        e.decision = decision.to_string();
+        e.by = by.or(e.by.take());
+        e.at = at.or(e.at);
+        e.reason = reason.or(e.reason.take());
+    } else if e.decision == decision {
+        e.by = e.by.take().or(by);
+        e.at = e.at.or(at);
+        e.reason = e.reason.take().or(reason);
+    }
+    e.cloud_id = Some(d.id.clone());
+    // The facts of a request kept here are the binary's own; Onus Cloud's
+    // fill only what is missing.
+    if e.kind.is_none() {
+        e.kind = d.kind.clone();
+    }
+    if e.scopes.is_empty() {
+        e.scopes = d.scopes.clone();
+    }
+    if e.best_grade.is_none() {
+        e.best_grade = d.best_grade;
+    }
+    note
+}
+
+/// The token as the door inspected it, widened by the scopes Onus Cloud
+/// granted to its task.
+fn token_from_inspection(t: TokenInspection, decisions: &[EscalationDecision]) -> Token {
+    let mut rights = t.rights;
+    for d in decisions
+        .iter()
+        .filter(|d| d.state == CloudState::Granted && task_of(d) == Some(t.task.as_str()))
+    {
+        for r in &d.scopes {
+            if !rights.contains(r) {
+                rights.push(r.clone());
+            }
+        }
+    }
+    Token {
+        task: t.task,
+        rights,
+        attenuations: t.attenuations,
+        // `onus token inspect` and the door give 0 for no expiry.
+        expires: t.expires.filter(|&e| e > 0),
+        fingerprint: None,
+        source: TokenSource::Inspection,
     }
 }
 
@@ -324,12 +657,106 @@ pub fn build(i: Inputs) -> ProvenanceRecord {
         }),
         None => from.and_then(|f| f.report.clone()),
     };
+    // Onus Cloud's escalations for this change. For a pull request, a list
+    // that also holds other repositories' or pull requests' leaves those
+    // out; a local change (a head commit) names neither.
+    let pull_ref = i
+        .change
+        .rsplit_once('#')
+        .and_then(|(repo, n)| Some((repo, n.parse::<u64>().ok()?)));
+    let given = i.decisions.unwrap_or(&[]);
+    let decisions: Vec<&EscalationDecision> = given
+        .iter()
+        .filter(|d| match pull_ref {
+            Some((repo, number)) => {
+                d.repository
+                    .as_deref()
+                    .is_none_or(|r| r.eq_ignore_ascii_case(repo))
+                    && d.pull.is_none_or(|p| p == number)
+            }
+            None => true,
+        })
+        .collect();
+    // The change's commits: those given, its head and every head classified.
+    let shas: BTreeSet<String> = i
+        .commits
+        .iter()
+        .map(String::as_str)
+        .chain([commits.head.as_str()])
+        .chain(sub.map(|s| s.head.as_str()))
+        .chain(
+            i.pulls
+                .iter()
+                .filter(|p| p.change == i.change)
+                .map(|p| p.head.as_str()),
+        )
+        .filter(|c| !c.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect();
+    // Whether an escalation names this change: it is on this pull request,
+    // the submission lists it, the earlier record kept it, or it was filed
+    // at one of the change's commits or on its branch. A commit elsewhere
+    // outweighs the branch's name, which may be used again.
+    let listed: Vec<&str> = sub
+        .map(|s| s.escalations.iter().map(String::as_str).collect())
+        .unwrap_or_default();
+    let kept: &[Escalation] = from.map_or(&[], |f| &f.escalations);
+    let names_change = |d: &EscalationDecision| {
+        let ids = [
+            Some(d.id.as_str()),
+            d.client_request_id.as_deref(),
+            d.request_id.as_deref(),
+        ];
+        if ids.into_iter().flatten().any(|id| listed.contains(&id))
+            || kept.iter().any(|e| is_about(d, e))
+        {
+            return true;
+        }
+        let ours = |c: &str| shas.contains(&c.to_ascii_lowercase());
+        let at_ours = d.reference.as_deref().is_some_and(ours);
+        let on_branch = i.branch.is_some_and(|b| {
+            d.reference
+                .as_deref()
+                .is_some_and(|r| r == b || r.strip_prefix("refs/heads/") == Some(b))
+        });
+        let pull_head = pull_ref.is_some_and(|(_, n)| {
+            d.reference.as_deref() == Some(format!("refs/pull/{n}/head").as_str())
+        });
+        pull_ref.is_some() && d.pull.is_some()
+            || pull_head
+            || at_ours
+            || d.commit.as_deref().map_or(on_branch, ours)
+    };
+    // The task: given, or the token's, the submission's, the inspection's or
+    // the earlier record's, else the one task the escalations naming this
+    // change name. One that does not name the change never says its task.
     let task: Option<String> = i
         .task
         .map(str::to_string)
         .or_else(|| i.token.as_ref().map(|t| t.task.clone()))
         .or_else(|| sub.and_then(|s| s.scope.as_ref()).map(|s| s.task.clone()))
-        .or_else(|| from.and_then(|f| f.token.as_ref()).map(|t| t.task.clone()));
+        .or_else(|| i.inspection.as_ref().map(|t| t.task.clone()))
+        .or_else(|| from.and_then(|f| f.token.as_ref()).map(|t| t.task.clone()))
+        .or_else(|| {
+            let tasks: BTreeSet<&str> = decisions
+                .iter()
+                .filter(|d| pull_ref.is_none() || names_change(d))
+                .filter_map(|d| task_of(d))
+                .collect();
+            (tasks.len() == 1).then(|| tasks.into_iter().next().unwrap_or_default().to_string())
+        });
+    // For a pull request, an escalation that names it is kept whatever its
+    // task, and one that does not only for the change's task. For a local
+    // change, those of its task, or all of them when it is not known.
+    let decisions: Vec<EscalationDecision> = decisions
+        .into_iter()
+        .filter(|d| match pull_ref {
+            Some(_) => names_change(d) || task.is_some() && task_of(d) == task.as_deref(),
+            None => task.is_none() || task_of(d).is_none_or(|t| Some(t) == task.as_deref()),
+        })
+        .cloned()
+        .collect();
+    let decisions = decisions.as_slice();
     let entries: &[Entry] = i.audit.as_ref().map_or(&[], |(e, _)| e);
     let token = i
         .token
@@ -345,6 +772,26 @@ pub fn build(i: Inputs) -> ProvenanceRecord {
             })
         })
         .or_else(|| task.as_deref().and_then(|t| token_from_audit(entries, t)))
+        // A token verified earlier outranks the door's word on a refresh.
+        .or_else(|| {
+            from.and_then(|f| f.token.clone())
+                .filter(|t| t.source != TokenSource::Inspection)
+        })
+        .or_else(|| {
+            // The door's inspection: given, else the one Onus Cloud kept with
+            // an escalation of the task.
+            i.inspection
+                .clone()
+                .filter(|t| task.as_deref().is_none_or(|task| task == t.task))
+                .or_else(|| {
+                    let task = task.as_deref()?;
+                    decisions
+                        .iter()
+                        .filter(|d| task_of(d) == Some(task))
+                        .find_map(|d| d.token.clone())
+                })
+                .map(|t| token_from_inspection(t, decisions))
+        })
         .or_else(|| from.and_then(|f| f.token.clone()));
     let evidence = match sub {
         Some(s) => s
@@ -361,10 +808,10 @@ pub fn build(i: Inputs) -> ProvenanceRecord {
             .collect(),
         None => from.map(|f| f.evidence.clone()).unwrap_or_default(),
     };
-    let escalations = if sub.is_some() || !i.requests.is_empty() || i.audit.is_some() {
-        let listed: Vec<&str> = sub
-            .map(|s| s.escalations.iter().map(String::as_str).collect())
-            .unwrap_or_default();
+    let local_escalations = sub.is_some() || !i.requests.is_empty() || i.audit.is_some();
+    let fresh_escalations = local_escalations || i.decisions.is_some();
+    let mut disagreements: Vec<String> = Vec::new();
+    let escalations: Vec<Escalation> = if fresh_escalations {
         let mut ids: Vec<&str> = Vec::new();
         let for_task = i
             .requests
@@ -376,9 +823,33 @@ pub fn build(i: Inputs) -> ProvenanceRecord {
                 ids.push(id);
             }
         }
-        ids.into_iter()
-            .map(|id| escalation(id, i.requests, entries, listed.contains(&id)))
-            .collect()
+        // With only Onus Cloud's list fresh, it updates the escalations kept
+        // earlier, which may hold some only the door knew.
+        let mut out: Vec<Escalation> = if local_escalations {
+            ids.into_iter()
+                .map(|id| escalation(id, i.requests, entries, listed.contains(&id)))
+                .collect()
+        } else {
+            from.map(|f| f.escalations.clone()).unwrap_or_default()
+        };
+        // Onus Cloud's decisions: on the request they are about, else as
+        // escalations of their own.
+        for d in decisions {
+            let at = match out.iter().position(|e| is_about(d, e)) {
+                Some(n) => n,
+                None => {
+                    let id = d
+                        .client_request_id
+                        .as_deref()
+                        .or(d.request_id.as_deref())
+                        .unwrap_or(&d.id);
+                    out.push(escalation(id, i.requests, entries, false));
+                    out.len() - 1
+                }
+            };
+            disagreements.extend(decide_from_cloud(&mut out[at], d, i.now));
+        }
+        out
     } else {
         from.map(|f| f.escalations.clone()).unwrap_or_default()
     };
@@ -685,10 +1156,16 @@ pub fn build(i: Inputs) -> ProvenanceRecord {
         );
     }
     if token.is_none() {
-        gap(
-            "token",
-            "no task token reached this run: give --token/--key-public, --submission, or --audit with --task",
-        );
+        match i.inspection_unread {
+            Some(why) => gap(
+                "token",
+                &format!("the door's inspection of the task token could not be read: {why}"),
+            ),
+            None => gap(
+                "token",
+                "no task token reached this run: give --token/--key-public, --submission, --token-inspection, or --audit with --task",
+            ),
+        }
     }
     if evidence.is_empty() {
         gap(
@@ -696,11 +1173,31 @@ pub fn build(i: Inputs) -> ProvenanceRecord {
             "no test runs were handed in: give --evidence to onus ci pr or onus submit",
         );
     }
-    if escalations.is_empty() {
-        gap(
-            "escalations",
-            "no escalation is on record: none was asked for, or none reached this run (give --submission, or --escalations and --audit with --task)",
-        );
+    // Onus Cloud's list, even an empty one, says what was asked there,
+    // unless some of it could not be read or none of it is this change's.
+    // A rebuild keeps the earlier record's gap.
+    let mut doubts: Vec<String> = Vec::new();
+    if !i.unread.is_empty() {
+        doubts.push(format!(
+            "some of Onus Cloud's escalations could not be read, so the list may be short: {}",
+            i.unread.join("; ")
+        ));
+    }
+    doubts.extend(disagreements);
+    let escalations_gap: Option<String> = if !doubts.is_empty() {
+        Some(doubts.join("; "))
+    } else if !fresh_escalations && from.is_some() {
+        from.and_then(|f| f.gaps.iter().find(|g| g.field == "escalations"))
+            .map(|g| g.reason.clone())
+    } else if !escalations.is_empty() || i.decisions.is_some_and(|d| d.is_empty()) {
+        None
+    } else if i.decisions.is_some() {
+        Some("Onus Cloud's escalations were all for other changes or tasks: none is on record for this one".into())
+    } else {
+        Some("no escalation is on record: none was asked for, or none reached this run (give --submission, --escalations with Onus Cloud's decisions, or --escalations and --audit with --task)".into())
+    };
+    if let Some(reason) = &escalations_gap {
+        gap("escalations", reason);
     }
     if judge.is_none() {
         gap(
@@ -1209,6 +1706,473 @@ mod tests {
         assert!(!r.gaps.iter().any(|g| g.field == "escalations"));
     }
 
+    fn decisions(json: serde_json::Value) -> Vec<EscalationDecision> {
+        let read = parse_decisions(&json.to_string()).unwrap();
+        assert_eq!(read.unread, Vec::<String>::new());
+        read.list
+    }
+
+    #[test]
+    fn cloud_decisions_fill_escalations_and_the_token() {
+        let local = request("sms", "write:path:orders/**");
+        let mut sub = submission();
+        sub.escalations = vec![local.id.clone()];
+        let bare = sub.clone();
+        sub.scope = Some(ScopeUsed {
+            task: "sms".into(),
+            rights: vec!["write:path:orders/**".into()],
+            attenuations: vec![],
+            expires: Some(50),
+            fingerprint: None,
+        });
+        let inspected =
+            serde_json::json!({ "task": "sms", "rights": ["write:path:a/**"], "expires": 99 });
+        let cloud = decisions(serde_json::json!([
+            {
+                "id": "uuid-1", "clientRequestId": local.id, "kind": "permission",
+                "scopes": ["write:path:orders/**"], "state": "granted",
+                "decidedBy": "user:7", "decidedByName": "@lead",
+                "decidedAt": "2026-10-12T10:00:00.000Z", "reason": "needs it",
+                "token": inspected,
+            },
+            {
+                "id": "uuid-2", "kind": "permission", "scopes": ["write:path:auth/**"],
+                "state": "denied", "decidedBy": "user:8", "decidedAt": 1700,
+                "answer": "not in this task", "task": "sms",
+            },
+            {
+                "id": "uuid-3", "kind": "permission", "scopes": ["write:path:docs/**"],
+                "state": "granted", "decidedBy": "system:policy", "task": "sms",
+            },
+            { "id": "uuid-4", "kind": "broken-test", "state": "waiting", "bestGrade": 1, "task": "sms" },
+        ]));
+        let build_with = |sub: Option<&Submission>, inspection: Option<TokenInspection>| {
+            build(Inputs {
+                submission: sub,
+                requests: std::slice::from_ref(&local),
+                decisions: Some(&cloud),
+                inspection,
+                ..Inputs::new(CHANGE, 5)
+            })
+        };
+        let r = build_with(Some(&sub), None);
+        let ids: Vec<(&str, Option<&str>)> = r
+            .escalations
+            .iter()
+            .map(|e| (e.id.as_str(), e.cloud_id.as_deref()))
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                (local.id.as_str(), Some("uuid-1")),
+                ("uuid-2", Some("uuid-2")),
+                ("uuid-3", Some("uuid-3")),
+                ("uuid-4", Some("uuid-4")),
+            ]
+        );
+        let e = &r.escalations[0];
+        assert_eq!(e.decision, "granted");
+        assert_eq!(e.by.as_deref(), Some("@lead"));
+        assert_eq!(e.at, Some(1_791_799_200));
+        // The request kept here is the binary's own: its grade stands.
+        assert_eq!(e.best_grade, Some(5));
+        let e = &r.escalations[1];
+        assert_eq!(
+            (e.decision.as_str(), e.by.as_deref(), e.at),
+            ("denied", Some("user:8"), Some(1700))
+        );
+        assert_eq!(e.reason.as_deref(), Some("not in this task"));
+        assert_eq!(e.scopes, ["write:path:auth/**"]);
+        assert_eq!(r.escalations[2].by.as_deref(), Some("policy"));
+        let e = &r.escalations[3];
+        assert_eq!(
+            (e.decision.as_str(), e.by.as_deref(), e.best_grade),
+            ("needs-person", None, Some(1))
+        );
+        // The submission's verified scope comes before the door's word.
+        assert_eq!(r.token.as_ref().unwrap().source, TokenSource::Submission);
+        assert!(!r.gaps.iter().any(|g| g.field == "escalations"));
+
+        // In CI, with no submission token: the inspection Onus Cloud kept,
+        // widened by what it granted to the task.
+        let r = build_with(Some(&bare), None);
+        let t = r.token.as_ref().unwrap();
+        assert_eq!(t.source, TokenSource::Inspection);
+        assert_eq!(t.task, "sms");
+        assert_eq!(
+            t.rights,
+            [
+                "write:path:a/**",
+                "write:path:orders/**",
+                "write:path:docs/**"
+            ]
+        );
+        assert_eq!((t.expires, t.fingerprint.as_deref()), (Some(99), None));
+        assert!(!r.gaps.iter().any(|g| g.field == "token"));
+        assert!(digest_ok(&r));
+        // A given inspection comes first.
+        let given =
+            parse_inspection(r#"{"task":"sms","rights":["write:path:b/**"],"expires":0}"#).unwrap();
+        assert_eq!(given.expires, None);
+        let t = build_with(Some(&bare), Some(given)).token.unwrap();
+        assert_eq!(t.rights[0], "write:path:b/**");
+
+        // Rebuilt from the record alone: the facts are kept.
+        let again = build(Inputs {
+            from: Some(r.clone()),
+            ..Inputs::new(CHANGE, 9)
+        });
+        assert_eq!(
+            (&again.token, &again.escalations),
+            (&r.token, &r.escalations)
+        );
+    }
+
+    #[test]
+    fn an_empty_list_from_onus_cloud_is_on_record() {
+        let none = build(Inputs {
+            decisions: Some(&[]),
+            ..Inputs::new(CHANGE, 1)
+        });
+        assert!(none.escalations.is_empty());
+        assert!(!none.gaps.iter().any(|g| g.field == "escalations"));
+        let kept = build(Inputs {
+            from: Some(none),
+            ..Inputs::new(CHANGE, 2)
+        });
+        assert!(!kept.gaps.iter().any(|g| g.field == "escalations"));
+        // Never given: still a gap, and a rebuild keeps it.
+        let unknown = build(Inputs::new(CHANGE, 1));
+        let kept = build(Inputs {
+            from: Some(unknown),
+            ..Inputs::new(CHANGE, 2)
+        });
+        assert!(kept.gaps.iter().any(|g| g.field == "escalations"));
+    }
+
+    #[test]
+    fn decisions_read_as_onus_cloud_keeps_and_shows_them() {
+        // The API's views: the decision is nested.
+        let views = decisions(serde_json::json!({ "escalations": [{
+            "id": "uuid-1", "kind": "permission", "state": "denied",
+            "scopes": ["write:path:auth/**"], "reason": "needs it", "pull": 7,
+            "token": { "task": "sms", "rights": [], "expires": 99 },
+            "decision": { "by": { "id": "user:8", "name": "Grace" },
+                          "at": "2026-10-12T10:00:00Z", "answer": "no" },
+        }]}));
+        let d = &views[0];
+        assert_eq!(d.decided_by.as_deref(), Some("user:8"));
+        assert_eq!(d.decided_by_name.as_deref(), Some("Grace"));
+        assert_eq!(d.answer.as_deref(), Some("no"));
+        assert_eq!(d.token.as_ref().unwrap().task, "sms");
+        // A stored row: `status`, and what was sent under `input`.
+        let rows = decisions(serde_json::json!([{
+            "id": "uuid-2", "kind": "broken-test", "status": "resolved",
+            "input": { "scopes": [], "reason": "the test is wrong", "evidence": [] },
+            "decidedBy": "user:8", "decidedAt": null, "answer": "skip it", "token": null,
+        }]));
+        assert_eq!(rows[0].state, CloudState::Resolved);
+        assert_eq!(rows[0].reason.as_deref(), Some("the test is wrong"));
+        // A token is never taken in place of its inspection.
+        let err =
+            parse_decisions(r#"[{"id":"u","state":"waiting","token":"EpYBCisK"}]"#).unwrap_err();
+        assert!(err.downcast_ref::<HoldsToken>().is_some());
+        assert!(err.to_string().contains("never the token"), "{err}");
+        for raw in ["EpYBCisKBHRhc2sYAyIJ\n", r#""EpYBCisKBHRhc2sYAyIJ""#] {
+            let err = parse_inspection(raw).unwrap_err();
+            assert!(err.downcast_ref::<HoldsToken>().is_some(), "{err}");
+        }
+        assert!(
+            parse_inspection("{")
+                .unwrap_err()
+                .downcast_ref::<HoldsToken>()
+                .is_none()
+        );
+        assert!(parse_decisions(r#"{"id":"u"}"#).is_err());
+        // One escalation that cannot be read is left out, with a note naming
+        // it; the rest are read.
+        let read = parse_decisions(
+            r#"[{"id":"when","state":"granted","decidedAt":"yesterday"},
+                {"id":"what","state":"weird"},
+                {"id":"rights","state":"granted","scopes":[1]},
+                7,
+                {"id":"ok","state":"denied","token":{"task":"t","rights":[],"expires":-1}},
+                {"id":"half","state":"denied","token":{"task":"t","rights":[],"expires":1.5}}]"#,
+        )
+        .unwrap();
+        let ids: Vec<&str> = read.list.iter().map(|d| d.id.as_str()).collect();
+        assert_eq!(ids, ["ok", "half"]);
+        // A door may send any number: anything but a positive whole one is
+        // no expiry.
+        assert!(
+            read.list
+                .iter()
+                .all(|d| d.token.as_ref().unwrap().expires.is_none())
+        );
+        assert_eq!(read.unread.len(), 4, "{:?}", read.unread);
+        for (note, id) in read.unread.iter().zip(["when", "what", "rights", "#4"]) {
+            assert!(note.starts_with(&format!("escalation {id}:")), "{note}");
+        }
+    }
+
+    #[test]
+    fn a_decision_made_here_stands_against_onus_clouds() {
+        let granted = request("sms", "write:path:orders/**");
+        let denied = request("sms", "write:path:auth/**");
+        let waiting = request("sms", "write:path:web/**");
+        let dir = tempfile::tempdir().unwrap();
+        let log = AuditLog::new(dir.path().join("audit.jsonl"));
+        entry(&log, "@lead", "grant", &granted.id, "granted", 2);
+        entry(&log, "@lead", "deny", &denied.id, "denied", 3);
+        entry(&log, "sms", "escalate", &waiting.id, "needs-person", 4);
+        let cloud = decisions(serde_json::json!([
+            // Less final than the door log: the log stands.
+            { "id": "uuid-1", "clientRequestId": granted.id, "state": "waiting", "task": "sms" },
+            // The same decision, with nothing to add: the log's actor and time stay.
+            { "id": "uuid-2", "clientRequestId": denied.id, "state": "denied", "task": "sms" },
+            // Decided in Onus Cloud after the door asked.
+            {
+                "id": "uuid-3", "clientRequestId": waiting.id, "state": "granted",
+                "decidedBy": "user:9", "decidedAt": 9, "task": "sms",
+                "reason": "the agent's own words", "answer": "fine",
+            },
+        ]));
+        let r = build(Inputs {
+            requests: &[granted, denied, waiting],
+            audit: Some(read_audit(log.path()).unwrap()),
+            decisions: Some(&cloud),
+            task: Some("sms"),
+            ..Inputs::new(CHANGE, 5)
+        });
+        let got: Vec<_> = r
+            .escalations
+            .iter()
+            .map(|e| {
+                (
+                    e.decision.as_str(),
+                    e.by.as_deref(),
+                    e.at,
+                    e.cloud_id.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("granted", Some("@lead"), Some(2), Some("uuid-1")),
+                ("denied", Some("@lead"), Some(3), Some("uuid-2")),
+                ("granted", Some("user:9"), Some(9), Some("uuid-3")),
+            ]
+        );
+        // The reason is the decider's, never why the agent asked.
+        assert_eq!(r.escalations[2].reason.as_deref(), Some("fine"));
+    }
+
+    #[test]
+    fn only_this_changes_escalations_and_task_are_kept() {
+        let cloud = decisions(serde_json::json!({ "escalations": [
+            { "id": "a", "state": "granted", "task": "sms", "pull": 7, "repository": "acme/shop",
+              "scopes": ["write:path:a/**"],
+              "token": { "task": "sms", "rights": [], "expires": 0 } },
+            { "id": "b", "state": "granted", "task": "sms", "pull": 8, "scopes": ["write:path:b/**"] },
+            { "id": "c", "state": "granted", "task": "sms", "repositoryFullName": "acme/web" },
+            { "id": "d", "state": "granted", "task": "other", "scopes": ["write:path:d/**"] },
+            // No pull request, but the task the one on it names.
+            { "id": "e", "state": "denied", "task": "sms" },
+            // Nothing ties it to this change.
+            { "id": "f", "state": "denied" },
+        ]}));
+        let r = build(Inputs {
+            decisions: Some(&cloud),
+            ..Inputs::new(CHANGE, 5)
+        });
+        let ids: Vec<&str> = r.escalations.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, ["a", "e"]);
+        let t = r.token.as_ref().unwrap();
+        assert_eq!(t.rights, ["write:path:a/**"]);
+        // 0 is no expiry, not the epoch.
+        assert_eq!(t.expires, None);
+        // A given inspection for another task than --task is left out.
+        let other = parse_inspection(r#"{"task":"other","rights":[]}"#).unwrap();
+        let r = build(Inputs {
+            inspection: Some(other),
+            task: Some("sms"),
+            ..Inputs::new(CHANGE, 5)
+        });
+        assert!(r.token.is_none());
+    }
+
+    #[test]
+    fn every_escalation_on_this_pull_request_is_kept_in_any_order() {
+        let one = serde_json::json!({ "id": "one", "state": "granted", "task": "one", "pull": 7,
+            "repository": "acme/shop", "token": { "task": "one", "rights": [] } });
+        let two = serde_json::json!({ "id": "two", "state": "denied", "task": "two", "pull": 7,
+            "repositoryFullName": "Acme/Shop" });
+        for list in [[&one, &two], [&two, &one]] {
+            let cloud = decisions(serde_json::json!(list));
+            let r = build(Inputs {
+                decisions: Some(&cloud),
+                ..Inputs::new(CHANGE, 5)
+            });
+            let mut ids: Vec<&str> = r.escalations.iter().map(|e| e.id.as_str()).collect();
+            ids.sort();
+            assert_eq!(ids, ["one", "two"]);
+            assert!(!r.gaps.iter().any(|g| g.field == "escalations"));
+            // Two tasks: neither inspection is the token.
+            assert!(r.token.is_none());
+        }
+    }
+
+    #[test]
+    fn a_local_change_keeps_onus_clouds_escalations() {
+        // A head commit names no repository or pull request: nothing is
+        // left out for naming them.
+        let cloud = decisions(serde_json::json!([
+            { "id": "a", "state": "granted", "task": "sms", "pull": 7, "repository": "acme/shop" },
+            { "id": "b", "state": "waiting", "task": "sms", "repositoryFullName": "acme/shop" },
+        ]));
+        let r = build(Inputs {
+            decisions: Some(&cloud),
+            ..Inputs::new("0123456789abcdef0123456789abcdef01234567", 5)
+        });
+        let ids: Vec<&str> = r.escalations.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, ["a", "b"]);
+        assert!(!r.gaps.iter().any(|g| g.field == "escalations"));
+        // A list that is all another change's is no record of this one's.
+        let other = decisions(serde_json::json!([
+            { "id": "a", "state": "granted", "pull": 8, "repository": "acme/shop" },
+        ]));
+        let r = build(Inputs {
+            decisions: Some(&other),
+            ..Inputs::new(CHANGE, 5)
+        });
+        assert!(r.escalations.is_empty());
+        let g = r.gaps.iter().find(|g| g.field == "escalations").unwrap();
+        assert!(g.reason.contains("other changes"), "{}", g.reason);
+    }
+
+    #[test]
+    fn an_unread_escalation_keeps_the_gap() {
+        let cloud = decisions(serde_json::json!([{ "id": "a", "state": "granted", "pull": 7 }]));
+        let unread = ["escalation b: unknown variant `weird`".to_string()];
+        let r = build(Inputs {
+            decisions: Some(&cloud),
+            unread: &unread,
+            ..Inputs::new(CHANGE, 5)
+        });
+        assert_eq!(r.escalations.len(), 1);
+        let g = r.gaps.iter().find(|g| g.field == "escalations").unwrap();
+        assert!(g.reason.contains("escalation b"), "{}", g.reason);
+        // A rebuild keeps the gap and why.
+        let again = build(Inputs {
+            from: Some(r.clone()),
+            ..Inputs::new(CHANGE, 6)
+        });
+        assert_eq!(
+            again.gaps.iter().find(|g| g.field == "escalations"),
+            Some(g)
+        );
+    }
+
+    #[test]
+    fn a_stored_row_waiting_past_its_expiry_has_expired() {
+        let cloud = decisions(serde_json::json!([
+            { "id": "a", "status": "waiting", "pullNumber": 7, "expiresAt": "2026-10-12T10:00:00.000Z" },
+            { "id": "b", "status": "waiting", "pullNumber": 7, "expiresAt": 4_000_000_000_u64 },
+        ]));
+        let r = build(Inputs {
+            decisions: Some(&cloud),
+            ..Inputs::new(CHANGE, 1_791_799_201)
+        });
+        let got: Vec<&str> = r.escalations.iter().map(|e| e.decision.as_str()).collect();
+        assert_eq!(got, ["expired", "needs-person"]);
+    }
+
+    #[test]
+    fn onus_clouds_list_alone_updates_the_escalations_kept() {
+        let req = request("sms", "write:path:orders/**");
+        let dir = tempfile::tempdir().unwrap();
+        let log = AuditLog::new(dir.path().join("audit.jsonl"));
+        entry(&log, "sms", "escalate", &req.id, "needs-person", 4);
+        let open = build(Inputs {
+            requests: std::slice::from_ref(&req),
+            audit: Some(read_audit(log.path()).unwrap()),
+            task: Some("sms"),
+            ..Inputs::new(CHANGE, 5)
+        });
+        assert_eq!(open.escalations.len(), 1);
+        let cloud = decisions(serde_json::json!([
+            { "id": "uuid-9", "state": "denied", "task": "sms", "pull": 7, "decidedBy": "user:1" },
+        ]));
+        let r = build(Inputs {
+            from: Some(open.clone()),
+            decisions: Some(&cloud),
+            ..Inputs::new(CHANGE, 6)
+        });
+        // The door's request stays, and Onus Cloud's own is added.
+        let got: Vec<(&str, &str)> = r
+            .escalations
+            .iter()
+            .map(|e| (e.id.as_str(), e.decision.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            [(req.id.as_str(), "needs-person"), ("uuid-9", "denied")]
+        );
+        // And a later list updates the one it added, by Onus Cloud's id.
+        let later = decisions(serde_json::json!([
+            { "id": "uuid-9", "state": "denied", "task": "sms", "decidedAt": 8 },
+        ]));
+        let r = build(Inputs {
+            from: Some(r),
+            decisions: Some(&later),
+            ..Inputs::new(CHANGE, 9)
+        });
+        assert_eq!(r.escalations.len(), 2);
+        assert_eq!(r.escalations[1].at, Some(8));
+    }
+
+    #[test]
+    fn a_refresh_keeps_a_verified_token_over_the_doors_word() {
+        let mut sub = submission();
+        sub.scope = Some(ScopeUsed {
+            task: "sms".into(),
+            rights: vec!["write:path:orders/**".into()],
+            attenuations: vec![],
+            expires: Some(50),
+            fingerprint: Some("00000000000000ab".into()),
+        });
+        let open = build(Inputs {
+            submission: Some(&sub),
+            ..Inputs::new(CHANGE, 1)
+        });
+        let cloud = decisions(serde_json::json!([{
+            "id": "a", "state": "granted", "task": "sms",
+            "token": { "task": "sms", "rights": ["write:path:x/**"], "expires": 9 },
+        }]));
+        let refreshed = build(Inputs {
+            from: Some(open.clone()),
+            decisions: Some(&cloud),
+            ..Inputs::new(CHANGE, 2)
+        });
+        assert_eq!(refreshed.token, open.token);
+        assert_eq!(refreshed.escalations[0].cloud_id.as_deref(), Some("a"));
+        // An inspection kept earlier gives way to a fresh one.
+        let inspected = build(Inputs {
+            decisions: Some(&cloud),
+            ..Inputs::new(CHANGE, 1)
+        });
+        let fresh = parse_inspection(r#"{"task":"sms","rights":["write:path:y/**"]}"#).unwrap();
+        let t = build(Inputs {
+            from: Some(inspected),
+            inspection: Some(fresh),
+            ..Inputs::new(CHANGE, 2)
+        })
+        .token
+        .unwrap();
+        assert_eq!(t.rights, ["write:path:y/**"]);
+    }
+
     #[test]
     fn doors_entries_are_the_tasks_and_chain_intact() {
         let req = request("sms", "write:path:orders/**");
@@ -1266,6 +2230,8 @@ mod tests {
             ]
         );
         assert!(r.gaps[1].reason.contains("--token/--key-public"));
+        assert!(r.gaps[1].reason.contains("--token-inspection"));
+        assert!(r.gaps[3].reason.contains("Onus Cloud"));
         assert!(r.gaps[4].reason.contains("--judge"));
         assert_eq!(r.agent.tool, "unknown");
         assert_eq!(r.rollout.result, "open");
@@ -1489,5 +2455,188 @@ mod tests {
         }
         let old: ProvenanceRecord = serde_json::from_value(json).unwrap();
         assert!(old.rollout.status.is_none() && old.rollout.stages.is_empty());
+    }
+
+    #[test]
+    fn an_escalation_naming_no_pull_request_is_not_another_changes() {
+        // Probe: one escalation of the repository with no pull request, and a
+        // change it has nothing to do with.
+        let cloud = decisions(serde_json::json!([{
+            "id": "r1", "state": "granted", "task": "sms", "pull": null, "ref": "codex/sms",
+            "repository": "acme/shop", "scopes": ["write:path:orders/**"],
+            "decidedBy": "user:1", "decidedByName": "Lead",
+            "token": { "task": "sms", "rights": ["write:path:notifications/**"] },
+        }]));
+        let r = build(Inputs {
+            decisions: Some(&cloud),
+            ..Inputs::new("acme/shop#99", 5)
+        });
+        assert!(r.escalations.is_empty());
+        assert!(r.token.is_none());
+        assert!(r.gaps.iter().any(|g| g.field == "token"));
+        let g = r.gaps.iter().find(|g| g.field == "escalations").unwrap();
+        assert!(g.reason.contains("other changes"), "{}", g.reason);
+        // Several tasks and none known: none is picked, and none is kept.
+        let several = decisions(serde_json::json!([
+            { "id": "x", "state": "granted", "task": "alpha" },
+            { "id": "y", "state": "denied", "task": "beta" },
+        ]));
+        let r = build(Inputs {
+            decisions: Some(&several),
+            ..Inputs::new(CHANGE, 5)
+        });
+        assert!(r.escalations.is_empty());
+        // The task known without Onus Cloud's list ties those of the task.
+        let r = build(Inputs {
+            decisions: Some(&several),
+            task: Some("beta"),
+            ..Inputs::new(CHANGE, 5)
+        });
+        let ids: Vec<&str> = r.escalations.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, ["y"]);
+        // On the change's branch, or at one of its commits, it is the change's.
+        let r = build(Inputs {
+            decisions: Some(&cloud),
+            branch: Some("codex/sms"),
+            ..Inputs::new("acme/shop#99", 5)
+        });
+        assert_eq!(r.escalations.len(), 1);
+        let t = r.token.as_ref().unwrap();
+        assert_eq!(
+            (t.task.as_str(), t.source),
+            ("sms", TokenSource::Inspection)
+        );
+        let mut at_commit = cloud.clone();
+        at_commit[0].reference = Some("ABC123".into());
+        let commits = ["abc123".to_string()];
+        let r = build(Inputs {
+            decisions: Some(&at_commit),
+            commits: &commits,
+            ..Inputs::new("acme/shop#99", 5)
+        });
+        assert_eq!(r.escalations.len(), 1);
+        // A commit elsewhere outweighs the branch's name.
+        let mut elsewhere = cloud.clone();
+        elsewhere[0].reference = Some("refs/heads/codex/sms".into());
+        elsewhere[0].commit = Some("def456".into());
+        let r = build(Inputs {
+            decisions: Some(&elsewhere),
+            branch: Some("codex/sms"),
+            commits: &commits,
+            ..Inputs::new("acme/shop#99", 5)
+        });
+        assert!(r.escalations.is_empty());
+        elsewhere[0].commit = Some("abc123".into());
+        let r = build(Inputs {
+            decisions: Some(&elsewhere),
+            commits: &commits,
+            ..Inputs::new("acme/shop#99", 5)
+        });
+        assert_eq!(r.escalations.len(), 1);
+        // So is one filed at the pull request's head ref.
+        let mut pull_head = cloud.clone();
+        pull_head[0].reference = Some("refs/pull/99/head".into());
+        let r = build(Inputs {
+            decisions: Some(&pull_head),
+            ..Inputs::new("acme/shop#99", 5)
+        });
+        assert_eq!(r.escalations.len(), 1);
+        // A pull record's head is one of the change's commits too.
+        let mut head = pull(Lane::Judge, None);
+        head.change = "acme/shop#99".into();
+        head.head = "abc123".into();
+        let r = build(Inputs {
+            decisions: Some(&at_commit),
+            pulls: std::slice::from_ref(&head),
+            ..Inputs::new("acme/shop#99", 5)
+        });
+        assert_eq!(r.escalations.len(), 1);
+    }
+
+    #[test]
+    fn onus_clouds_final_decision_is_recorded_when_it_differs() {
+        // Probe: the submission lists a grant that Onus Cloud denied.
+        let local = request("sms", "write:path:orders/**");
+        let mut sub = submission();
+        sub.escalations = vec![local.id.clone()];
+        let cloud = decisions(serde_json::json!([{
+            "id": "uuid-1", "clientRequestId": local.id, "state": "denied",
+            "decidedBy": "user:8", "decidedByName": "Grace", "decidedAt": 9, "answer": "no",
+        }]));
+        let r = build(Inputs {
+            submission: Some(&sub),
+            requests: std::slice::from_ref(&local),
+            decisions: Some(&cloud),
+            ..Inputs::new(CHANGE, 10)
+        });
+        let e = &r.escalations[0];
+        assert_eq!(
+            (
+                e.decision.as_str(),
+                e.by.as_deref(),
+                e.at,
+                e.reason.as_deref()
+            ),
+            ("denied", Some("Grace"), Some(9), Some("no"))
+        );
+        let g = r.gaps.iter().find(|g| g.field == "escalations").unwrap();
+        assert!(
+            g.reason.contains(&format!(
+                "escalation {} is denied in Onus Cloud but was granted",
+                local.id
+            )),
+            "{}",
+            g.reason
+        );
+    }
+
+    #[test]
+    fn notes_never_echo_what_was_given() {
+        let secret = "EpYBCisKBHRhc2sYAyIJ";
+        let read = parse_decisions(
+            &serde_json::json!([
+                { "id": "a", "state": "granted", "scopes": secret },
+                { "id": "b", "state": "granted", "token": { "task": "t", "rights": secret } },
+                { "id": "c", "state": secret },
+                { "id": "d", "state": "granted", "decidedAt": secret },
+                { "id": "e", "state": "granted", "scopes": format!("{secret}, expected {secret}") },
+                { "id": secret.repeat(4), "state": "granted", "scopes": 1 },
+                { "id": "f" },
+            ])
+            .to_string(),
+        )
+        .unwrap();
+        assert!(read.list.is_empty());
+        let notes = read.unread.join("\n");
+        assert!(!notes.contains(secret), "{notes}");
+        assert_eq!(
+            read.unread,
+            [
+                "escalation a: `scopes` cannot be read (expected a sequence)",
+                "escalation b: `token` cannot be read (expected a sequence)",
+                "escalation c: `state` cannot be read (expected one of `assessing`, `waiting`, `granted`, `denied`, `resolved`, `withdrawn`, `expired`, `failed`)",
+                "escalation d: a time is neither Unix seconds nor an RFC 3339 date in UTC",
+                "escalation e: `scopes` cannot be read (expected a sequence)",
+                "escalation #6: `scopes` cannot be read (expected a sequence)",
+                "escalation f: missing field `state`",
+            ]
+        );
+        let err = parse_inspection(&format!(r#"{{"task":"t","rights":"{secret}"}}"#)).unwrap_err();
+        assert!(!err.to_string().contains(secret), "{err}");
+        assert!(err.to_string().contains("`rights`"), "{err}");
+    }
+
+    #[test]
+    fn an_inspection_that_could_not_be_read_is_named_in_the_token_gap() {
+        let r = build(Inputs {
+            inspection_unread: Some("token.json is not a token inspection"),
+            ..Inputs::new(CHANGE, 1)
+        });
+        let g = r.gaps.iter().find(|g| g.field == "token").unwrap();
+        assert!(
+            g.reason.contains("could not be read: token.json"),
+            "{}",
+            g.reason
+        );
     }
 }

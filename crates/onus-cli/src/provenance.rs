@@ -5,10 +5,12 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
-use onus_core::provenance::{IntentSource, ProvenanceRecord, SCHEMA, Token, TokenSource};
+use onus_core::provenance::{
+    IntentSource, ProvenanceRecord, SCHEMA, Token, TokenInspection, TokenSource,
+};
 use onus_lanes::classify::Classification;
 use onus_lanes::judge::Judgment;
-use onus_lanes::provenance::{self, Inputs};
+use onus_lanes::provenance::{self, CloudEscalations, Inputs};
 use onus_lanes::submission::Submission;
 use onus_lanes::{outcomes, pulls, signals};
 
@@ -52,11 +54,16 @@ pub struct ProvenanceArgs {
     /// The root public key that verifies --token.
     #[arg(long, value_name = "FILE")]
     key_public: Option<PathBuf>,
+    /// The door's inspection of the task token ({task, rights, expires}, as Onus Cloud
+    /// keeps it or `onus token inspect` prints it); never the token.
+    #[arg(long, value_name = "FILE")]
+    token_inspection: Option<PathBuf>,
     /// The door log (audit.jsonl); its hash chain is checked.
     #[arg(long, value_name = "FILE")]
     audit: Option<PathBuf>,
-    /// Where escalation requests are kept.
-    #[arg(long, value_name = "DIR")]
+    /// Escalations: a folder of requests (.onus/escalations), or a JSON file of the
+    /// decisions Onus Cloud keeps (schemas/escalation-decisions.schema.json).
+    #[arg(long, value_name = "PATH")]
     escalations: Option<PathBuf>,
     /// The task whose door decisions to include (default: the token's or submission's task).
     #[arg(long)]
@@ -113,6 +120,53 @@ fn requests_in(dir: &Path) -> Result<Vec<onus_doors::escalation::Request>> {
         .collect();
     paths.sort();
     paths.iter().map(|p| doors::load_request(p)).collect()
+}
+
+/// The change's commits, base excluded, for joining Onus Cloud's
+/// escalations to it; none when git cannot list them here.
+pub(crate) fn change_commits(repo: &Path, base: &str, head: &str) -> Vec<String> {
+    if base.is_empty() || head.is_empty() {
+        return Vec::new();
+    }
+    crate::lanes::git_lines(
+        repo,
+        &["rev-list", "--max-count=5000", &format!("{base}..{head}")],
+    )
+    .unwrap_or_default()
+}
+
+/// Escalations as Onus Cloud keeps them, from a file (never a folder). Each
+/// one that cannot be read is warned about, and left out.
+pub(crate) fn decisions_at(path: &Path) -> Result<CloudEscalations> {
+    if path.is_dir() {
+        bail!(
+            "{} is a folder: give a file of escalations as Onus Cloud keeps them (schemas/escalation-decisions.schema.json)",
+            path.display()
+        );
+    }
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
+    let read = provenance::parse_decisions(&text).with_context(|| {
+        format!(
+            "{} is not escalations as Onus Cloud keeps them (schemas/escalation-decisions.schema.json)",
+            path.display()
+        )
+    })?;
+    for note in &read.unread {
+        eprintln!(
+            "warning: {}: {note}; it is left out, and escalations are a gap",
+            path.display()
+        );
+    }
+    Ok(read)
+}
+
+/// The door's inspection of a task token, from a file.
+pub(crate) fn inspection_at(path: &Path) -> Result<TokenInspection> {
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
+    provenance::parse_inspection(&text)
+        .with_context(|| format!("{} is not a token inspection", path.display()))
 }
 
 fn verify(path: &Path) -> Result<i32> {
@@ -243,14 +297,49 @@ pub fn run(args: ProvenanceArgs) -> Result<i32> {
         Some(f) => Some(provenance::read_audit(f)?),
         None => None,
     };
-    let requests = match args
-        .escalations
-        .clone()
-        .or_else(|| kept.as_ref().map(|k| k.escalations.clone()))
-    {
-        Some(dir) => requests_in(&dir)?,
+    // A folder of requests, or Onus Cloud's decisions in a file, read with
+    // the requests kept beside a submission. The kept folder may not exist
+    // yet: it is made when a request is filed.
+    let kept_requests = || match &kept {
+        Some(k) => requests_in(&k.escalations),
+        None => Ok(Vec::new()),
+    };
+    let (requests, decisions) = match &args.escalations {
+        Some(dir) if dir.is_dir() => (requests_in(dir)?, None),
+        Some(file) => (kept_requests()?, Some(decisions_at(file)?)),
+        None => (kept_requests()?, None),
+    };
+    // Onus Cloud's escalations that name no pull request are joined by the
+    // commits they were filed at.
+    let commits = match &decisions {
+        Some(_) => {
+            let pull = pulls::latest(&pulls, &change);
+            let (base, head) = pull
+                .map(|p| (p.base.clone(), p.head.clone()))
+                .or_else(|| {
+                    submission
+                        .as_ref()
+                        .map(|s| (s.base.clone(), s.head.clone()))
+                })
+                .or_else(|| {
+                    from.as_ref()
+                        .map(|f| (f.commits.base.clone(), f.commits.head.clone()))
+                })
+                .unwrap_or_default();
+            change_commits(&args.repo, &base, &head)
+        }
         None => Vec::new(),
     };
+    let inspection = args
+        .token_inspection
+        .as_deref()
+        .map(inspection_at)
+        .transpose()?;
+    if let (Some(t), Some(task)) = (&inspection, &args.task)
+        && t.task != *task
+    {
+        bail!("the token inspection is for task {}, not {task}", t.task);
+    }
     let record = provenance::build(Inputs {
         from,
         submission: submission.as_ref(),
@@ -264,6 +353,10 @@ pub fn run(args: ProvenanceArgs) -> Result<i32> {
         token,
         audit,
         requests: &requests,
+        decisions: decisions.as_ref().map(|d| d.list.as_slice()),
+        unread: decisions.as_ref().map_or(&[], |d| d.unread.as_slice()),
+        inspection,
+        commits: &commits,
         task: args.task.as_deref(),
         ..Inputs::new(&change, onus_doors::gateway::now())
     });

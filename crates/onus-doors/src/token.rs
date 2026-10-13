@@ -280,8 +280,9 @@ pub fn verify(token: &str, root: &PublicKey) -> Result<Verified> {
     })
 }
 
-/// `2026-10-08T19:00:00Z` → Unix seconds (UTC, as Biscuit prints dates).
-fn parse_rfc3339(s: &str) -> Option<u64> {
+/// `2026-10-08T19:00:00Z` → Unix seconds (UTC, as Biscuit prints dates);
+/// None for anything else.
+pub fn parse_rfc3339(s: &str) -> Option<u64> {
     let s = s.strip_suffix('Z').or_else(|| s.strip_suffix("+00:00"))?;
     let (date, time) = s.split_once('T')?;
     let d: Vec<i64> = date
@@ -292,7 +293,23 @@ fn parse_rfc3339(s: &str) -> Option<u64> {
         .split(':')
         .map(|p| p.split('.').next().unwrap_or(p).parse().ok())
         .collect::<Option<_>>()?;
-    let (y, m, day) = (d[0], d[1], d[2]);
+    let (&[y, m, day], 2..=3) = (d.as_slice(), t.len()) else {
+        return None;
+    };
+    // A date that does not exist is none, never another day.
+    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+    let month_days = match m {
+        2 if leap => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    let fits = (0..=23).contains(&t[0])
+        && (0..=59).contains(&t[1])
+        && t.get(2).is_none_or(|s| (0..=60).contains(s));
+    if !(1..=12).contains(&m) || !(1..=month_days).contains(&day) || !fits {
+        return None;
+    }
     // Days from civil (Howard Hinnant's algorithm).
     let y = if m <= 2 { y - 1 } else { y };
     let era = y.div_euclid(400);
@@ -552,5 +569,30 @@ mod tests {
             .to_base64()
             .unwrap();
         assert_eq!(verify(&forged, &root.public()).unwrap().escalation, None);
+    }
+
+    #[test]
+    fn only_real_dates_are_read() {
+        assert_eq!(parse_rfc3339("2026-10-12T10:00:00Z"), Some(1_791_799_200));
+        assert_eq!(
+            parse_rfc3339("2026-10-12T10:00:00.250+00:00"),
+            Some(1_791_799_200)
+        );
+        assert_eq!(parse_rfc3339("2026-10-12T10:00Z"), Some(1_791_799_200));
+        assert_eq!(parse_rfc3339("2024-02-29T00:00:00Z"), Some(1_709_164_800));
+        for bad in [
+            "2026-13-45T99:99Z",
+            "2026-02-29T00:00:00Z",
+            "2026-04-31T00:00:00Z",
+            "2026-10-00T00:00:00Z",
+            "2026-10-12T24:00:00Z",
+            "2026-10-12T10:60:00Z",
+            "2026-10-12T10:00:61Z",
+            "2026-10-12T10Z",
+            "2026-10-12T10:00:00:00Z",
+            "2026-10-12T10:00:00+02:00",
+        ] {
+            assert_eq!(parse_rfc3339(bad), None, "{bad}");
+        }
     }
 }

@@ -401,8 +401,15 @@
             "null"
           ]
         },
+        "cloudId": {
+          "description": "Onus Cloud's id for it, when it was filed there.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "decision": {
-          "description": "`granted`, `denied`, `needs-person`, `answered` or `open`.",
+          "description": "`granted`, `denied`, `needs-person`, `answered` or `open`; from Onus\nCloud also `withdrawn`, `expired` or `failed`.",
           "type": "string"
         },
         "id": {
@@ -416,6 +423,7 @@
           ]
         },
         "reason": {
+          "description": "Why it was decided so: the door log's reason, or Onus Cloud's\n`answer`. Never why the agent asked.",
           "type": [
             "string",
             "null"
@@ -1230,6 +1238,11 @@
           "description": "The door log's `mint` entry for the task, widened by its grants.",
           "type": "string",
           "const": "audit"
+        },
+        {
+          "description": "The door's inspection of the token (`--token-inspection`, or the one\nOnus Cloud keeps with an escalation), widened by the escalations\ngranted to the task. What the door said it held: this run did not\nverify it.",
+          "type": "string",
+          "const": "inspection"
         }
       ]
     },

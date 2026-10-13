@@ -176,6 +176,145 @@ pub enum TokenSource {
     Submission,
     /// The door log's `mint` entry for the task, widened by its grants.
     Audit,
+    /// The door's inspection of the token (`--token-inspection`, or the one
+    /// Onus Cloud keeps with an escalation), widened by the escalations
+    /// granted to the task. What the door said it held: this run did not
+    /// verify it.
+    Inspection,
+}
+
+/// What a door says its task token holds: never the token itself. The door
+/// sends one with each escalation it files in Onus Cloud, and `onus token
+/// inspect` prints one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenInspection {
+    pub task: String,
+    /// The token's rights (`write:path:…`).
+    #[serde(default)]
+    pub rights: Vec<String>,
+    /// Attenuations, as Datalog.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attenuations: Vec<String>,
+    /// Unix seconds. 0, as `onus token inspect` prints it, is none, and so
+    /// is a negative or fractional number.
+    #[serde(
+        default,
+        deserialize_with = "seconds_or_none",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "Option<f64>")]
+    pub expires: Option<u64>,
+}
+
+/// A time in Unix seconds, read leniently: a door may send any number, and
+/// anything but a positive whole number is no time.
+fn seconds_or_none<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
+    let n = Option::<serde_json::Number>::deserialize(d)?;
+    Ok(n.and_then(|n| n.as_u64()).filter(|&n| n > 0))
+}
+
+/// One escalation as Onus Cloud keeps it, with its decision: the input of
+/// `onus provenance --escalations FILE` and `onus ci pr --escalations FILE`,
+/// which take a JSON array of these.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct EscalationDecision {
+    /// Onus Cloud's id for it.
+    pub id: String,
+    /// The door's own request id (`.onus/escalations/<id>.json`), which a
+    /// submission lists once it is granted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_request_id: Option<String>,
+    /// The request id `onus escalation assess` gave it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    /// `permission`, `broken-test`, `contradictory-spec` or `impossible-task`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
+    /// The repository (`owner/repo`); one for another repository is left out.
+    #[serde(
+        default,
+        alias = "repositoryFullName",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub repository: Option<String>,
+    /// The pull request number; one for another pull request is left out.
+    #[serde(default, alias = "pullNumber", skip_serializing_if = "Option::is_none")]
+    pub pull: Option<u64>,
+    /// What the door filed it at: the commit it had pushed, a branch, or
+    /// `refs/pull/<n>/head`. With no pull request, it ties the escalation
+    /// to the change whose commit, branch or pull request it names.
+    #[serde(default, rename = "ref", skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
+    /// The commit Onus Cloud resolved `ref` to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    /// The rights asked for.
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    #[serde(alias = "status")]
+    pub state: CloudState,
+    /// The strongest evidence grade (1 is strongest).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub best_grade: Option<u8>,
+    /// `system:policy` for an automatic grant, else the person (`user:<id>`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decided_by: Option<String>,
+    /// The person's name, shown instead of `decidedBy`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decided_by_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decided_at: Option<Moment>,
+    /// When a waiting escalation expires: a stored row past it is
+    /// `expired`, as Onus Cloud shows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<Moment>,
+    /// Why the agent asked. Read, but not kept: the record's `reason` is
+    /// the decider's, from `answer`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Why it was decided so: a denial's reason, or the answer to a blocked
+    /// report. The record keeps it as `reason`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer: Option<String>,
+    /// The door's inspection of the task token it filed under; never the
+    /// token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<TokenInspection>,
+}
+
+/// Where an escalation is in Onus Cloud.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum CloudState {
+    /// Being checked.
+    Assessing,
+    /// Waiting for a person.
+    Waiting,
+    Granted,
+    Denied,
+    /// A blocked report a person answered.
+    Resolved,
+    Withdrawn,
+    Expired,
+    Failed,
+}
+
+/// A time: Unix seconds, or an RFC 3339 date in UTC
+/// (`2026-10-12T10:00:00Z`, `Z` or `+00:00`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum Moment {
+    Seconds(u64),
+    Date(
+        #[schemars(regex(
+            pattern = r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|\+00:00)$"
+        ))]
+        String,
+    ),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -205,7 +344,8 @@ pub struct Escalation {
     /// The strongest evidence grade (1 is strongest).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub best_grade: Option<u8>,
-    /// `granted`, `denied`, `needs-person`, `answered` or `open`.
+    /// `granted`, `denied`, `needs-person`, `answered` or `open`; from Onus
+    /// Cloud also `withdrawn`, `expired` or `failed`.
     pub decision: String,
     /// Who decided: a person, or `policy` for an automatic grant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -213,8 +353,13 @@ pub struct Escalation {
     /// Unix seconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at: Option<u64>,
+    /// Why it was decided so: the door log's reason, or Onus Cloud's
+    /// `answer`. Never why the agent asked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// Onus Cloud's id for it, when it was filed there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

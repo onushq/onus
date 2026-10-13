@@ -8,8 +8,25 @@ use crate::held_out::HeldOutSuite;
 use crate::map::CodebaseMap;
 use crate::plugins::PluginsFile;
 use crate::protocol::PluginProtocol;
-use crate::provenance::ProvenanceRecord;
+use crate::provenance::{EscalationDecision, ProvenanceRecord};
 use crate::signal::{ProductionSignal, RolloutMetrics};
+
+/// The input of `--escalations FILE`: a JSON array, titled as the format it
+/// is rather than as the generator names a list.
+fn escalation_decisions() -> schemars::Schema {
+    let mut s = schema_for!(Vec<EscalationDecision>);
+    s.insert("title".into(), "EscalationDecisions".into());
+    s.insert(
+        "description".into(),
+        "Escalations as Onus Cloud keeps them, with their decisions: the input of \
+         `onus provenance --escalations FILE` and `onus ci pr --escalations FILE`. \
+         Also read: the API's `{\"escalations\": [...]}`, a stored row's `status` \
+         (for `state`) and `input: {scopes, reason}`, and a view's nested \
+         `decision: {by: {id, name}, at, answer}`."
+            .into(),
+    );
+    s
+}
 
 /// `(file name, pretty JSON)` for every published schema, in a fixed order.
 pub fn all_schemas() -> Vec<(&'static str, String)> {
@@ -37,6 +54,10 @@ pub fn all_schemas() -> Vec<(&'static str, String)> {
         (
             "provenance.schema.json",
             serde_json::to_string_pretty(&schema_for!(ProvenanceRecord)),
+        ),
+        (
+            "escalation-decisions.schema.json",
+            serde_json::to_string_pretty(&escalation_decisions()),
         ),
         (
             "production-signal.schema.json",

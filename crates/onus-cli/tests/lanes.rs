@@ -770,8 +770,13 @@ fn a_local_change_has_its_token_escalations_and_doors_on_record() {
     // The same from what onus ui and onus mcp keep in .onus.
     let dot = r.join(".onus");
     std::fs::create_dir_all(dot.join("submissions")).unwrap();
-    std::fs::create_dir_all(dot.join("escalations")).unwrap();
     std::fs::copy(&sub, dot.join("submissions/4fa91c.json")).unwrap();
+    // No escalations folder yet: it is made when a request is filed.
+    let (code, text, err) = onus(r, &["provenance", "--submission-id", "4fa91c"]);
+    assert_eq!(code, 0, "{err}");
+    let bare: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(bare["escalations"][0]["decision"], "granted", "{bare}");
+    std::fs::create_dir_all(dot.join("escalations")).unwrap();
     std::fs::copy(&audit, dot.join("audit.jsonl")).unwrap();
     std::fs::copy(&file, dot.join(format!("escalations/{id}.json"))).unwrap();
     let (code, text, err) = onus(r, &["provenance", "--submission-id", "4fa91c"]);
@@ -780,6 +785,39 @@ fn a_local_change_has_its_token_escalations_and_doors_on_record() {
     for field in ["token", "escalations", "doors", "change"] {
         assert_eq!(kept[field], p[field], "{field}");
     }
+    // With Onus Cloud's decisions in a file, the kept requests are still
+    // read: what Onus Cloud's list leaves out comes from them.
+    let cloud = out(r, "cloud.json");
+    std::fs::write(
+        &cloud,
+        serde_json::json!([{
+            "id": "6f0c1a8e-0000-4000-8000-000000000001", "clientRequestId": id,
+            "state": "granted", "decidedBy": "user:7", "decidedByName": "@lead",
+        }])
+        .to_string(),
+    )
+    .unwrap();
+    let (code, text, err) = onus(
+        r,
+        &[
+            "provenance",
+            "--submission-id",
+            "4fa91c",
+            "--escalations",
+            &cloud,
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    let joined: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let e = &joined["escalations"][0];
+    assert_eq!(
+        e["cloudId"], "6f0c1a8e-0000-4000-8000-000000000001",
+        "{joined}"
+    );
+    for field in ["id", "kind", "scopes", "bestGrade", "decision", "by"] {
+        assert_eq!(e[field], p["escalations"][0][field], "{field}");
+    }
+    assert!(!p["escalations"][0]["scopes"].as_array().unwrap().is_empty());
 
     // A token that does not verify is an error, not a gap.
     let (code, _, err) = onus(

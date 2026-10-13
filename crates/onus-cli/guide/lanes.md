@@ -241,18 +241,33 @@ Every change carries one record of why it was allowed through: the intent, the a
     onus provenance --change acme/shop#7 --records rec --from out/provenance.json --out p.json
     onus provenance --submission-id 4fa91c        # a submission kept by onus ui or onus mcp
     onus provenance --submission sub.json --audit audit.jsonl --escalations escalations --task sms
+    onus provenance --change acme/shop#7 --records rec --escalations cloud.json --token-inspection token.json
     onus provenance --verify p.json
 
 `--from` is an earlier record of the change. Its facts from while the change was open (intent, report, token, evidence, escalations, lane reasons, judge, doors) are kept unless fresh ones are given. The stage, merge commit, approver and rollout are worked out again from the records every time. `--submission-id` reads `.onus/submissions/<id>.json`, its judgment, and the repository's `.onus` audit log, escalations and outcomes.
+
+A change made through Onus Cloud has no submission or door log in CI. Onus Cloud keeps its escalations instead, each with the door's inspection of the task token. `--escalations FILE` (also on `onus ci pr`) takes them as a JSON array (`schemas/escalation-decisions.schema.json`): `id`, `kind`, `scopes`, `state`, `decidedBy`, `decidedAt` (Unix seconds or an RFC 3339 date in UTC), `reason` or `answer`, `repository`, `pull`, `ref`, `commit`, and `token: {task, rights, expires}`. The API's `{"escalations": [...]}` with a nested `decision` is read too, and so is a stored row (`status`, `pullNumber`, `input`). Pass the API's views where you can: a stored row still `waiting` past its `expiresAt` is recorded as `expired`, as the view shows it.
+
+Which escalations are this change's:
+
+- For a pull request (`owner/repo#n`), those for another repository or pull request are left out. The repository is matched ignoring case.
+- An escalation that names the change is kept whatever its task. It names the change when it is on the pull request, the submission lists it, an earlier record (`--from`) kept it, or its `ref` or `commit` is one of the change's commits, its branch (`ci pr --branch`) or `refs/pull/<n>/head`. A `commit` elsewhere outweighs the branch's name, since a branch name may be used again. `ci pr` lists the change's commits with git; `onus provenance` does so in `--repo` when it holds them.
+- One that does not name the change is kept only for the change's task. With no task, it is left out.
+- The change's task is `--task`, the token's, the submission's, the inspection's or the earlier record's. Else it is the one task the escalations that name the change name. When they name several, none is picked. An escalation that does not name the change never says its task, so it never brings its token into the record.
+- For a local change (a head commit), the repository and pull request are not checked. Those of the change's task are kept, or all of them when the task is not known.
+
+An escalation that cannot be read (an unknown `state`, a value of the wrong type, a time that is not one) is left out with a warning, and `escalations` stays a gap that names it. The note names the field and what it should be, never the value given, so a token pasted into the wrong field never reaches the record. A list whose escalations are all for other changes is a gap too. An `expires` that is not a positive whole number is no expiry. `onus ci pr` never stops for this input: a file it cannot read is a warning and a gap. Only a token given instead of its inspection is refused, before anything is written. An inspection `onus ci pr` cannot read is named in the `token` gap. `onus provenance` fails on a file it cannot read, a missing one included.
+
+`--token-inspection FILE` takes the door's inspection of the token on its own (`{task, rights, expires}`, as `onus token inspect` prints it; an `expires` of 0 is no expiry). With `--task`, it must be for that task. Without the file, the first escalation of the task that kept an inspection gives it. Either way the rights are widened by the scopes Onus Cloud granted to the task. Those are what Onus Cloud granted, not what the door minted again: the agent may never have taken up a grant. `onus provenance --escalations` given a folder reads the escalation requests kept there, as before. Given a file with `--submission-id`, it also reads the requests kept in `.onus/escalations`, so what Onus Cloud's list leaves out (kind, scopes, grade) comes from them. On a rebuild with `--from` where Onus Cloud's list is the only fresh input, it updates the escalations kept earlier, so those only the door knew stay.
 
 | Field | What it holds |
 |---|---|
 | `stage` | `open`, `merged` or `closed`. |
 | `intent` | Where the intent came from (`pull-request` or `submission`), its sha256, and the report's intent check. |
 | `agent` | The agent setup, how it was recognised (`trailer`, `branch`, `bot`, `co-author`, `person`, `submission`), and its track record (`merged`, `recentIncidents`, `recentRollbacks`). |
-| `token` | The task, rights, attenuations, expiry and a 16-digit fingerprint. Never the token itself. `source` says where it came from: `token` (verified by this run), `submission` (verified when the submission was made) or `audit` (the door log's `mint` entry, widened by grants). |
+| `token` | The task, rights, attenuations, expiry and a 16-digit fingerprint. Never the token itself. `source` says where it came from: `token` (verified by this run), `submission` (verified when the submission was made), `audit` (the door log's `mint` entry, widened by grants) or `inspection` (the door's inspection, from `--token-inspection` or kept by Onus Cloud with an escalation, widened by the grants there; not verified by the run). The first of these that is given wins, in that order. On a rebuild with `--from`, a kept token verified by a run or a submission comes before an inspection. |
 | `evidence` | Each test run: command, commit, image, exit code, manifest, and whether it ran at the head commit. |
-| `escalations` | Each request: kind, scopes, best evidence grade, and the last decision in the door log, by whom (`policy` for an automatic grant). |
+| `escalations` | Each request: kind, scopes, best evidence grade, and the last decision in the door log, by whom (`policy` for an automatic grant). A decision Onus Cloud kept, with Onus Cloud's id as `cloudId`: `granted`, `denied`, `needs-person` (waiting), `answered` (a blocked report a person answered), `open` (being checked), `withdrawn`, `expired` or `failed`. It replaces an open or waiting one, and a final decision from the submission or the door log stands against one Onus Cloud has not made yet. When both are final and differ, Onus Cloud's is recorded, since it decided, and the `escalations` gap names the disagreement. `reason` is the decider's (the door log's reason, or Onus Cloud's `answer`), never why the agent asked. |
 | `lane`, `judge` | The final lane, every rule that applied, the lane policy's hash, and the judge's verdict, steps and reasons. |
 | `approval` | Who or what approved it (below), the people, the rows they approved, and who merged it. |
 | `rollout` | The result now, the merge commit and time, whether a person audited it, and every outcome in order. From production: `status` (`pending`, `not-shipped`, `awaiting-deploy`, `in-progress`, `holding`, `complete`, `rolled-back` or `reverted`), the `percent` of traffic last reported, the `plan`, every deploy and rollout stage (`stages`) and the other signals tied to it (`signals`). `onus help production` has the rules. |
@@ -273,7 +288,7 @@ Who or what approved it:
 
 `approval.people` lists the people who approved rows, the approving reviewers, then who merged it (`onus ci closed --merged-by`), each once. When a person approved and none is known, `gaps` says so.
 
-A gap is listed for each of `intent`, `token`, `evidence`, `escalations`, `judge` and `doors` that is empty. In CI no task token reaches the run, so `token` is a gap there.
+A gap is listed for each of `intent`, `token`, `evidence`, `escalations`, `judge` and `doors` that is empty. In CI no task token reaches the run, so `token` is a gap there unless Onus Cloud passes the door's inspection. An escalations list from Onus Cloud is on record even when it is empty, so it is not a gap. No door log reaches a hosted run, so `doors` stays a gap there.
 
 `digest` is the sha256 of the record's compact JSON with the digest left empty. `--verify` checks it and the schema version, and exits 1 when either does not match. The format is `schemas/provenance.schema.json`; new optional fields may be added under `schema: 1`.
 

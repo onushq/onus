@@ -638,6 +638,386 @@ fn records_written_after_the_fact_keep_their_time() {
 }
 
 #[test]
+fn escalations_and_the_token_onus_cloud_kept_reach_the_provenance() {
+    let tmp = tempfile::tempdir().unwrap();
+    let t = tmp.path();
+    let r = t.join("shop");
+    copy_dir(&fixture().join("base"), &r);
+    git(&r, &["init", "-q", "-b", "main"]);
+    git(&r, &["add", "-A"]);
+    git(&r, &["commit", "-q", "-m", "base"]);
+    git(&r, &["checkout", "-q", "-b", "codex/sms"]);
+    apply_overlay(&fixture().join("scenarios/s1-sms-alerts"), &r);
+    git(&r, &["add", "-A"]);
+    git(&r, &["commit", "-q", "-m", "Text customers"]);
+    let rec = t.join("records");
+    let rs = rec.to_str().unwrap();
+    let out = t.join("out");
+    let change = "acme/shop#9";
+    let (main, pushed) = (
+        git(&r, &["rev-parse", "main"]).trim().to_string(),
+        git(&r, &["rev-parse", "codex/sms"]).trim().to_string(),
+    );
+    // What Onus Cloud keeps for the pull request: its agent's escalations,
+    // each with the door's inspection of the task token, and the decisions.
+    // As the API lists them: a view with the decision nested, and a stored
+    // row with `status` and what was sent under `input`.
+    let escalations = t.join("escalations.json");
+    std::fs::write(
+        &escalations,
+        serde_json::json!({ "escalations": [
+            {
+                "id": "6f0c1a8e-0000-4000-8000-000000000001",
+                "clientRequestId": "a1b2c3d4e5f60718",
+                "kind": "permission",
+                "repository": "acme/shop",
+                "pull": 9,
+                "task": "sms",
+                "scopes": ["write:path:services/orders/**"],
+                "state": "granted",
+                "reason": "orders must say when a parcel ships",
+                "token": {
+                    "task": "sms",
+                    "rights": ["write:path:services/notifications/**"],
+                    "expires": 1791810000
+                },
+                "decision": {
+                    "by": { "id": "user:7", "name": "@lead" },
+                    "at": "2026-10-12T10:00:00.000Z",
+                    "answer": null
+                }
+            },
+            {
+                "id": "6f0c1a8e-0000-4000-8000-000000000002",
+                "kind": "broken-test",
+                "task": "sms",
+                "pullNumber": 9,
+                "status": "resolved",
+                "input": { "scopes": [], "reason": "this test fails on main", "evidence": [] },
+                "decidedBy": "user:7",
+                "decidedByName": "@lead",
+                "decidedAt": 1791800000,
+                "answer": "that test is flaky; leave it"
+            },
+            {
+                "id": "6f0c1a8e-0000-4000-8000-000000000003",
+                "kind": "permission",
+                "task": "sms",
+                "pull": 10,
+                "scopes": ["write:path:**"],
+                "state": "granted",
+                "decidedBy": "system:policy"
+            },
+            // Filed with no pull request, at a commit of this one: it is
+            // this change's.
+            {
+                "id": "6f0c1a8e-0000-4000-8000-000000000004",
+                "kind": "permission",
+                "task": "sms",
+                "pull": null,
+                "ref": pushed,
+                "scopes": ["write:path:services/auth/**"],
+                "state": "denied",
+                "decision": { "by": { "id": "user:7", "name": "@lead" }, "at": 1791800100, "answer": "not here" }
+            },
+            // Filed with no pull request at another commit, for another
+            // task: another change's, whose token never reaches this one.
+            {
+                "id": "6f0c1a8e-0000-4000-8000-000000000005",
+                "kind": "permission",
+                "task": "deploy",
+                "ref": main,
+                "scopes": ["write:path:**"],
+                "state": "granted",
+                "decidedBy": "system:policy",
+                "token": { "task": "deploy", "rights": ["write:path:**"], "expires": 1791810000 }
+            }
+        ]})
+        .to_string(),
+    )
+    .unwrap();
+    let pr_to = |out: &Path, rec: &Path, extra: &[&str]| {
+        let mut args = vec![
+            "ci",
+            "pr",
+            "--base",
+            "main",
+            "--head",
+            "codex/sms",
+            "--change",
+            change,
+            "--branch",
+            "codex/sms",
+            "--records",
+            rec.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ];
+        args.extend_from_slice(extra);
+        Command::new(env!("CARGO_BIN_EXE_onus"))
+            .current_dir(&r)
+            .args(&args)
+            .output()
+            .unwrap()
+    };
+    let pr = |extra: &[&str]| pr_to(&out, &rec, extra);
+    // A token is never taken in place of its inspection, and the run stops
+    // before it writes anything.
+    let raw = t.join("raw-token");
+    std::fs::write(&raw, "EpYBCisKBHRhc2sYAyIJCgcIChIDGIAIMhcK\n").unwrap();
+    let refused = pr(&["--token-inspection", raw.to_str().unwrap()]);
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("never the token"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(!out.exists() && !rec.exists());
+    // Nor inside an escalation.
+    let holds = t.join("holds-a-token.json");
+    std::fs::write(
+        &holds,
+        r#"[{"id":"u","state":"waiting","token":"EpYBCisKBHRhc2sYAyIJ"}]"#,
+    )
+    .unwrap();
+    let refused = pr(&["--escalations", holds.to_str().unwrap()]);
+    assert!(!refused.status.success());
+    let err = String::from_utf8_lossy(&refused.stderr);
+    assert!(err.contains("never the token"), "{err}");
+    assert!(!out.exists() && !rec.exists());
+
+    // Anything else that cannot be read never stops the lane: an
+    // escalation Onus Cloud kept in a shape the binary does not read, a
+    // folder in place of the file, or an inspection that is not one. Each
+    // is warned about, left out, and escalations are a gap.
+    let odd = t.join("odd.json");
+    std::fs::write(
+        &odd,
+        serde_json::json!([
+            { "id": "bad-scopes", "state": "granted", "pull": 9, "scopes": [1] },
+            { "id": "bad-state", "state": "weird", "pull": 9 },
+            { "id": "ok", "state": "denied", "pull": 9, "task": "sms",
+              "token": { "task": "sms", "rights": [], "expires": -1 } },
+        ])
+        .to_string(),
+    )
+    .unwrap();
+    let not_inspection = t.join("not-inspection.json");
+    std::fs::write(&not_inspection, r#"{"rights": 5}"#).unwrap();
+    for (n, bad) in [&odd, &r].into_iter().enumerate() {
+        let (o, k) = (
+            t.join(format!("odd-out-{n}")),
+            t.join(format!("odd-rec-{n}")),
+        );
+        let run = pr_to(
+            &o,
+            &k,
+            &[
+                "--escalations",
+                bad.to_str().unwrap(),
+                "--token-inspection",
+                not_inspection.to_str().unwrap(),
+            ],
+        );
+        let err = String::from_utf8_lossy(&run.stderr);
+        assert!(run.status.success(), "{err}");
+        assert!(err.contains("warning:"), "{err}");
+        let p: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(o.join("provenance.json")).unwrap())
+                .unwrap();
+        let gap = p["gaps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|g| g["field"] == "escalations")
+            .unwrap_or_else(|| panic!("{p}"));
+        assert!(o.join("classification.json").exists());
+        if n == 0 {
+            assert!(
+                gap["reason"].as_str().unwrap().contains("bad-scopes"),
+                "{gap}"
+            );
+            assert!(
+                gap["reason"].as_str().unwrap().contains("bad-state"),
+                "{gap}"
+            );
+            assert_eq!(p["escalations"][0]["id"], "ok", "{p}");
+            assert_eq!(p["escalations"].as_array().unwrap().len(), 1, "{p}");
+            // The inspection kept with it, whose expiry is no time.
+            assert!(p["token"].get("expires").is_none(), "{p}");
+        } else {
+            assert!(
+                gap["reason"].as_str().unwrap().contains("is a folder"),
+                "{gap}"
+            );
+            // The token gap says the inspection given could not be read,
+            // naming the field, never its value.
+            let token_gap = p["gaps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|g| g["field"] == "token")
+                .unwrap_or_else(|| panic!("{p}"));
+            let why = token_gap["reason"].as_str().unwrap();
+            assert!(why.contains("could not be read"), "{why}");
+            assert!(why.contains("`rights`"), "{why}");
+        }
+    }
+
+    let done = pr(&["--escalations", escalations.to_str().unwrap()]);
+    assert!(
+        done.status.success(),
+        "{}",
+        String::from_utf8_lossy(&done.stderr)
+    );
+    let open: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(out.join("provenance.json")).unwrap())
+            .unwrap();
+    // The token the agent held, as its door inspected it, widened by the
+    // grant.
+    let token = &open["token"];
+    assert_eq!(token["source"], "inspection", "{open}");
+    assert_eq!(token["task"], "sms");
+    assert_eq!(
+        token["rights"],
+        serde_json::json!([
+            "write:path:services/notifications/**",
+            "write:path:services/orders/**"
+        ])
+    );
+    assert_eq!(token["expires"], 1_791_810_000);
+    // The escalations, with who decided and when; another pull request's
+    // are left out.
+    let e = &open["escalations"];
+    assert_eq!(e.as_array().unwrap().len(), 3, "{open}");
+    assert_eq!(e[0]["id"], "a1b2c3d4e5f60718", "{open}");
+    assert_eq!(e[0]["cloudId"], "6f0c1a8e-0000-4000-8000-000000000001");
+    assert_eq!(e[0]["decision"], "granted");
+    assert_eq!(e[0]["by"], "@lead");
+    assert_eq!(e[0]["at"], 1_791_799_200);
+    assert_eq!(e[1]["kind"], "broken-test");
+    assert_eq!(e[1]["decision"], "answered");
+    // The reason is the decider's, not why the agent asked.
+    assert_eq!(e[1]["reason"], "that test is flaky; leave it");
+    assert!(e[0].get("reason").is_none(), "{open}");
+    assert_eq!(e[2]["cloudId"], "6f0c1a8e-0000-4000-8000-000000000004");
+    assert_eq!(
+        (&e[2]["decision"], &e[2]["reason"]),
+        (&"denied".into(), &"not here".into())
+    );
+    let gaps: Vec<&str> = open["gaps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| g["field"].as_str().unwrap())
+        .collect();
+    assert!(
+        !gaps.contains(&"token") && !gaps.contains(&"escalations"),
+        "{gaps:?}"
+    );
+    // No door log reaches a hosted run.
+    assert!(gaps.contains(&"doors"), "{gaps:?}");
+
+    // Merged and rebuilt from the records: the token and escalations stay.
+    onus(
+        &r,
+        &[
+            "ci",
+            "closed",
+            "--change",
+            change,
+            "--merged",
+            "--merged-by",
+            "lead",
+            "--records",
+            rs,
+        ],
+    );
+    let merged = t.join("merged.json");
+    onus(
+        &r,
+        &[
+            "provenance",
+            "--change",
+            change,
+            "--records",
+            rs,
+            "--from",
+            out.join("provenance.json").to_str().unwrap(),
+            "--out",
+            merged.to_str().unwrap(),
+        ],
+    );
+    let p: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&merged).unwrap()).unwrap();
+    assert_eq!(p["stage"], "merged");
+    assert_eq!((&p["token"], &p["escalations"]), (token, e));
+
+    // `onus provenance` takes them too: a given inspection is the token,
+    // and an empty list from Onus Cloud is on record.
+    let inspection = t.join("inspection.json");
+    std::fs::write(
+        &inspection,
+        r#"{"task":"sms","rights":["write:path:services/**"],"expires":0}"#,
+    )
+    .unwrap();
+    let none = t.join("none.json");
+    std::fs::write(&none, "[]").unwrap();
+    let rebuilt = t.join("rebuilt.json");
+    onus(
+        &r,
+        &[
+            "provenance",
+            "--change",
+            change,
+            "--records",
+            rs,
+            "--escalations",
+            none.to_str().unwrap(),
+            "--token-inspection",
+            inspection.to_str().unwrap(),
+            "--out",
+            rebuilt.to_str().unwrap(),
+        ],
+    );
+    let p: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&rebuilt).unwrap()).unwrap();
+    assert_eq!(
+        p["token"]["rights"],
+        serde_json::json!(["write:path:services/**"])
+    );
+    assert!(p["token"].get("expires").is_none(), "{p}");
+    assert_eq!(p["escalations"], serde_json::json!([]));
+    assert!(
+        !p["gaps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|g| g["field"] == "escalations" || g["field"] == "token"),
+        "{p}"
+    );
+
+    // --verify still checks the record: the token's rights cannot be
+    // widened after the fact.
+    let verify = |file: &Path| {
+        Command::new(env!("CARGO_BIN_EXE_onus"))
+            .args(["provenance", "--verify", file.to_str().unwrap()])
+            .output()
+            .unwrap()
+            .status
+            .code()
+    };
+    assert_eq!(verify(&merged), Some(0));
+    let text = std::fs::read_to_string(&merged).unwrap();
+    std::fs::write(
+        &merged,
+        text.replace("write:path:services/orders/**", "write:path:**"),
+    )
+    .unwrap();
+    assert_eq!(verify(&merged), Some(1));
+}
+
+#[test]
 fn a_judged_pull_request_records_the_judge_that_decided() {
     let tmp = tempfile::tempdir().unwrap();
     let t = tmp.path();

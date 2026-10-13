@@ -93,6 +93,14 @@ pub enum CiCmd {
         /// (Onus Cloud trains one per organisation). Needs lanes.learned in the config.
         #[arg(long, value_name = "FILE")]
         model: Option<PathBuf>,
+        /// The pull request's escalations as Onus Cloud keeps them, with their decisions
+        /// (schemas/escalation-decisions.schema.json), for its provenance.
+        #[arg(long, value_name = "FILE")]
+        escalations: Option<PathBuf>,
+        /// The door's inspection of the agent's task token ({task, rights, expires});
+        /// never the token. For its provenance.
+        #[arg(long, value_name = "FILE")]
+        token_inspection: Option<PathBuf>,
         /// Where to write the submission, classification, judgment, held-out report, provenance
         /// and comment section.
         #[arg(long, value_name = "DIR")]
@@ -309,6 +317,8 @@ pub fn run(cmd: CiCmd) -> Result<i32> {
             config,
             reviews,
             model,
+            escalations,
+            token_inspection,
             out,
             at,
         } => pr(PrArgs {
@@ -327,6 +337,8 @@ pub fn run(cmd: CiCmd) -> Result<i32> {
             config,
             reviews,
             model,
+            escalations,
+            token_inspection,
             out,
             at,
         }),
@@ -500,6 +512,8 @@ struct PrArgs {
     config: Option<PathBuf>,
     reviews: Option<PathBuf>,
     model: Option<PathBuf>,
+    escalations: Option<PathBuf>,
+    token_inspection: Option<PathBuf>,
     out: PathBuf,
     at: Option<u64>,
 }
@@ -527,9 +541,51 @@ fn pr(a: PrArgs) -> Result<i32> {
     check_change(&a.change)?;
     // A bad suite fails the run before anything is written.
     let suite = lanes::load_held_out(a.held_out.as_deref(), &a.repo)?;
+    // Provenance input never stops the lane: what cannot be read is warned
+    // about and left out. Only a token where its inspection belongs is
+    // refused, before anything is written.
+    let mut unread = Vec::new();
+    let decisions = match a
+        .escalations
+        .as_deref()
+        .map(crate::provenance::decisions_at)
+    {
+        Some(Ok(d)) => {
+            unread.extend(d.unread.iter().cloned());
+            Some(d.list)
+        }
+        Some(Err(e)) if e.downcast_ref::<provenance::HoldsToken>().is_some() => return Err(e),
+        Some(Err(e)) => {
+            eprintln!("warning: {e:#}; escalations are a gap");
+            unread.push(format!("{e:#}"));
+            None
+        }
+        None => None,
+    };
+    let mut inspection_unread = None;
+    let inspection = match a
+        .token_inspection
+        .as_deref()
+        .map(crate::provenance::inspection_at)
+    {
+        Some(Ok(t)) => Some(t),
+        Some(Err(e)) if e.downcast_ref::<provenance::HoldsToken>().is_some() => return Err(e),
+        Some(Err(e)) => {
+            eprintln!("warning: {e:#}; it is left out");
+            inspection_unread = Some(format!("{e:#}"));
+            None
+        }
+        None => None,
+    };
     std::fs::create_dir_all(&a.out)?;
     std::fs::create_dir_all(&a.records)?;
     let (base, head) = (commit_sha(&a.repo, &a.base)?, commit_sha(&a.repo, &a.head)?);
+    // Onus Cloud's escalations that name no pull request are joined by the
+    // commits they were filed at.
+    let change_commits = match &decisions {
+        Some(_) => crate::provenance::change_commits(&a.repo, &base, &head),
+        None => Vec::new(),
+    };
     let message = lanes::git_lines(&a.repo, &["log", "-1", "--format=%B", &head])?.join("\n");
     let (agent, agent_source) = pulls::detect_agent_source(&message, &a.branch, &a.author);
     let body = match &a.body_file {
@@ -726,6 +782,12 @@ fn pr(a: PrArgs) -> Result<i32> {
         pulls: &pulls::load(&pulls_file(&a.records))?,
         outcomes: &all_outcomes,
         signals: &signals::load(&a.records.join(signals::FILE))?,
+        decisions: decisions.as_deref(),
+        unread: &unread,
+        inspection,
+        inspection_unread: inspection_unread.as_deref(),
+        branch: Some(&a.branch),
+        commits: &change_commits,
         ..provenance::Inputs::new(&a.change, at)
     });
     std::fs::write(
