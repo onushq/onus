@@ -748,13 +748,16 @@ mod tests {
         );
         // Through a symbolic link from outside, too.
         let outside = tempfile::tempdir().unwrap();
-        let link = outside.path().join("suite");
-        std::os::unix::fs::symlink(repo.path().join("held-out"), &link).unwrap();
-        let err = load(&link, repo.path()).unwrap_err();
-        assert!(
-            format!("{err:#}").contains("inside the repository"),
-            "{err:#}"
-        );
+        #[cfg(unix)]
+        {
+            let link = outside.path().join("suite");
+            std::os::unix::fs::symlink(repo.path().join("held-out"), &link).unwrap();
+            let err = load(&link, repo.path()).unwrap_err();
+            assert!(
+                format!("{err:#}").contains("inside the repository"),
+                "{err:#}"
+            );
+        }
         // And from a folder of the repository given as --repo.
         std::fs::create_dir_all(repo.path().join("sub")).unwrap();
         std::process::Command::new("git")

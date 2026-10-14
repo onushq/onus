@@ -215,7 +215,8 @@ fn markdown_shows_lines_no_test_ran() {
     // when given by its absolute path.
     let file = s.dir.path().join("coverage/eta.lcov");
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-    std::fs::copy(cov("eta.lcov"), &file).unwrap();
+    // Written, not copied: a copy can keep the fixture's time, older than the sources.
+    std::fs::write(&file, std::fs::read(cov("eta.lcov")).unwrap()).unwrap();
     let (md, _) = ok(
         s.dir.path(),
         &["diff", "base", "head", "--coverage", file.to_str().unwrap()],
@@ -467,7 +468,13 @@ fn query_tests_for_uses_configured_coverage() {
     )
     .unwrap();
     std::fs::create_dir_all(r.join("coverage")).unwrap();
-    std::fs::copy(cov("discount-per-test.lcov"), r.join("coverage/lcov.info")).unwrap();
+    // Written, not copied: on macOS a copy keeps the fixture's time, which can be older
+    // than the sources the checkout wrote after it, and stale coverage is left out.
+    std::fs::write(
+        r.join("coverage/lcov.info"),
+        std::fs::read(cov("discount-per-test.lcov")).unwrap(),
+    )
+    .unwrap();
     let query = || -> Value {
         let (out, _) = ok(
             &r,
