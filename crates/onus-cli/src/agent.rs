@@ -1,24 +1,41 @@
 //! What `onus mcp` lets an agent do besides asking the map, over the same
 //! API as `onus ui`: hand in a change, run environments, read evidence and
-//! outcomes, ask for more access. Nothing here lets an agent approve
+//! outcomes, ask for more access or report that it is blocked. Escalations go
+//! through [`crate::cloud_doors`]. Nothing here lets an agent approve
 //! itself: it cannot record outcomes, grant escalations or mint tokens,
 //! and its task token (from `--token`) is attached by the server, not
-//! chosen by the agent.
+//! chosen by the agent. Every call has already been checked at the door
+//! ([`onus_cli::door`]) when it gets here.
 
-use anyhow::{Result, anyhow, bail};
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use anyhow::{Context, Result, anyhow, bail};
+use onus_cli::cloud::{self, CloudDoor};
+use onus_cli::door::Door;
 use serde_json::{Value, json};
 
+use crate::cloud_doors::{self, EscalationDoor};
 use crate::ui::{State, api};
 
 pub struct AgentActions {
     pub state: State,
-    /// The agent's task token, as given to `onus mcp --token`.
-    pub token: Option<String>,
+    /// The door the server checks calls at; it holds the task token (from
+    /// `onus mcp --token`, or a granted escalation's since).
+    pub door: Arc<Door>,
+    /// The root private key the door holds (`onus mcp --key`), never shown to the
+    /// agent: grants decided by policy or by a person in Onus Cloud are minted with it.
+    pub key: Option<PathBuf>,
+    /// A checkout whose files the agent cannot edit (`onus mcp --trusted-repo`): with the key, the
+    /// local policy decides from its map and onus.yaml.
+    pub trusted: Option<PathBuf>,
+    /// Every Onus Cloud call goes through it: a scoped token minted from a login, or
+    /// the token or API key the process was given.
+    pub cloud: Option<Arc<CloudDoor>>,
 }
 
-/// What an agent may call on the API as it is.
+/// What an agent may call on the API as it is (the door has decided).
 const PASSTHROUGH: &[&str] = &[
-    "lanes.policy",
     "envs.run",
     "envs.list",
     "envs.destroy",
@@ -36,15 +53,41 @@ fn call(state: &State, name: &str, input: Value) -> Result<Value> {
 
 impl AgentActions {
     fn task(&self) -> Option<String> {
-        let token = self.token.as_deref()?;
-        let public = std::fs::read_to_string(&self.state.public_key).ok()?;
-        let key = onus_doors::token::public_key(&public).ok()?;
-        onus_doors::token::verify(token, &key).ok().map(|v| v.task)
+        self.door.task()
     }
 
     fn submit(&self, mut input: Value) -> Result<Value> {
-        if let Some(t) = &self.token {
+        if let Some(t) = self.door.token() {
             input["token"] = json!(t);
+        }
+        // The token's agent, when it names one, whatever the agent declares.
+        let mut note = None;
+        if let Some(a) = self.door.agent() {
+            let declared = &input["agent"];
+            let differs = [
+                ("tool", &a.tool),
+                ("model", &a.model),
+                ("config", &a.config),
+            ]
+            .iter()
+            .any(|(k, v)| {
+                declared[*k]
+                    .as_str()
+                    .is_some_and(|d| !d.is_empty() && d != v.as_str())
+            });
+            if differs {
+                note = Some(format!(
+                    "your agent identity comes from your token: {}",
+                    [a.tool.as_str(), a.model.as_str(), a.config.as_str()]
+                        .iter()
+                        .filter(|p| !p.is_empty())
+                        .copied()
+                        .collect::<Vec<_>>()
+                        .join("/")
+                ));
+            }
+            input["agent"] =
+                json!({ "tool": a.tool, "model": a.model, "config": a.config, "team": a.team });
         }
         if input["agent"]["tool"].as_str().is_none_or(str::is_empty) {
             input["agent"]["tool"] = json!("mcp-agent");
@@ -72,19 +115,38 @@ impl AgentActions {
                     .collect()
             })
             .unwrap_or_default();
-        Ok(json!({
+        let mut out = json!({
             "id": id,
             "lane": c["lane"],
             "why": c["applied"],
             "summary": sub["report"]["summary"],
             "rows": rows,
             "evidence": sub["evidence"].as_array().map_or(0, Vec::len),
+            "escalations": sub["escalations"],
+            "agent": sub["agent"],
             "scope": sub["scope"],
             "next": format!("onus_judge with id {id} verifies it; a person sees it in onus ui under Lanes & judge"),
-        }))
+        });
+        if let Some(n) = note {
+            out["agentNote"] = json!(n);
+        }
+        Ok(out)
     }
 
-    fn escalate(&self, mut input: Value) -> Result<Value> {
+    fn escalation_door(&self) -> EscalationDoor<'_> {
+        EscalationDoor {
+            state: &self.state,
+            token: self.door.token(),
+            public: self.door.public(),
+            key: self.key.as_deref(),
+            trusted: self.trusted.as_deref(),
+            cloud: self.cloud.as_deref(),
+            repository: self.cloud.as_ref().and_then(|c| c.repository()),
+            pull: None,
+        }
+    }
+
+    fn escalate(&self, input: Value) -> Result<Value> {
         let task = match (
             self.task(),
             input["task"].as_str().filter(|t| !t.is_empty()),
@@ -94,46 +156,113 @@ impl AgentActions {
             (None, Some(t)) => t.to_string(),
             (None, None) => bail!("name the task (no task token was given to onus mcp)"),
         };
-        input["task"] = json!(task);
-        let out = call(&self.state, "escalations.create", input)?;
-        let r = &out["request"];
-        Ok(json!({
-            "id": r["id"],
-            "task": r["task"],
-            "blastRadius": r["blastRadius"],
-            "sensitive": r["sensitive"],
-            "evidence": r["evidence"],
-            "state": "open",
-            "next": "A person, or the policy for low-risk requests with a reproduced failing test, decides. Check with onus_escalation.",
-        }))
+        let kind = input["kind"].as_str().unwrap_or("permission");
+        let kind: onus_doors::escalation::EscalationKind = serde_json::from_value(json!(kind))
+            .map_err(|_| {
+                anyhow!(
+                    "`{kind}` is not a kind: permission, broken-test, contradictory-spec or impossible-task"
+                )
+            })?;
+        let list = |k: &str| -> Vec<String> {
+            input[k]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str())
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let req = crate::doors::new_request(
+            &self.state.root,
+            &task,
+            kind,
+            &list("scopes"),
+            &list("evidence"),
+            input["reason"].as_str().unwrap_or_default(),
+        )?;
+        cloud_doors::route(&self.escalation_door(), req)
+    }
+
+    /// The safe exit: a structured report that the task is blocked, with no rights
+    /// asked for, routed as any escalation.
+    fn blocked(&self, mut input: Value) -> Result<Value> {
+        let kind = cloud_doors::blocked_kind(input["kind"].as_str().unwrap_or_default())?;
+        input["kind"] = json!(kind);
+        input["scopes"] = json!([]);
+        let mut out = self.escalate(input)?;
+        out["next"] = json!(cloud_doors::BLOCKED_NEXT);
+        Ok(out)
     }
 
     fn escalation(&self, input: Value) -> Result<Value> {
         let id = input["id"].as_str().unwrap_or_default();
-        let path = api::request_path(&self.state, id)?;
-        let req = crate::doors::load_request(&path).map_err(|_| anyhow!("no escalation {id}"))?;
-        if let Some(task) = self.task()
-            && task != req.task
+        let wait = input["wait"].as_u64().unwrap_or(0).min(50);
+        let mut out = cloud_doors::follow(&self.escalation_door(), id, wait)?;
+        let kept = out
+            .as_object_mut()
+            .and_then(|o| o.remove("token"))
+            .and_then(|t| t.as_str().map(str::to_string));
+        if out["state"] == "granted"
+            && let Some(t) = kept
         {
-            bail!("escalation {id} belongs to another task");
-        }
-        let decision = api::decisions(&self.state).remove(id);
-        let state = match decision.as_ref().and_then(|d| d["decision"].as_str()) {
-            Some("granted") => "granted",
-            Some("denied") => "denied",
-            Some("needs-person") => "waiting for a person",
-            _ => "open",
-        };
-        let mut out = json!({ "id": id, "state": state, "request": req, "decision": decision });
-        if state == "granted"
-            && let Some(t) = api::kept_token(&self.state, id)
-        {
-            out["token"] = json!(t);
-            out["next"] = json!(
-                "Use this token from now on: your old rights plus exactly what you asked for."
-            );
+            if self.door.task().is_some() {
+                // The server uses it from now on: reads, environments, submissions.
+                match self.door.adopt(&t) {
+                    Ok(()) => {
+                        // Also for the git gateway, which takes it as the password.
+                        out["token"] = json!(t);
+                        out["adopted"] = json!(true);
+                        out["next"] = json!(
+                            "This server now uses the granted token: your old rights plus exactly what you asked for."
+                        );
+                    }
+                    Err(e) => {
+                        // Not handed out either: it is not an extension of yours.
+                        out["adopted"] = json!(false);
+                        out["next"] = json!(format!("This server keeps your old token: {e:#}."));
+                    }
+                }
+            } else {
+                out["token"] = json!(t);
+                out["next"] = json!(
+                    "Use this token from now on: your old rights plus exactly what you asked for."
+                );
+            }
         }
         Ok(out)
+    }
+
+    /// The Onus Cloud client for the next call.
+    fn cloud(&self) -> Result<cloud::Client> {
+        self.cloud
+            .as_ref()
+            .context("not signed in to Onus Cloud: run onus login, or set ONUS_CLOUD_TOKEN")?
+            .client()
+    }
+
+    /// A cloud action, with the repository this server is for when the agent names none.
+    fn cloud_act(&self, name: &str, mut input: Value) -> Result<Value> {
+        let repository = self.cloud.as_ref().and_then(|c| c.repository());
+        let unnamed = |k: &str, input: &Value| match &input[k] {
+            Value::String(s) => s.trim().is_empty(),
+            Value::Array(a) => a.is_empty(),
+            _ => true,
+        };
+        match (name, repository) {
+            ("cloud.map" | "cloud.attachEvidence", Some(r)) if unnamed("repository", &input) => {
+                input["repository"] = json!(r);
+            }
+            ("cloud.tokenMint", Some(r))
+                if unnamed("repositories", &input)
+                    && input["allRepositories"].as_bool() != Some(true) =>
+            {
+                input["repositories"] = json!([r]);
+            }
+            _ => {}
+        }
+        cloud::act(&self.cloud()?, &self.state.root, name, input)
     }
 
     fn outcomes(&self, input: Value) -> Result<Value> {
@@ -166,13 +295,13 @@ impl AgentActions {
             .as_array()
             .map(|r| {
                 r.iter()
-                    .take(20)
                     .map(|run| {
                         let m = &run["manifest"];
                         json!({
                             "id": run["id"],
                             "commit": m["commit"],
                             "environment": m["environment"]["name"],
+                            "task": m["environment"]["task"],
                             "command": m["command"],
                             "exitCode": m["exitCode"],
                             "tests": m["tests"],
@@ -181,7 +310,65 @@ impl AgentActions {
                     .collect()
             })
             .unwrap_or_default();
-        Ok(json!({ "runs": runs }))
+        let mut out = json!({ "runs": runs });
+        self.door
+            .filter_list("onus_evidence", &mut out, &self.door.facts());
+        if let Some(runs) = out["runs"].as_array_mut() {
+            runs.truncate(20);
+        }
+        Ok(out)
+    }
+
+    /// The lane policy, less the held-out check: the author may know there is
+    /// one, never what it runs.
+    fn policy(&self) -> Result<Value> {
+        let mut out = call(&self.state, "lanes.policy", json!({}))?;
+        let suite = out
+            .as_object_mut()
+            .and_then(|o| o.remove("heldOutSuite"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let legacy = out["policy"]
+            .as_object_mut()
+            .and_then(|p| p.remove("heldOut"))
+            .is_some();
+        if let Some(p) = out["policy"].as_object_mut() {
+            p.insert(
+                "heldOut".into(),
+                if suite || legacy {
+                    json!("configured")
+                } else {
+                    Value::Null
+                },
+            );
+        }
+        Ok(out)
+    }
+
+    /// Judges a kept submission, by its id alone: an agent never picks the
+    /// judge's configuration. Nor does it learn which one judged: otherwise it
+    /// could amend its commit until a lenient one comes up. The judgment loses
+    /// `rotation`, and its judge id is the policy's, the same for every
+    /// configuration. The kept judgment has both, for people.
+    fn judge(&self, input: Value) -> Result<Value> {
+        let mut out = call(
+            &self.state,
+            "submissions.judge",
+            json!({ "id": input["id"] }),
+        )?;
+        if let Some(j) = out["judgment"].as_object_mut()
+            && j.remove("rotation").is_some()
+        {
+            let policy = call(&self.state, "lanes.policy", json!({}))?;
+            j.insert("judge".into(), policy["judge"].clone());
+        }
+        Ok(out)
+    }
+
+    /// A list, less what the task did not make.
+    fn listed(&self, tool: &str, mut answer: Value) -> Result<Value> {
+        self.door.filter_list(tool, &mut answer, &self.door.facts());
+        Ok(answer)
     }
 }
 
@@ -189,22 +376,61 @@ impl onus_cli::mcp::Actions for AgentActions {
     fn call(&self, name: &str, input: Value) -> Result<Value> {
         match name {
             "agent.submit" => self.submit(input),
-            "agent.judge" => call(&self.state, "submissions.judge", input),
+            "agent.judge" => self.judge(input),
+            "lanes.policy" => self.policy(),
             "agent.envCreate" => {
                 let mut input = input;
-                input["token"] = json!(self.token);
+                input["token"] = json!(self.door.token());
                 call(&self.state, "envs.create", input)
+            }
+            "envs.list" => self.listed("onus_envs", call(&self.state, name, input)?),
+            "cloud.envs" => self.listed("onus_cloud_envs", self.cloud_act(name, input)?),
+            "cloud.attachEvidence" if input["doorLog"] == true => {
+                // The task's slice, cut here from the server's own log: the
+                // agent names none, so it cannot hand in another.
+                let task = self.task().context(
+                    "a door log is attached for a task, and this server holds no task token (onus mcp --token)",
+                )?;
+                let mut input = input;
+                let mut slice = onus_cli::door::door_log_slice(
+                    self.door.log_path(),
+                    &task,
+                    cloud::commit_of(&self.state.root, "HEAD"),
+                )?;
+                // What the token this door holds is, never the token.
+                if let Some(i) = self.door.inspection() {
+                    slice["inspection"] = i;
+                }
+                input["doorLog"] = slice;
+                self.cloud_act(name, input)
             }
             "agent.evidence" => self.evidence(),
             "agent.escalate" => self.escalate(input),
+            "agent.blocked" => self.blocked(input),
             "agent.escalation" => self.escalation(input),
             "agent.outcomes" => self.outcomes(input),
-            n if n.starts_with("cloud.") => onus_cli::cloud::act(
-                &onus_cli::cloud::Client::require()?,
-                &self.state.root,
-                n,
-                input,
-            ),
+            "cloud.pulls" if self.task().is_some() => {
+                // A task token is for this worktree's repository, and so is
+                // the list: not every repository of the organisation.
+                let mut input = input;
+                if input["repository"]
+                    .as_str()
+                    .is_none_or(|r| r.trim().is_empty())
+                {
+                    // The worktree's remote, else the repository the operator named
+                    // (--cloud-repo).
+                    let Some(r) = onus_cli::cloud::repository_of(&self.state.root)
+                        .or_else(|| self.cloud.as_ref().and_then(|c| c.repository()))
+                    else {
+                        bail!(
+                            "your token is for this worktree's repository, and this worktree has no GitHub remote: pass repository (owner/name)"
+                        );
+                    };
+                    input["repository"] = json!(r);
+                }
+                self.cloud_act(name, input)
+            }
+            n if n.starts_with("cloud.") => self.cloud_act(n, input),
             n if PASSTHROUGH.contains(&n) => call(&self.state, n, input),
             _ => bail!("agents cannot call `{name}`"),
         }

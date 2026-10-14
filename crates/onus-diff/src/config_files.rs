@@ -49,6 +49,14 @@ pub fn classify(path: &str) -> Option<Class> {
     {
         return rules("ci-changed", "CI workflow");
     }
+    if lower.ends_with("lanes-model.json") {
+        return Some(Class {
+            subkind: "lanes-model-changed",
+            label: "Learned lane model",
+            rules_of_the_game: true,
+            why: "Changes how Onus raises lanes; this report and its lane used the base version; needs a person",
+        });
+    }
     if name == "onus.yaml" {
         return Some(Class {
             subkind: "onus-config-changed",
@@ -599,6 +607,14 @@ mod tests {
         let sub = |p: &str| classify(p).map(|c| (c.subkind, c.rules_of_the_game));
         assert_eq!(sub(".github/workflows/ci.yml"), Some(("ci-changed", true)));
         assert_eq!(sub("onus.yaml"), Some(("onus-config-changed", true)));
+        assert_eq!(
+            sub("onus.lanes-model.json"),
+            Some(("lanes-model-changed", true))
+        );
+        assert_eq!(
+            sub("ops/lanes-model.json"),
+            Some(("lanes-model-changed", true))
+        );
         assert_eq!(
             sub(".github/CODEOWNERS"),
             Some(("codeowners-changed", true))

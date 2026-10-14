@@ -17,3 +17,9 @@ Short records of decisions that are significant or hard to reverse. Propose a ne
 | [0011](0011-web-interface.md) | A web interface shipped in the binary | Accepted |
 | [0012](0012-agents-act-through-mcp.md) | Agents hand work in through MCP, and cannot approve themselves | Accepted |
 | [0013](0013-outcome-records-from-ci.md) | Outcome records kept by CI on a branch of the repository | Accepted |
+| [0014](0014-built-in-risk-inputs.md) | Built-in risk inputs that only raise a lane | Accepted |
+| [0015](0015-learned-lanes-only-raise.md) | A learned model that only raises a lane, read from the base commit | Accepted |
+| [0016](0016-production-signals-and-rollout.md) | Production signals in the records, a rollout plan per lane, and decisions Onus makes but never executes | Accepted |
+| [0017](0017-coverage-into-the-map.md) | Coverage into the map: changed lines tests ran, and how each test link is known | Accepted |
+| [0018](0018-held-out-suites-and-judge-rotation.md) | Held-out suites outside the repository, chosen from the map, and a rotating judge | Accepted |
+| [0019](0019-behavior-diff.md) | A behavior diff: the tests that reach a change, run at the base and at the head | Accepted |

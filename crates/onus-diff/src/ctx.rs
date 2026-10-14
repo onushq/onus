@@ -38,6 +38,27 @@ pub struct Ctx<'a> {
     pub packs: BTreeSet<String>,
     /// The `testData` globs of onus.yaml.
     test_data: globset::GlobSet,
+    /// Declared contracts of onus.yaml: symbol id → contract name.
+    pub declared: BTreeMap<String, String>,
+}
+
+/// The labels that make a component sensitive: medium or high in
+/// onus.yaml, else the defaults.
+pub fn sensitive_labels(config: Option<&OnusConfig>) -> BTreeSet<String> {
+    let mut sensitive: BTreeSet<String> = DEFAULT_SENSITIVE_LABELS
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    if let Some(cfg) = config {
+        for (label, l) in &cfg.labels {
+            if l.sensitivity >= Sensitivity::Medium {
+                sensitive.insert(label.clone());
+            } else {
+                sensitive.remove(label);
+            }
+        }
+    }
+    sensitive
 }
 
 impl std::fmt::Debug for Ctx<'_> {
@@ -62,19 +83,7 @@ impl<'a> Ctx<'a> {
         for c in &head.components {
             components.insert(c.id.clone(), c);
         }
-        let mut sensitive: BTreeSet<String> = DEFAULT_SENSITIVE_LABELS
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        if let Some(cfg) = config {
-            for (label, l) in &cfg.labels {
-                if l.sensitivity >= Sensitivity::Medium {
-                    sensitive.insert(label.clone());
-                } else {
-                    sensitive.remove(label);
-                }
-            }
-        }
+        let sensitive = sensitive_labels(config);
         let all: Vec<Component> = components.values().map(|c| (*c).clone()).collect();
         Ctx {
             base,
@@ -101,7 +110,27 @@ impl<'a> Ctx<'a> {
                         .collect()
                 })
                 .unwrap_or_default(),
+            declared: config
+                .map(|c| {
+                    c.contracts
+                        .iter()
+                        .map(|(name, c)| (c.symbol.clone(), name.clone()))
+                        .collect()
+                })
+                .unwrap_or_default(),
         }
+    }
+
+    /// Owners of a component (onus.yaml, else CODEOWNERS), sorted.
+    pub fn owners(&self, component: &str) -> Vec<String> {
+        let mut owners = self
+            .components
+            .get(component)
+            .map(|c| c.owners.clone())
+            .unwrap_or_default();
+        owners.sort();
+        owners.dedup();
+        owners
     }
 
     /// Sensitivity labels of a component, sorted.
@@ -316,6 +345,11 @@ pub fn change(
             rules_of_the_game: false,
             intent_mismatch: false,
             needs_person: false,
+            dependent_components: 0,
+            dependents: vec![],
+            tested: None,
+            owners: vec![],
+            coverage: None,
         },
         locations,
         stats: None,

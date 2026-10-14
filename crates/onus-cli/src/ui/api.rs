@@ -7,7 +7,7 @@ use std::path::{Component as PathPart, Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, anyhow, bail};
-use onus_core::{EdgeKind, Lane, ids};
+use onus_core::Lane;
 use onus_index::Query;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -228,72 +228,16 @@ fn map_query(state: &State, body: Value) -> Answer {
         .map_err(|e| Error::Failed(anyhow!(e)))
 }
 
-/// Components and how they depend on each other, for drawing.
+/// Components and how they depend on each other, for drawing: the
+/// binary's overview (`onus query overview`), in the shape the page reads.
 fn map_graph(state: &State) -> Answer {
     let session = state.server.session(&state.root)?;
     let (index, _) = session.index()?;
-    let map = index.map();
-    let mut files: BTreeMap<&str, (u32, u32)> = BTreeMap::new();
-    for f in &map.files {
-        if let Some(c) = &f.component_id {
-            let e = files.entry(c.as_str()).or_default();
-            e.0 += 1;
-            e.1 += f.lines;
-        }
-    }
-    let mut public: BTreeMap<&str, u32> = BTreeMap::new();
-    for s in &map.symbols {
-        if s.visibility == onus_core::Visibility::Public
-            && let Some(c) = ids::component_of(&s.id)
-        {
-            *public.entry(c).or_default() += 1;
-        }
-    }
-    // Code dependencies between components, by kind.
-    let mut deps: BTreeMap<(String, String), BTreeMap<&str, u32>> = BTreeMap::new();
-    let mut publishes: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    let mut consumes: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    let mut externals: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for e in &map.edges {
-        let Some(from) = ids::component_of(&e.from) else {
-            continue;
-        };
-        match e.kind {
-            EdgeKind::Publishes => {
-                publishes
-                    .entry(ids::name_of(&e.to).to_string())
-                    .or_default()
-                    .insert(from.to_string());
-            }
-            EdgeKind::Consumes => {
-                consumes
-                    .entry(ids::name_of(&e.to).to_string())
-                    .or_default()
-                    .insert(from.to_string());
-            }
-            EdgeKind::CallsExternal => {
-                externals
-                    .entry(from.to_string())
-                    .or_default()
-                    .insert(e.to.clone());
-            }
-            k if k.is_code_dependency() => {
-                if let Some(to) = ids::component_of(&e.to).filter(|t| *t != from) {
-                    *deps
-                        .entry((from.to_string(), to.to_string()))
-                        .or_default()
-                        .entry(k.as_str())
-                        .or_default() += 1;
-                }
-            }
-            _ => {}
-        }
-    }
-    let components: Vec<Value> = map
+    let overview = index.overview();
+    let components: Vec<Value> = overview
         .components
         .iter()
         .map(|c| {
-            let (n, lines) = files.get(c.id.as_str()).copied().unwrap_or((0, 0));
             json!({
                 "id": c.id,
                 "kind": c.kind,
@@ -301,40 +245,20 @@ fn map_graph(state: &State) -> Answer {
                 "owners": c.owners,
                 "labels": c.labels,
                 "packageName": c.package_name,
-                "files": n,
-                "lines": lines,
-                "publicSymbols": public.get(c.id.as_str()).copied().unwrap_or(0),
-                "externals": externals.get(&c.id).cloned().unwrap_or_default(),
+                "files": c.files,
+                "lines": c.lines,
+                "publicSymbols": c.public_symbols,
+                "externals": c.externals,
             })
         })
         .collect();
-    let edges: Vec<Value> = deps
-        .into_iter()
-        .map(|((from, to), kinds)| {
-            json!({ "from": from, "to": to, "count": kinds.values().sum::<u32>(), "kinds": kinds })
-        })
-        .collect();
-    let mut events = Vec::new();
-    let names: BTreeSet<&String> = publishes.keys().chain(consumes.keys()).collect();
-    for name in names {
-        events.push(json!({
-            "name": name,
-            "publishers": publishes.get(name).cloned().unwrap_or_default(),
-            "consumers": consumes.get(name).cloned().unwrap_or_default(),
-        }));
-    }
-    let rules: Vec<Value> = map
-        .rules
-        .iter()
-        .map(|r| serde_json::to_value(r).unwrap_or(Value::Null))
-        .collect();
     Ok(json!({
         "components": components,
-        "edges": edges,
-        "events": events,
-        "externals": map.externals,
-        "rules": rules,
-        "diagnostics": map.diagnostics,
+        "edges": overview.links,
+        "events": overview.events,
+        "externals": overview.externals,
+        "rules": overview.rules,
+        "diagnostics": index.map().diagnostics,
     }))
 }
 
@@ -471,7 +395,18 @@ fn report(state: &State, body: Value) -> Answer {
     };
     let outcome = onus_cli::diff_dirs(pair.base.dir.path(), pair.head.dir.path(), &opts)?;
     let config = lanes::lanes_config(&state.root, None)?;
-    let classification = lanes::classify_with(&outcome.report, None, &config, None)?;
+    let classification = lanes::classify_with(
+        &state.root,
+        &outcome.report,
+        None,
+        &config,
+        &lanes::ClassifyOpts {
+            outcomes: Some(&state.outcomes),
+            // The model the base commit holds.
+            model_at: Some(&pair.base.sha),
+            ..Default::default()
+        },
+    )?;
     Ok(json!({
         "report": outcome.report,
         "markdown": outcome.render(onus_cli::Format::Md),
@@ -650,10 +585,18 @@ fn guide(body: Value) -> Answer {
 fn lanes_policy(state: &State) -> Answer {
     let config = loaded_config(state)?;
     let lanes = config.as_ref().and_then(|c| c.config.lanes.clone());
+    let policy = lanes.clone().unwrap_or_default();
+    let judges: Vec<Value> = policy
+        .judges
+        .iter()
+        .map(|j| json!({ "name": j.name, "id": onus_lanes::judge::judge_id_for(&policy, Some(j)) }))
+        .collect();
     Ok(json!({
         "configured": lanes.is_some(),
-        "policy": lanes.unwrap_or_default(),
-        "judge": onus_lanes::judge::judge_id(&config.and_then(|c| c.config.lanes).unwrap_or_default()),
+        "judge": onus_lanes::judge::judge_id(&policy),
+        "judges": judges,
+        "heldOutSuite": state.held_out.is_some(),
+        "policy": policy,
     }))
 }
 
@@ -689,16 +632,40 @@ fn lanes_submit(state: &State, body: Value) -> Answer {
             envs::test_run_of(&store, full, &m)
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
-    let scope = match q.token.as_deref().filter(|t| !t.trim().is_empty()) {
-        Some(t) => Some(lanes::scope_used(t, &state.public_key)?),
-        None => None,
+    let (scope, claim) = match q.token.as_deref().filter(|t| !t.trim().is_empty()) {
+        Some(t) => {
+            let (scope, claim) = lanes::scope_and_agent(t, &state.public_key)?;
+            (Some(scope), claim)
+        }
+        None => (None, None),
+    };
+    // Only escalations granted to this task get into the submission.
+    let escalations = if q.escalations.is_empty() {
+        Vec::new()
+    } else {
+        doors::verify_escalations_with(
+            &state.escalations,
+            Some(&state.audit),
+            &q.escalations,
+            &state.public_key,
+            scope.as_ref().map(|s| s.task.as_str()),
+        )?
     };
     let approvals = q
         .approvals
         .iter()
         .map(|a| lanes::parse_approval(a))
         .collect::<anyhow::Result<Vec<_>>>()?;
-    let mut agent = q.agent;
+    // The token's agent, when it names one, over what was declared.
+    let mut agent = match claim {
+        Some(a) => onus_lanes::submission::AgentSetup {
+            tool: a.tool,
+            model: a.model,
+            config: a.config,
+            team: a.team,
+        },
+        None => q.agent,
+    };
     if agent.tool.is_empty() {
         agent.tool = "unknown".into();
     }
@@ -715,7 +682,7 @@ fn lanes_submit(state: &State, body: Value) -> Answer {
             intent_markdown,
             evidence,
             scope,
-            escalations: q.escalations,
+            escalations,
             approvals,
             agent,
         },
@@ -734,16 +701,71 @@ fn submission_in(body: Value) -> Result<onus_lanes::submission::Submission, Erro
 fn lanes_classify(state: &State, body: Value) -> Answer {
     let sub = submission_in(body)?;
     let config = lanes::lanes_config(&state.root, None)?;
-    let c = lanes::classify_with(&sub.report, Some(&sub), &config, Some(&state.outcomes))?;
+    let c = lanes::classify_with(
+        &state.root,
+        &sub.report,
+        Some(&sub),
+        &config,
+        &lanes::ClassifyOpts {
+            outcomes: Some(&state.outcomes),
+            ..Default::default()
+        },
+    )?;
     Ok(serde_json::to_value(c)?)
 }
 
+/// For people only (agents cannot call it), so the answer carries what the
+/// held-out checks did as `heldOut`.
 fn lanes_judge(state: &State, body: Value) -> Answer {
-    let sub = submission_in(body)?;
+    let (mut out, held_out) = lanes_judge_full(state, body)?;
+    out["heldOut"] = serde_json::to_value(held_out)?;
+    Ok(out)
+}
+
+/// The judge's answer, `{classification, judgment}`, and apart from it what
+/// the held-out checks did, which only people read.
+fn lanes_judge_full(
+    state: &State,
+    body: Value,
+) -> Result<(Value, Option<onus_lanes::heldout::HeldOutReport>), Error> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct JudgeIn {
+        submission: onus_lanes::submission::Submission,
+        /// A configuration from lanes.judges instead of the rotation's.
+        #[serde(default)]
+        judge_config: Option<String>,
+    }
+    let q: JudgeIn = input(body)?;
+    let sub = q.submission;
+    // Read at each judgment: the suite may have changed since the start.
+    let suite = lanes::load_held_out(state.held_out.as_deref(), &state.root)?;
     let config = lanes::lanes_config(&state.root, None)?;
-    let c = lanes::classify_with(&sub.report, Some(&sub), &config, Some(&state.outcomes))?;
-    let j = lanes::judge_submission(&state.root, &sub, &c, &config);
-    Ok(json!({ "classification": c, "judgment": j }))
+    let c = lanes::classify_with(
+        &state.root,
+        &sub.report,
+        Some(&sub),
+        &config,
+        &lanes::ClassifyOpts {
+            outcomes: Some(&state.outcomes),
+            ..Default::default()
+        },
+    )?;
+    let judged = lanes::judge_submission(
+        &state.root,
+        &sub,
+        &c,
+        &config,
+        lanes::JudgeRun {
+            held_out: suite.as_ref(),
+            judge_config: q.judge_config.as_deref(),
+            config_path: None,
+        },
+    )?;
+    Ok((
+        json!({ "classification": c, "judgment": judged.judgment }),
+        judged.held_out,
+    ))
 }
 
 // Submissions handed in by agents, kept as <id>.json with the judge's
@@ -827,20 +849,53 @@ struct IdIn {
     id: String,
 }
 
+/// For people only (agents cannot call it): the held-out report names the
+/// checks.
 fn submissions_show(state: &State, body: Value) -> Answer {
     let q: IdIn = input(body)?;
     let sub = load_submission(state, &q.id)?;
-    Ok(json!({ "id": q.id, "submission": sub, "judgment": load_judgment(state, &q.id) }))
+    let held_out = std::fs::read_to_string(submission_path(state, &q.id, ".held-out.json")?)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok());
+    Ok(json!({
+        "id": q.id,
+        "submission": sub,
+        "judgment": load_judgment(state, &q.id),
+        "heldOut": held_out,
+    }))
 }
 
+/// Judges a kept submission; the held-out report is kept beside the
+/// judgment as `<id>.held-out.json` and not returned. A person may force a
+/// configuration (`judgeConfig`); agents reach this with the id alone.
 fn submissions_judge(state: &State, body: Value) -> Answer {
-    let q: IdIn = input(body)?;
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct In {
+        id: String,
+        #[serde(default)]
+        judge_config: Option<String>,
+    }
+    let q: In = input(body)?;
     let sub = load_submission(state, &q.id)?;
-    let out = lanes_judge(state, json!({ "submission": sub }))?;
+    let (out, held_out) = lanes_judge_full(
+        state,
+        json!({ "submission": sub, "judgeConfig": q.judge_config }),
+    )?;
     std::fs::write(
         submission_path(state, &q.id, ".judgment.json")?,
         serde_json::to_vec_pretty(&out)?,
     )
+    .map_err(anyhow::Error::from)?;
+    let report = submission_path(state, &q.id, ".held-out.json")?;
+    match held_out {
+        Some(h) => std::fs::write(report, serde_json::to_vec_pretty(&h)?),
+        // An earlier report is not about this judgment.
+        None => std::fs::remove_file(report).or_else(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => Ok(()),
+            _ => Err(e),
+        }),
+    }
     .map_err(anyhow::Error::from)?;
     Ok(out)
 }
@@ -928,6 +983,9 @@ fn outcomes(state: &State) -> Answer {
         if matches!(o.result.as_str(), "reverted" | "rolled-back") {
             *w.entry("reverted").or_default() += 1;
         }
+        if o.result == "rolled-back" {
+            *w.entry("rolledBack").or_default() += 1;
+        }
         if incidents.contains(o.change.as_str()) {
             *w.entry("incidents").or_default() += 1;
         }
@@ -955,11 +1013,14 @@ fn outcomes(state: &State) -> Answer {
         .into_iter()
         .map(|k| {
             let r = outcomes::record_for(&all, k);
-            let eligible = r.changes >= config.min_record && r.recent_incidents == 0;
+            let eligible = r.changes >= config.min_record
+                && r.recent_incidents == 0
+                && r.recent_rollbacks == 0;
             json!({
                 "agent": k,
                 "merged": r.changes,
                 "recentIncidents": r.recent_incidents,
+                "recentRollbacks": r.recent_rollbacks,
                 "eligible": eligible,
                 "needs": config.min_record.saturating_sub(r.changes),
             })
@@ -977,6 +1038,33 @@ fn outcomes(state: &State) -> Answer {
     let mut in_flight: Vec<&onus_lanes::pulls::PullRecord> = open.into_values().collect();
     in_flight.sort_by_key(|p| std::cmp::Reverse(p.at));
 
+    // Each component's history in the history input's window, production
+    // signals included: beside the outcomes file, else on the records branch.
+    let signals_file = state
+        .outcomes
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join(onus_lanes::signals::FILE);
+    let signals: Vec<onus_core::signal::ProductionSignal> = if signals_file.exists() {
+        onus_lanes::signals::load(&signals_file)?
+    } else {
+        let text = branch_file(state, onus_lanes::signals::FILE)
+            .map(|(_, t)| t)
+            .unwrap_or_default();
+        onus_lanes::signals::first_of_each(parse_lines(&text))
+    };
+    let now = onus_doors::gateway::now();
+    let areas = lanes::areas_from(
+        &all,
+        &signals,
+        &outcomes::HistoryScope {
+            since: now.saturating_sub(u64::from(config.inputs.history.days) * 86_400),
+            until: Some(now),
+            repo: None,
+            exclude: None,
+        },
+    );
+
     Ok(json!({
         "file": state.outcomes,
         "source": source,
@@ -988,6 +1076,8 @@ fn outcomes(state: &State) -> Answer {
         "agents": agents,
         "minRecord": config.min_record,
         "inFlight": in_flight,
+        "areas": areas,
+        "historyDays": config.inputs.history.days,
     }))
 }
 
@@ -1023,6 +1113,8 @@ fn outcomes_record(state: &State, body: Value) -> Answer {
         missed: bool,
         #[serde(default)]
         commit: Option<String>,
+        #[serde(default)]
+        components: Vec<String>,
     }
     let q: In = input(body)?;
     let blank = |s: Option<String>| s.filter(|v| !v.trim().is_empty());
@@ -1041,6 +1133,16 @@ fn outcomes_record(state: &State, body: Value) -> Answer {
             commit: blank(q.commit),
             involved: vec![],
             note: None,
+            components: q.components,
+            reviewed_by: vec![],
+            approval: None,
+            sampled: false,
+            audit: None,
+            merged_by: None,
+            features: None,
+            caught: false,
+            signal: None,
+            planned: false,
         },
     )?;
     outcomes(state)
@@ -1310,24 +1412,19 @@ fn scope_suggest(state: &State, body: Value) -> Answer {
 // Escalations and the audit log
 
 pub fn request_path(state: &State, id: &str) -> anyhow::Result<PathBuf> {
-    if id.is_empty()
-        || !id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
-    {
-        bail!("`{id}` is not a request id");
-    }
+    doors::check_request_id(id)?;
     Ok(state.escalations.join(format!("{id}.json")))
 }
 
-/// Decisions on record in the audit log, by request id.
+/// Decisions on record in the audit log, by request id; the later entry wins, so a
+/// grant mirrored from Onus Cloud replaces `sent-to-onus-cloud`.
 pub fn decisions(state: &State) -> BTreeMap<String, Value> {
     let mut out = BTreeMap::new();
     let Ok(entries) = onus_doors::audit::AuditLog::new(&state.audit).verify() else {
         return out;
     };
     for e in entries {
-        if matches!(e.action.as_str(), "escalate" | "grant" | "deny") {
+        if matches!(e.action.as_str(), "escalate" | "grant" | "deny" | "answer") {
             out.insert(
                 e.subject.clone(),
                 json!({ "action": e.action, "decision": e.decision, "by": e.actor, "reason": e.reason, "at": e.at }),
@@ -1346,9 +1443,20 @@ fn escalations_list(state: &State) -> Answer {
             if path.extension().and_then(|x| x.to_str()) != Some("json") {
                 continue;
             }
-            if let Ok(req) = doors::load_request(&path) {
+            if let Ok(mut req) = doors::load_request(&path) {
+                // What the file says a run saw is not believed, so not shown.
+                for e in &mut req.evidence {
+                    e.reproduced = None;
+                    e.run = None;
+                }
                 let decision = decided.get(&req.id).cloned();
-                requests.push(json!({ "request": req, "decision": decision, "file": path }));
+                // Where it was filed in Onus Cloud, if it was.
+                let cloud = std::fs::read_to_string(path.with_extension("cloud.json"))
+                    .ok()
+                    .and_then(|t| serde_json::from_str::<Value>(&t).ok());
+                requests.push(
+                    json!({ "request": req, "decision": decision, "cloud": cloud, "file": path }),
+                );
             }
         }
     }

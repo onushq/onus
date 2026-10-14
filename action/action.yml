@@ -4,11 +4,23 @@ description: Report the changes in meaning of a pull request, as a sticky commen
 # Events:
 # - pull_request: report on the change (and keep the comment up to date);
 #   with records, classify it with its agent's track record and, when it
-#   closes, record the outcome.
+#   closes, record the outcome. With records, a change in the human lane
+#   fails the job until a review counts (wait-for-review); onus decides from
+#   the pull request's reviews, which the action fetches.
+# - pull_request_review: the same as a push, so an approval (or a dismissal)
+#   updates the lane, the comment and the check.
 # - issue_comment: acknowledge `/onus caught <note>`; with records, act on
-#   `/onus approve`, `/onus audit` and `/onus incident`.
+#   `/onus approve`, `/onus audit` and `/onus incident`, record `/onus caught`
+#   from people with write access, and answer `/onus accuracy` (which records
+#   nothing).
 # - push (to the default branch), with records: record reverts.
-# See `onus help ci`.
+# - deployment_status or workflow_dispatch, with records and rollout-percent:
+#   a deploy reached a share of production traffic. `onus ci rollout` decides
+#   promote, hold, rollback or complete from the change's rollout plan and the
+#   samples in rollout-metrics, records the stage, and sets rollout-decision.
+#   A rollback fails the step; the deploy workflow acts on it. Onus never
+#   moves traffic.
+# See `onus help ci` and `onus help production`.
 author: Onus
 branding:
   icon: eye
@@ -42,7 +54,9 @@ inputs:
     required: false
     default: "true"
   fail-on:
-    description: Fail the job when this is found, comma separated (rule-violation, secrets).
+    description: >-
+      Fail the job when this is found, comma separated (rule-violation, secrets, behavior;
+      behavior needs the behavior input).
     required: false
     default: none
   comment:
@@ -76,24 +90,88 @@ inputs:
       'true' to keep outcome records on a branch of the repository (records-branch): each pull
       request is classified with its agent's track record, its outcome is recorded when it closes,
       reverts are recorded on pushes to the default branch, and people record approvals, audits and
-      incidents with /onus comments. Implies lanes. Needs contents: write (and actions: write to
-      re-run the check after /onus approve). See `onus help ci`.
+      incidents with /onus comments. A change in the human lane waits for a review
+      (wait-for-review). Implies lanes. Needs contents: write (and actions: write to re-run the check
+      after an approving review or /onus approve). See `onus help ci`.
     required: false
     default: 'false'
   records-branch:
     description: The branch that holds the records.
     required: false
     default: onus/records
+  wait-for-review:
+    description: >-
+      'true' (with records) to fail the job while the change is in the human lane and no review
+      counts yet: an approval of the head commit by an owner of what changed (lanes.approval in
+      onus.yaml), with no changes requested. Add pull_request_review to the workflow's events so an
+      approval updates the check. See `onus help ci`.
+    required: false
+    default: 'true'
   judge:
     description: >-
       'true' (with records) to run the verifying judge when the lane is judge: it re-runs the
-      evidence in containers and runs held-out checks. Needs Docker, which GitHub's Linux runners have.
+      evidence in containers and runs the held-out checks (see held-out). Needs Docker, which
+      GitHub's Linux runners have.
     required: false
     default: 'false'
+  held-out:
+    description: >-
+      A directory outside the working directory holding a held-out suite (held-out.yaml and its
+      tests), for example cloned from a private repository with its own token into $RUNNER_TEMP.
+      Passed to onus ci pr --held-out.
+    required: false
+    default: ''
   evidence:
     description: >-
       Test runs to submit as evidence, as a glob of JSON files from onus run-test or onus env run
-      made earlier in the job (with records).
+      made earlier in the job (with records). The report also reads the coverage that runs from
+      onus env run recorded at the head commit.
+    required: false
+    default: ''
+  submission:
+    description: >-
+      The agent's own submission of the change (onus submit's JSON), written by an earlier step
+      (with records). Its token and escalations go into the change's provenance. When empty, a
+      submission kept on the records branch at submissions/<pull request number>.json or
+      submissions/<head commit>.json is used. The action cannot verify the token itself, see the
+      door log, or see Onus Cloud's calls (`onus help provenance`).
+    required: false
+    default: ''
+  coverage:
+    description: >-
+      Coverage of the head commit (lcov, Cobertura XML or Istanbul JSON) written by an earlier
+      step, as a glob. Check out the pull request's head commit for that step
+      (actions/checkout with ref: github.event.pull_request.head.sha); coverage measured at
+      another commit is left out.
+    required: false
+    default: ''
+  behavior:
+    description: >-
+      Run the behavior diff: the tests that reach the change run at the base and at the head in
+      containers (environment.behavior in the base commit's onus.yaml), and what changed becomes
+      rows. Needs Docker, which GitHub's Linux runners have.
+    required: false
+    default: 'false'
+  behavior-budget:
+    description: Seconds for the behavior diff, environments included. Default the config's, else 600.
+    required: false
+    default: ''
+  rollout-percent:
+    description: >-
+      With records, on deployment_status or workflow_dispatch: the share of production traffic the
+      deploy reached. Runs only the rollout step (onus ci rollout); see `onus help production`.
+    required: false
+    default: ''
+  rollout-change:
+    description: >-
+      The change being rolled out: owner/repo#123, or a commit. Default the deployment's commit
+      (github.sha).
+    required: false
+    default: ''
+  rollout-metrics:
+    description: >-
+      A JSON file of the stage's metric samples (schemas/rollout-metrics.schema.json), written by an
+      earlier step of the job.
     required: false
     default: ''
   plugins:
@@ -141,11 +219,33 @@ outputs:
   lane:
     description: The change's risk lane when lanes is 'true'.
     value: ${{ steps.lane.outputs.lane }}
+  review:
+    description: >-
+      With records, in the human lane: 'approved' when a review counts, 'waiting' when none does
+      yet. Empty in other lanes.
+    value: ${{ steps.lane.outputs.review }}
+  provenance:
+    description: >-
+      Path of the change's provenance record with records 'true'
+      (schemas/provenance.schema.json): written while the pull request is
+      open, and rebuilt when it closes.
+    value: ${{ steps.outcome.outputs.provenance || steps.lane.outputs.provenance }}
   metrics:
     description: >-
       One line of JSON about this report (sizes, counts, time taken), also
       kept in the comment for `scripts/onus-metrics.sh`.
     value: ${{ steps.report.outputs.metrics }}
+  rollout-strategy:
+    description: The rollout strategy for the change's lane with records 'true' (none, canary or flag).
+    value: ${{ steps.lane.outputs.rollout-strategy }}
+  rollout-plan:
+    description: Path of the change's rollout plan with records 'true' (`onus help production`).
+    value: ${{ steps.lane.outputs.rollout-plan }}
+  rollout-decision:
+    description: >-
+      Onus's decision on a rollout stage (promote, hold, rollback or complete), with
+      rollout-percent.
+    value: ${{ steps.rollout.outputs.rollout-decision }}
 
 runs:
   using: composite
@@ -178,7 +278,8 @@ runs:
     - name: Install onus
       id: install
       if: >-
-        (github.event_name == 'pull_request' && (github.event.action != 'closed' || inputs.records == 'true')) ||
+        ((github.event_name == 'pull_request' || (github.event_name == 'pull_request_review' && github.event.pull_request.state == 'open')) && (github.event.action != 'closed' || inputs.records == 'true')) ||
+        (inputs.records == 'true' && inputs.rollout-percent != '') ||
         (inputs.records == 'true' && (github.event_name == 'push' ||
         (github.event_name == 'issue_comment' && startsWith(github.event.comment.body, '/onus'))))
       shell: bash
@@ -238,7 +339,7 @@ runs:
         echo "$dir/onus-$target" >> "$GITHUB_PATH"
 
     - name: Restore the base map
-      if: github.event_name == 'pull_request' && github.event.action != 'closed' && inputs.cache == 'true' && inputs.base != ''
+      if: (github.event_name == 'pull_request' || (github.event_name == 'pull_request_review' && github.event.pull_request.state == 'open')) && github.event.action != 'closed' && inputs.cache == 'true' && inputs.base != ''
       uses: actions/cache@v5
       with:
         path: ${{ runner.temp }}/onus-map-cache
@@ -249,7 +350,7 @@ runs:
 
     - name: Report
       id: report
-      if: github.event_name == 'pull_request' && github.event.action != 'closed'
+      if: (github.event_name == 'pull_request' || (github.event_name == 'pull_request_review' && github.event.pull_request.state == 'open')) && github.event.action != 'closed'
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       env:
@@ -265,6 +366,12 @@ runs:
         FAIL_ON: ${{ inputs.fail-on }}
         CONFIG: ${{ inputs.config }}
         PLUGINS: ${{ inputs.plugins }}
+        RECORDS: ${{ inputs.records }}
+        RECORDS_BRANCH: ${{ inputs.records-branch }}
+        COVERAGE: ${{ inputs.coverage }}
+        EVIDENCE: ${{ inputs.evidence }}
+        BEHAVIOR: ${{ inputs.behavior }}
+        BEHAVIOR_BUDGET: ${{ inputs.behavior-budget }}
         # Passed through the environment, never pasted into the script, so a
         # pull request body cannot inject commands.
         PR_BODY: ${{ github.event.pull_request.body }}
@@ -301,6 +408,40 @@ runs:
         if [ "$CACHE" = true ] && "$ONUS" report --help | grep -q -- --cache-dir; then
           args+=(--cache-dir "$CACHE_DIR")
         fi
+        # With records, production traces kept in them join the map; the lane
+        # step reuses the folder.
+        if [ "$RECORDS" = true ] && "$ONUS" signals --help > /dev/null 2>&1; then
+          "$ONUS" ci records pull --dir "$RUNNER_TEMP/onus-records" --branch "$RECORDS_BRANCH"
+          if [ -s "$RUNNER_TEMP/onus-records/signals.jsonl" ]; then
+            args+=(--traces "$RUNNER_TEMP/onus-records/signals.jsonl")
+          fi
+        fi
+        # Coverage belongs to the commit the tests ran at: only the head's counts.
+        if [ -n "$COVERAGE" ] && "$ONUS" report --help | grep -q -- --coverage; then
+          checkout=$(git rev-parse HEAD)
+          if [ "$checkout" = "$(git rev-parse "$HEAD^{commit}")" ]; then
+            shopt -s nullglob globstar
+            for f in $COVERAGE; do args+=(--coverage "$f"); done
+            shopt -u nullglob globstar
+          else
+            echo "::warning::The checkout is $checkout, not the head commit $HEAD; coverage is left out."
+          fi
+        fi
+        # Runs from onus env run: the coverage they recorded at the head counts.
+        if [ -n "$EVIDENCE" ] && "$ONUS" report --help | grep -q -- --evidence; then
+          shopt -s nullglob globstar
+          for f in $EVIDENCE; do args+=(--evidence "$f"); done
+          shopt -u nullglob globstar
+        fi
+        # The tests that reach the change, run at both commits; older releases skip it.
+        if [ "$BEHAVIOR" = true ]; then
+          if "$ONUS" report --help | grep -q -- --behavior; then
+            args+=(--behavior)
+            [ -n "$BEHAVIOR_BUDGET" ] && args+=(--behavior-budget "$BEHAVIOR_BUDGET")
+          else
+            echo "::warning::This onus has no --behavior; the behavior diff is skipped."
+          fi
+        fi
         # Milliseconds; perl is on every GitHub runner, `date +%N` is not.
         ms() { perl -MTime::HiRes=time -e 'printf "%d\n", time * 1000'; }
         status=0
@@ -333,7 +474,8 @@ runs:
             needsAttention: .summary.needsAttention,
             secrets: .summary.secrets,
             ruleViolations: .summary.newRuleViolations,
-            intentMismatches: .summary.intentMismatches
+            intentMismatches: .summary.intentMismatches,
+            coverage: (.coverage | if . then {changed, ran} else null end)
           }' "$out/onus-report.json" > "$out/onus-metrics.json"
         {
           echo "report=$out/onus-report.json"
@@ -347,7 +489,7 @@ runs:
     - name: Lane
       id: lane
       if: >-
-        github.event_name == 'pull_request' && github.event.action != 'closed' &&
+        (github.event_name == 'pull_request' || (github.event_name == 'pull_request_review' && github.event.pull_request.state == 'open')) && github.event.action != 'closed' &&
         (inputs.lanes == 'true' || inputs.records == 'true')
       shell: bash
       working-directory: ${{ inputs.working-directory }}
@@ -359,35 +501,137 @@ runs:
         RECORDS: ${{ inputs.records }}
         RECORDS_BRANCH: ${{ inputs.records-branch }}
         JUDGE: ${{ inputs.judge }}
+        HELD_OUT: ${{ inputs.held-out }}
         EVIDENCE: ${{ inputs.evidence }}
+        SUBMISSION: ${{ inputs.submission }}
         BASE: ${{ inputs.base }}
         HEAD: ${{ inputs.head }}
         CHANGE: ${{ github.repository }}#${{ github.event.pull_request.number }}
         BRANCH: ${{ github.event.pull_request.head.ref }}
         AUTHOR: ${{ github.event.pull_request.user.login }}
         PR_BODY: ${{ github.event.pull_request.body }}
+        GH_TOKEN: ${{ inputs.github-token }}
+        REPO: ${{ github.repository }}
+        PR: ${{ github.event.pull_request.number }}
       run: |
         set -euo pipefail
+        # The submission input, else submissions/<number>.json or
+        # submissions/<head commit>.json in the records; empty when none.
+        submission_of() {
+          if [ -n "$SUBMISSION" ]; then echo "$SUBMISSION"; return; fi
+          local sha
+          sha=$(git rev-parse --verify --quiet "$HEAD^{commit}" || true)
+          for f in "$1/submissions/$PR.json" ${sha:+"$1/submissions/$sha.json"}; do
+            if [ -f "$f" ]; then echo "$f"; return; fi
+          done
+        }
         if [ "$RECORDS" = true ] && "$ONUS" ci --help > /dev/null 2>&1; then
           dir="$RUNNER_TEMP/onus-records"
           out="$RUNNER_TEMP/onus/ci"
           printf '%s' "$PR_BODY" > "$RUNNER_TEMP/onus/pr-body.md"
-          "$ONUS" ci records pull --dir "$dir" --branch "$RECORDS_BRANCH"
+          # The report step pulled them already, with releases that keep signals.
+          if [ ! -d "$dir" ]; then
+            "$ONUS" ci records pull --dir "$dir" --branch "$RECORDS_BRANCH"
+          fi
           args=(--base "$BASE" --head "$HEAD" --change "$CHANGE" --branch "$BRANCH" --author "$AUTHOR"
             --body-file "$RUNNER_TEMP/onus/pr-body.md" --report "$REPORT" --records "$dir" --out "$out")
           [ -n "$CONFIG" ] && args+=(--config "$CONFIG")
           [ "$JUDGE" = true ] && args+=(--judge)
+          [ -n "$HELD_OUT" ] && args+=(--held-out "$HELD_OUT")
           if [ -n "$EVIDENCE" ]; then
             shopt -s nullglob globstar
             for f in $EVIDENCE; do args+=(--evidence "$f"); done
           fi
+          # The agent's own submission, for the change's provenance: the input,
+          # else one kept on the records branch for this pull request or its head.
+          sub=$(submission_of "$dir")
+          if [ -n "$sub" ] && "$ONUS" ci pr --help | grep -q -- --submission; then
+            args+=(--submission "$sub")
+          fi
+          # The pull request's reviews, as GitHub has them; onus decides which
+          # count. When they cannot be listed, none are passed and a human-lane
+          # change keeps waiting.
+          org=$(cut -d/ -f1 <<< "$REPO" | tr '[:upper:]' '[:lower:]')
+          if "$ONUS" ci pr --help | grep -q -- --reviews; then
+            reviews="$RUNNER_TEMP/onus/reviews.json"
+            if gh api "repos/$REPO/pulls/$PR/reviews" --paginate --jq '.[]' > "$reviews.lines"; then
+              # GitHub may send a null user (a deleted account) or commit.
+              jq -s 'map({by: (.user.login // "ghost"), state: (.state // ""), commit: (.commit_id // ""),
+                association: (.author_association // "NONE"),
+                bot: (.user.type == "Bot"), at: ((.submitted_at // "1970-01-01T00:00:00Z") | fromdate)})' \
+                "$reviews.lines" > "$reviews"
+              # Who is in each owning team of this organisation, when the token
+              # may read it (org members: read). Without it, onus counts anyone
+              # with write access for those teams and says so. The owners are
+              # the ones onus reads at the base commit.
+              if "$ONUS" ci owners --help > /dev/null 2>&1; then
+                owner_args=(--base "$BASE" --report "$REPORT")
+                [ -n "$CONFIG" ] && owner_args+=(--config "$CONFIG")
+                teams='{}'
+                for team in $("$ONUS" ci owners "${owner_args[@]}" |
+                    jq -r '.owners[] | select(startswith("@") and contains("/"))' | head -n 20 || true); do
+                  [ "$(cut -d/ -f1 <<< "${team#@}" | tr '[:upper:]' '[:lower:]')" = "$org" ] || continue
+                  slug=$(tr '[:upper:]' '[:lower:]' <<< "${team#*/}")
+                  if members=$(gh api "orgs/$org/teams/$slug/members" --paginate --jq '.[].login' 2> /dev/null); then
+                    teams=$(jq -c --arg t "$team" --arg m "$members" '. + {($t): ($m | split("\n") | map(select(. != "")))}' <<< "$teams")
+                  else
+                    echo "::notice::Cannot read the members of $team (the token needs org members: read); onus says how it counted."
+                  fi
+                done
+                jq --argjson teams "$teams" '{reviews: ., teams: $teams}' "$reviews" > "$reviews.tmp"
+                mv "$reviews.tmp" "$reviews"
+              fi
+              args+=(--reviews "$reviews")
+            else
+              echo "::warning::Cannot list the reviews of $CHANGE; a change in the human lane keeps waiting."
+            fi
+          fi
           summary=$("$ONUS" ci pr "${args[@]}")
+          # Ask the owners onus names to review, each once per pull request:
+          # @org/team of this organisation as a team, @login as a person, never
+          # the author; emails and other organisations' teams are skipped. When
+          # GitHub refuses the list, ask one at a time, so one name it refuses
+          # (not a collaborator, or a team without access) does not cost the rest.
+          request=$(jq -c --arg org "$org" --arg author "$AUTHOR" '
+            [.review.request[]? | select(startswith("@")) | ltrimstr("@")] as $o
+            | {reviewers: [$o[] | select((contains("/") | not) and ascii_downcase != ($author | ascii_downcase))],
+               team_reviewers: [$o[] | select(contains("/")) | split("/") | select(.[0] | ascii_downcase == $org) | .[1] | ascii_downcase]}
+            | .reviewers |= .[:15] | (15 - (.reviewers | length)) as $left
+            | .team_reviewers |= .[:$left]' <<< "$summary")
+          # onus has recorded them as asked either way, so a refused name is
+          # not tried again on every push; the comment says GitHub refused it.
+          refused=()
+          if [ "$(jq '.reviewers + .team_reviewers | length' <<< "$request")" -gt 0 ] &&
+            ! gh api -X POST "repos/$REPO/pulls/$PR/requested_reviewers" --input - <<< "$request" > /dev/null 2>&1; then
+            for one in $(jq -c --arg org "$org" '(.reviewers[] | {reviewers: [.], name: "@\(.)"}),
+                (.team_reviewers[] | {team_reviewers: [.], name: "@\($org)/\(.)"})' <<< "$request"); do
+              name=$(jq -r .name <<< "$one")
+              if ! jq -c 'del(.name)' <<< "$one" |
+                gh api -X POST "repos/$REPO/pulls/$PR/requested_reviewers" --input - > /dev/null 2>&1; then
+                echo "::warning::Cannot ask $name to review (not a collaborator, a team without access, or a read-only token on a fork?)."
+                refused+=("$name")
+              fi
+            done
+          fi
+          if [ "${#refused[@]}" -gt 0 ]; then
+            printf -v names '%s, ' "${refused[@]}"
+            printf '\nGitHub would not ask %s to review: not a collaborator, a team without access, or a read-only token.\n' \
+              "${names%, }" >> "$out/lane.md"
+          fi
           # Pull requests from forks get a read-only token: classified, not recorded.
           "$ONUS" ci records push --dir "$dir" --branch "$RECORDS_BRANCH" --message "$CHANGE classified" ||
             echo "::warning::Cannot push the records to $RECORDS_BRANCH (a read-only token on a fork?)."
           cat "$out/lane.md" >> "$MD"
           cat "$out/lane.md" >> "$GITHUB_STEP_SUMMARY"
           echo "lane=$(jq -r .lane <<< "$summary")" >> "$GITHUB_OUTPUT"
+          # Releases without reviews print no review: nothing waits.
+          echo "review=$(jq -r 'if (.review.required // false) | not then ""
+            elif .review.satisfied then "approved" else "waiting" end' <<< "$summary")" >> "$GITHUB_OUTPUT"
+          if [ -f "$out/provenance.json" ]; then echo "provenance=$out/provenance.json" >> "$GITHUB_OUTPUT"; fi
+          if [ -f "$out/rollout.json" ]; then
+            echo "rollout-strategy=$(jq -r '.rollout.strategy // empty' <<< "$summary")" >> "$GITHUB_OUTPUT"
+            echo "rollout-plan=$out/rollout.json" >> "$GITHUB_OUTPUT"
+          fi
           exit 0
         fi
         if ! "$ONUS" classify --help > /dev/null 2>&1; then
@@ -404,10 +648,13 @@ runs:
         printf '%s\n' "$line" >> "$MD"
         printf '%s\n' "$line" >> "$GITHUB_STEP_SUMMARY"
         echo "lane=$lane" >> "$GITHUB_OUTPUT"
+        if [ "$lane" = human ]; then
+          echo "::notice::Onus put this change in the human lane. Without records: true nothing waits for a review (onus help ci)."
+        fi
 
     - name: Apply the lane
       if: >-
-        github.event_name == 'pull_request' && inputs.apply-lane == 'true' &&
+        (github.event_name == 'pull_request' || (github.event_name == 'pull_request_review' && github.event.pull_request.state == 'open')) && inputs.apply-lane == 'true' &&
         steps.lane.outputs.lane != '' && github.event.pull_request.number &&
         github.event.pull_request.head.repo.full_name == github.repository
       shell: bash
@@ -429,7 +676,7 @@ runs:
 
     - name: Auto-merge
       if: >-
-        github.event_name == 'pull_request' && inputs.auto-merge == 'true' &&
+        (github.event_name == 'pull_request' || (github.event_name == 'pull_request_review' && github.event.pull_request.state == 'open')) && inputs.auto-merge == 'true' &&
         steps.lane.outputs.lane == 'auto-merge' && github.event.pull_request.number
       shell: bash
       env:
@@ -440,7 +687,7 @@ runs:
 
     - name: Comment
       if: >-
-        github.event_name == 'pull_request' && github.event.action != 'closed' &&
+        (github.event_name == 'pull_request' || (github.event_name == 'pull_request_review' && github.event.pull_request.state == 'open')) && github.event.action != 'closed' &&
         inputs.comment == 'true' && github.event.pull_request.number &&
         github.event.pull_request.head.repo.full_name == github.repository
       shell: bash
@@ -473,7 +720,7 @@ runs:
         fi
 
     - name: Fail on findings
-      if: github.event_name == 'pull_request' && steps.report.outputs.failed == 'true'
+      if: (github.event_name == 'pull_request' || (github.event_name == 'pull_request_review' && github.event.pull_request.state == 'open')) && steps.report.outputs.failed == 'true'
       shell: bash
       env:
         FAIL_ON: ${{ inputs.fail-on }}
@@ -483,14 +730,51 @@ runs:
 
     - name: Fail when blocked
       if: >-
-        github.event_name == 'pull_request' && inputs.apply-lane == 'true' &&
+        (github.event_name == 'pull_request' || (github.event_name == 'pull_request_review' && github.event.pull_request.state == 'open')) && inputs.apply-lane == 'true' &&
         steps.lane.outputs.lane == 'blocked'
       shell: bash
       run: |
         echo "::error::Onus put this change in the blocked lane (see the report)"
         exit 2
 
+    - name: Wait for a review
+      if: >-
+        (github.event_name == 'pull_request' || (github.event_name == 'pull_request_review' && github.event.pull_request.state == 'open')) &&
+        inputs.wait-for-review == 'true' && steps.lane.outputs.review == 'waiting'
+      shell: bash
+      env:
+        EVENT: ${{ github.event_name }}
+      run: |
+        echo "::error::Onus put this change in the human lane: it waits for an approving review of its head commit (see the report)"
+        if [ "$EVENT" = pull_request ]; then
+          echo "::notice::An approval updates this check only when the workflow also runs on pull_request_review (onus help ci)."
+        fi
+        exit 1
+
+    - name: Re-run the pull request's check
+      if: >-
+        github.event_name == 'pull_request_review' && github.event.pull_request.state == 'open' &&
+        steps.lane.outputs.review == 'approved'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        REPO: ${{ github.repository }}
+        SHA: ${{ github.event.pull_request.head.sha }}
+        WORKFLOW: ${{ github.workflow }}
+      run: |
+        set -euo pipefail
+        # The pull_request run for this head failed while it waited; run it
+        # again so its check passes too. This run's own check counts either
+        # way, so failing to re-run is only a warning.
+        if ! run=$(gh run list --repo "$REPO" --workflow "$WORKFLOW" --commit "$SHA" --event pull_request \
+          --limit 1 --json databaseId,conclusion --jq '.[0] | select(.conclusion == "failure") | .databaseId'); then
+          echo "::warning::Cannot list the pull request's runs (needs actions: read)."
+        elif [ -n "$run" ]; then
+          gh run rerun "$run" --repo "$REPO" || echo "::warning::Cannot re-run the check (needs actions: write)."
+        fi
+
     - name: Record the outcome
+      id: outcome
       if: github.event_name == 'pull_request' && github.event.action == 'closed' && inputs.records == 'true'
       shell: bash
       working-directory: ${{ inputs.working-directory }}
@@ -500,15 +784,39 @@ runs:
         CHANGE: ${{ github.repository }}#${{ github.event.pull_request.number }}
         MERGED: ${{ github.event.pull_request.merged }}
         COMMIT: ${{ github.event.pull_request.merge_commit_sha }}
+        MERGED_BY: ${{ github.event.pull_request.merged_by.login }}
+        SUBMISSION: ${{ inputs.submission }}
+        PR: ${{ github.event.pull_request.number }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       run: |
         set -euo pipefail
         dir="$RUNNER_TEMP/onus-records"
         "$ONUS" ci records pull --dir "$dir" --branch "$RECORDS_BRANCH"
         args=(--change "$CHANGE" --records "$dir")
         if [ "$MERGED" = true ]; then args+=(--merged --commit "$COMMIT"); fi
+        # Releases with provenance also know who merged it.
+        provenance=false
+        if "$ONUS" provenance --help > /dev/null 2>&1; then provenance=true; fi
+        if [ "$provenance" = true ] && [ -n "$MERGED_BY" ]; then args+=(--merged-by "$MERGED_BY"); fi
         "$ONUS" ci closed "${args[@]}"
         "$ONUS" ci records push --dir "$dir" --branch "$RECORDS_BRANCH" --message "$CHANGE closed" ||
           echo "::warning::Cannot push the records to $RECORDS_BRANCH (a read-only token on a fork?)."
+        if [ "$provenance" = true ]; then
+          mkdir -p "$RUNNER_TEMP/onus"
+          prov=(--change "$CHANGE" --records "$dir" --out "$RUNNER_TEMP/onus/provenance.json")
+          # The agent's own submission brings its token and escalations, and
+          # only those, when it is for one of the pull request's commits; one
+          # that cannot be read is a warning.
+          sub="$SUBMISSION"
+          for f in "$dir/submissions/$PR.json" "$dir/submissions/$HEAD_SHA.json"; do
+            if [ -z "$sub" ] && [ -f "$f" ]; then sub="$f"; fi
+          done
+          if [ -n "$sub" ] && "$ONUS" provenance --help | grep -q -- --agent-submission; then
+            prov+=(--agent-submission "$sub")
+          fi
+          "$ONUS" provenance "${prov[@]}"
+          echo "provenance=$RUNNER_TEMP/onus/provenance.json" >> "$GITHUB_OUTPUT"
+        fi
 
     - name: /onus commands
       if: >-
@@ -537,7 +845,24 @@ runs:
         answer=$("$ONUS" ci comment --change "$CHANGE" --body-file "$RUNNER_TEMP/onus-comment.md" \
           --author "$AUTHOR" --association "$ASSOCIATION" --records "$dir")
         command=$(jq -r '.command // empty' <<< "$answer")
-        [ -z "$command" ] || [ "$command" = caught ] && exit 0
+        [ -z "$command" ] && exit 0
+        # A caught from someone with write access is recorded, for the learned
+        # lane model; the first step already reacted to it.
+        if [ "$command" = caught ]; then
+          if [ "$(jq -r '.recorded // false' <<< "$answer")" = true ]; then
+            "$ONUS" ci records push --dir "$dir" --branch "$RECORDS_BRANCH" --message "$CHANGE: /onus caught by $AUTHOR" ||
+              echo "::warning::Cannot push the records to $RECORDS_BRANCH (a read-only token on a fork?)."
+          fi
+          exit 0
+        fi
+        # An accuracy check is answered, not recorded: there is nothing to push.
+        if [ "$command" = accuracy ]; then
+          reaction=$([ "$(jq -r .ok <<< "$answer")" = true ] && echo '+1' || echo confused)
+          gh api --method POST "repos/$REPO/issues/comments/$COMMENT_ID/reactions" -f content="$reaction" > /dev/null
+          reply=$(jq -r '.reply // empty' <<< "$answer")
+          [ -n "$reply" ] && gh api --method POST "repos/$REPO/issues/$PR/comments" -f body="$reply" > /dev/null
+          exit 0
+        fi
         "$ONUS" ci records push --dir "$dir" --branch "$RECORDS_BRANCH" --message "$CHANGE: /onus $command by $AUTHOR"
         reaction=$([ "$(jq -r .ok <<< "$answer")" = true ] && echo '+1' || echo confused)
         gh api --method POST "repos/$REPO/issues/comments/$COMMENT_ID/reactions" -f content="$reaction" > /dev/null
@@ -547,8 +872,9 @@ runs:
         if [ "$(jq -r .rerun <<< "$answer")" = true ]; then
           sha=$(gh pr view "$PR" --repo "$REPO" --json headRefOid --jq .headRefOid)
           run=$(gh run list --repo "$REPO" --workflow "$WORKFLOW" --commit "$sha" --event pull_request \
-            --limit 1 --json databaseId --jq '.[0].databaseId // empty')
-          if [ -n "$run" ]; then
+            --limit 1 --json databaseId --jq '.[0].databaseId // empty') ||
+            echo "::warning::Cannot list the pull request's runs (needs actions: read); push to update the lane."
+          if [ -n "${run:-}" ]; then
             gh run rerun "$run" --repo "$REPO" || echo "::warning::Cannot re-run the check (needs actions: write); push to update the lane."
           fi
         fi
@@ -572,3 +898,38 @@ runs:
         fi
         "$ONUS" ci push "${args[@]}"
         "$ONUS" ci records push --dir "$dir" --branch "$RECORDS_BRANCH" --message "Reverts on ${GITHUB_REF_NAME}"
+
+    - name: Rollout stage
+      id: rollout
+      if: inputs.records == 'true' && inputs.rollout-percent != ''
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        ONUS: ${{ steps.install.outputs.onus }}
+        RECORDS_BRANCH: ${{ inputs.records-branch }}
+        PERCENT: ${{ inputs.rollout-percent }}
+        CHANGE: ${{ inputs.rollout-change }}
+        METRICS: ${{ inputs.rollout-metrics }}
+        DEPLOY: ${{ github.event.deployment.id }}
+      run: |
+        set -euo pipefail
+        dir="$RUNNER_TEMP/onus-records"
+        "$ONUS" ci records pull --dir "$dir" --branch "$RECORDS_BRANCH"
+        args=(--percent "$PERCENT" --records "$dir")
+        case "$CHANGE" in
+          *#*) args+=(--change "$CHANGE") ;;
+          "") args+=(--commit "$GITHUB_SHA") ;;
+          *) args+=(--commit "$CHANGE") ;;
+        esac
+        [ -n "$METRICS" ] && args+=(--metrics "$METRICS")
+        [ -n "$DEPLOY" ] && args+=(--deploy "$DEPLOY")
+        code=0
+        decision=$("$ONUS" ci rollout "${args[@]}") || code=$?
+        if [ "$code" -ne 0 ] && [ "$code" -ne 2 ] && [ "$code" -ne 3 ]; then exit "$code"; fi
+        "$ONUS" ci records push --dir "$dir" --branch "$RECORDS_BRANCH" --message "Rollout at $PERCENT%"
+        echo "rollout-decision=$(jq -r .decision <<< "$decision")" >> "$GITHUB_OUTPUT"
+        echo "$decision" >> "$GITHUB_STEP_SUMMARY"
+        if [ "$code" -eq 2 ]; then
+          echo "::error::Onus decided to roll back: $(jq -r '.reasons | join("; ")' <<< "$decision")"
+          exit 2
+        fi

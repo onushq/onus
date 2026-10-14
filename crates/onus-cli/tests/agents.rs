@@ -9,7 +9,7 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use common::{apply_overlay, copy_dir, fixture};
+use common::{Mcp, apply_overlay, copy_dir, fixture};
 use onus_cli::session::Session;
 use onus_map::FactsCache;
 
@@ -75,84 +75,6 @@ fn a_session_follows_file_changes_and_reparses_only_them() {
     assert_eq!(cache.stats().misses, parsed + 1);
 }
 
-struct Mcp {
-    child: std::process::Child,
-    out: BufReader<std::process::ChildStdout>,
-    next: u64,
-}
-
-impl Mcp {
-    fn start(repo: &Path) -> Mcp {
-        Mcp::start_with(repo, &[])
-    }
-
-    fn start_with(repo: &Path, extra: &[&str]) -> Mcp {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_onus"))
-            .args(["mcp", "--no-server", "--repo"])
-            .arg(repo)
-            .args(extra)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        let out = BufReader::new(child.stdout.take().unwrap());
-        let mut mcp = Mcp {
-            child,
-            out,
-            next: 1,
-        };
-        let init = mcp.call(
-            "initialize",
-            serde_json::json!({
-                "protocolVersion": "2025-06-18",
-                "capabilities": {},
-                "clientInfo": { "name": "onus-test", "version": "0" }
-            }),
-        );
-        assert_eq!(init["result"]["serverInfo"]["name"], "onus");
-        mcp.send(serde_json::json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }));
-        mcp
-    }
-
-    fn send(&mut self, msg: serde_json::Value) {
-        let stdin = self.child.stdin.as_mut().unwrap();
-        writeln!(stdin, "{msg}").unwrap();
-        stdin.flush().unwrap();
-    }
-
-    fn call(&mut self, method: &str, params: serde_json::Value) -> serde_json::Value {
-        let id = self.next;
-        self.next += 1;
-        self.send(
-            serde_json::json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }),
-        );
-        let mut line = String::new();
-        self.out.read_line(&mut line).unwrap();
-        serde_json::from_str(&line).unwrap()
-    }
-
-    /// Calls a tool; returns whether it failed and its JSON (or message).
-    fn tool(&mut self, name: &str, args: serde_json::Value) -> (bool, serde_json::Value) {
-        let r = self.call(
-            "tools/call",
-            serde_json::json!({ "name": name, "arguments": args }),
-        );
-        let result = &r["result"];
-        let text = result["content"][0]["text"].as_str().unwrap().to_string();
-        let failed = result["isError"].as_bool().unwrap_or(false);
-        let body = serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text));
-        (failed, body)
-    }
-}
-
-impl Drop for Mcp {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
 #[test]
 fn mcp_serves_the_map_tools_over_stdio() {
     let repo = shop_repo();
@@ -169,6 +91,7 @@ fn mcp_serves_the_map_tools_over_stdio() {
     assert_eq!(
         names,
         [
+            "onus_blocked",
             "onus_check",
             "onus_component",
             "onus_dependencies",
@@ -215,6 +138,19 @@ fn mcp_serves_the_map_tools_over_stdio() {
             .unwrap()
             > 0
     );
+
+    // Each test says how its link is known; without coverage, from the syntax.
+    let (failed, tests) = mcp.tool(
+        "onus_tests_for",
+        serde_json::json!({ "target": "applyDiscount" }),
+    );
+    assert!(!failed, "{tests}");
+    assert_eq!(
+        tests["result"]["tests"][0]["file"],
+        "services/billing/src/discount.test.ts"
+    );
+    assert_eq!(tests["result"]["tests"][0]["link"], "static");
+    assert!(tests["result"].get("coverage").is_none());
 
     let (failed, msg) = mcp.tool("onus_symbol", serde_json::json!({ "id": "nope" }));
     assert!(failed);
@@ -459,6 +395,7 @@ fn mcp_with_a_task_token_answers_only_within_its_read_scope() {
     );
     assert!(failed, "{body}");
     assert!(body.as_str().unwrap().contains("outside the read scope"));
+    assert!(body.as_str().unwrap().contains("onus_escalate"), "{body}");
     // Search answers keep only readable files.
     let (failed, found) = mcp.tool("onus_find", serde_json::json!({ "text": "preferences" }));
     assert!(!failed);
@@ -498,7 +435,7 @@ fn agents_hand_in_changes_and_ask_for_more_through_mcp() {
     let plan = keys.path().join("plan.yaml");
     std::fs::write(
         &plan,
-        "task: sms-alerts\nwrites: [\"services/notifications/**\"]\n",
+        "task: sms-alerts\nwrites: [\"services/notifications/**\"]\nagent: {tool: claude-code, model: opus}\n",
     )
     .unwrap();
     let key = keys.path().join("root.key");
@@ -527,10 +464,19 @@ fn agents_hand_in_changes_and_ask_for_more_through_mcp() {
             "base": "main",
             "head": "feature/sms",
             "intent": "summary: Text customers when their order ships\ntouches: [notifications]",
-            "agent_tool": "claude-code",
+            "agent_tool": "codex",
         }),
     );
     assert!(!failed, "{sub}");
+    // Who did it comes from the token, not from what the agent says.
+    assert_eq!(sub["agent"]["tool"], "claude-code", "{sub}");
+    assert!(
+        sub["agentNote"]
+            .as_str()
+            .unwrap()
+            .contains("comes from your token"),
+        "{sub}"
+    );
     // The change also edits user-preferences, outside the token's scope: the
     // scope the server attached, not one the agent chose, blocks it.
     assert_eq!(sub["lane"], "blocked", "{sub}");
@@ -540,7 +486,12 @@ fn agents_hand_in_changes_and_ask_for_more_through_mcp() {
     );
     assert_eq!(sub["scope"]["task"], "sms-alerts");
     let id = sub["id"].as_str().unwrap();
-    assert!(r.join(format!(".onus/submissions/{id}.json")).exists());
+    let stored: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(r.join(format!(".onus/submissions/{id}.json"))).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(stored["agent"]["tool"], "claude-code");
+    assert_eq!(stored["agent"]["model"], "opus");
     assert!(sub["rows"].as_array().unwrap().len() >= 3);
 
     // Asking for more: filed as the token's task, whatever the agent says.
@@ -558,8 +509,32 @@ fn agents_hand_in_changes_and_ask_for_more_through_mcp() {
     let eid = esc["id"].as_str().unwrap().to_string();
     let (_, state) = mcp.tool("onus_escalation", serde_json::json!({ "id": eid }));
     assert_eq!(state["state"], "open", "{state}");
+    let submit = |mcp: &mut Mcp, ids: &[&str]| {
+        mcp.tool(
+            "onus_submit",
+            serde_json::json!({
+                "base": "main",
+                "head": "feature/sms",
+                "intent": "summary: Text customers when their order ships\ntouches: [notifications, orders]",
+                "escalations": ids,
+            }),
+        )
+    };
+    // An escalation not granted yet, or one that does not exist, is refused.
+    let (failed, msg) = submit(&mut mcp, &[&eid]);
+    assert!(failed, "{msg}");
+    let msg = msg.as_str().unwrap();
+    assert!(
+        msg.contains("is still open") || msg.contains("is waiting for a person"),
+        "{msg}"
+    );
+    let (failed, msg) = submit(&mut mcp, &["deadbeef0000"]);
+    assert!(failed);
+    assert!(msg.as_str().unwrap().contains("no escalation"), "{msg}");
 
-    // A person grants it from the command line; the agent collects the token.
+    // A person grants it from the command line, logging it in their own log
+    // rather than the server's: the kept token proves the grant by itself.
+    // The agent collects it.
     let request = r.join(format!(".onus/escalations/{eid}.json"));
     onus(&[
         "escalation",
@@ -574,10 +549,12 @@ fn agents_hand_in_changes_and_ask_for_more_through_mcp() {
         "--by",
         "@lead",
         "--audit",
-        r.join(".onus/audit.jsonl").to_str().unwrap(),
+        keys.path().join("person.jsonl").to_str().unwrap(),
     ]);
     let (_, state) = mcp.tool("onus_escalation", serde_json::json!({ "id": eid }));
     assert_eq!(state["state"], "granted", "{state}");
+    // The server uses the granted token from now on.
+    assert_eq!(state["adopted"], true, "{state}");
     let granted = state["token"].as_str().unwrap();
     let check = Command::new(env!("CARGO_BIN_EXE_onus"))
         .args([
@@ -593,6 +570,25 @@ fn agents_hand_in_changes_and_ask_for_more_through_mcp() {
         .unwrap();
     assert!(check.status.success());
 
+    // Submitting with the granted escalation: verified, listed, and the
+    // scope is the granted token's.
+    let (failed, sub) = submit(&mut mcp, &[&eid]);
+    assert!(!failed, "{sub}");
+    assert_eq!(sub["escalations"], serde_json::json!([eid]), "{sub}");
+    let id = sub["id"].as_str().unwrap();
+    let stored: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(r.join(format!(".onus/submissions/{id}.json"))).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(stored["escalations"], serde_json::json!([eid]));
+    assert!(
+        stored["scope"]["rights"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("write:path:services/orders/src/**")),
+        "{stored}"
+    );
+
     // Outcomes are for reading only; nothing lets an agent record its own.
     let (failed, outcomes) = mcp.tool("onus_outcomes", serde_json::json!({}));
     assert!(!failed, "{outcomes}");
@@ -603,4 +599,266 @@ fn agents_hand_in_changes_and_ask_for_more_through_mcp() {
     let (failed, msg) = quiet.tool("onus_lanes", serde_json::json!({}));
     assert!(failed);
     assert!(msg.as_str().unwrap().contains("only answers questions"));
+}
+
+#[test]
+fn the_judge_never_shows_an_agent_its_held_out_checks() {
+    let repo = tempfile::tempdir().unwrap();
+    let r = repo.path();
+    copy_dir(&fixture().join("base"), r);
+    let mut yaml = std::fs::read_to_string(r.join("onus.yaml")).unwrap();
+    yaml.push_str(
+        "\nlanes:\n  default: judge\n  heldOut: { command: \"npm run secret-legacy\" }\n  judges:\n    - name: a\n    - name: b\n",
+    );
+    std::fs::write(r.join("onus.yaml"), yaml).unwrap();
+    git(r, &["init", "-q", "-b", "main"]);
+    git(r, &["add", "-A"]);
+    git(r, &["commit", "-q", "-m", "base"]);
+    git(r, &["checkout", "-q", "-b", "feature/extra"]);
+    std::fs::write(
+        r.join("services/orders/src/extra.ts"),
+        "export const EXTRA = 1;\n",
+    )
+    .unwrap();
+    git(r, &["add", "-A"]);
+    git(r, &["commit", "-q", "-m", "extra"]);
+    let suite = tempfile::tempdir().unwrap();
+    std::fs::write(
+        suite.path().join("held-out.yaml"),
+        "version: 1\nchecks:\n  - { id: orders-secret-check, command: \"npm run hidden-thing\", covers: [orders] }\n",
+    )
+    .unwrap();
+    let mut mcp = Mcp::start_with(r, &["--held-out", suite.path().to_str().unwrap()]);
+
+    // The policy says there are held-out checks, never what they run.
+    let (failed, policy) = mcp.tool("onus_lanes", serde_json::json!({}));
+    assert!(!failed, "{policy}");
+    assert_eq!(policy["policy"]["heldOut"], "configured", "{policy}");
+    assert!(policy.get("heldOutSuite").is_none(), "{policy}");
+    assert!(!policy.to_string().contains("secret-legacy"), "{policy}");
+    assert_eq!(policy["judges"][0]["name"], "a", "{policy}");
+
+    let (failed, sub) = mcp.tool(
+        "onus_submit",
+        serde_json::json!({
+            "base": "main",
+            "head": "feature/extra",
+            "intent": "summary: An extra constant\ntouches: [orders]",
+        }),
+    );
+    assert!(!failed, "{sub}");
+    let id = sub["id"].as_str().unwrap().to_string();
+    // Without evidence the judge rejects first: no container engine needed.
+    let (failed, judged) = mcp.tool("onus_judge", serde_json::json!({ "id": id }));
+    assert!(!failed, "{judged}");
+    assert_eq!(judged["judgment"]["verdict"], "reject", "{judged}");
+    assert!(judged.get("heldOut").is_none(), "{judged}");
+    assert_eq!(judged["judgment"]["heldOut"]["selected"], 2, "{judged}");
+    let text = judged.to_string();
+    for secret in ["orders-secret-check", "hidden-thing", "secret-legacy"] {
+        assert!(!text.contains(secret), "{secret} in {text}");
+    }
+    // Nor which configuration judged: the policy's id, the same for each.
+    assert!(judged["judgment"].get("rotation").is_none(), "{judged}");
+    assert_eq!(judged["judgment"]["judge"], policy["judge"], "{judged}");
+    assert!(!text.contains("a@") && !text.contains("b@"), "{text}");
+    // A person reads what was chosen, and by which, beside the judgment.
+    let kept =
+        std::fs::read_to_string(r.join(format!(".onus/submissions/{id}.held-out.json"))).unwrap();
+    assert!(kept.contains("orders-secret-check"), "{kept}");
+    let kept: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(r.join(format!(".onus/submissions/{id}.judgment.json"))).unwrap(),
+    )
+    .unwrap();
+    let config = kept["judgment"]["rotation"]["config"].as_str().unwrap();
+    assert!(
+        kept["judgment"]["judge"]
+            .as_str()
+            .unwrap()
+            .starts_with(&format!("{config}@")),
+        "{kept}"
+    );
+
+    // A suite inside the worktree refuses to start.
+    let inside = r.join("held-out");
+    std::fs::create_dir_all(&inside).unwrap();
+    std::fs::copy(
+        suite.path().join("held-out.yaml"),
+        inside.join("held-out.yaml"),
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_onus"))
+        .current_dir(r)
+        .args(["mcp", "--held-out", inside.to_str().unwrap()])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("inside the repository"));
+}
+
+/// A key pair and a token for `plan`, minted with the binary.
+fn task_token(plan: &str) -> (tempfile::TempDir, String, std::path::PathBuf) {
+    let keys = tempfile::tempdir().unwrap();
+    let onus = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_onus"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    onus(&["token", "keygen", "--out", keys.path().to_str().unwrap()]);
+    let file = keys.path().join("plan.yaml");
+    std::fs::write(&file, plan).unwrap();
+    let token = onus(&[
+        "token",
+        "mint",
+        "--plan",
+        file.to_str().unwrap(),
+        "--key",
+        keys.path().join("root.key").to_str().unwrap(),
+    ]);
+    let public = keys.path().join("root.pub");
+    (keys, token, public)
+}
+
+#[test]
+fn every_mcp_call_is_logged_and_checked() {
+    let repo = shop_repo();
+    let (keys, token, public) = task_token(
+        "task: billing-fix\nwrites: [\"services/billing/**\"]\nhosts: [api.stripe.test]\n",
+    );
+    // The log is outside the worktree, where the agent cannot write.
+    let audit = keys.path().join("audit.jsonl");
+    let mut mcp = Mcp::start_with(
+        repo.path(),
+        &[
+            "--token",
+            &token,
+            "--key-public",
+            public.to_str().unwrap(),
+            "--audit",
+            audit.to_str().unwrap(),
+        ],
+    );
+    let (failed, _) = mcp.tool("onus_find", serde_json::json!({ "text": "apply discount" }));
+    assert!(!failed);
+    // A file outside the read scope: the denial names the right and how to ask.
+    let (failed, body) = mcp.tool(
+        "onus_symbol",
+        serde_json::json!({ "id": "user-preferences:src/types.ts#UserPreferences" }),
+    );
+    assert!(failed);
+    let text = body.as_str().unwrap();
+    assert!(text.starts_with("denied: "), "{text}");
+    assert!(
+        text.contains("read:path:services/user-preferences/src/**"),
+        "{text}"
+    );
+    // A short name's candidates leave out those in unreadable files.
+    let (failed, body) = mcp.tool("onus_symbol", serde_json::json!({ "id": "refundNote" }));
+    assert!(!failed, "{body}");
+    assert!(!body.to_string().contains("orders:"), "{body}");
+    assert!(body["hidden"].is_string(), "{body}");
+    // A test setup would get open network; the token allows one host.
+    let (failed, body) = mcp.tool(
+        "onus_run_test",
+        serde_json::json!({ "image": "node:22", "setup": "npm ci", "command": "npm test" }),
+    );
+    assert!(failed);
+    let text = body.as_str().unwrap();
+    assert!(text.contains("open network"), "{text}");
+    assert!(text.contains("net:host:api.stripe.test"), "{text}");
+    // An environment that does not exist: nothing to protect.
+    mcp.tool("onus_env_destroy", serde_json::json!({ "name": "nobody" }));
+    drop(mcp);
+
+    let out = Command::new(env!("CARGO_BIN_EXE_onus"))
+        .arg("audit")
+        .arg(&audit)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let raw = std::fs::read_to_string(&audit).unwrap();
+    assert!(!raw.contains(&token), "the raw token reached the log");
+    let entries: Vec<serde_json::Value> = raw
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let find = |action: &str, decision: &str| {
+        entries
+            .iter()
+            .find(|e| e["action"] == action && e["decision"] == decision)
+            .unwrap_or_else(|| panic!("no {action} {decision} in {raw}"))
+    };
+    let found = find("mcp:onus_find", "allowed");
+    assert_eq!(found["actor"], "billing-fix");
+    assert_eq!(found["subject"], "apply discount");
+    assert_eq!(found["details"]["door"], "mcp");
+    assert_eq!(found["details"]["token"]["task"], "billing-fix");
+    assert_eq!(found["details"]["token"]["id"].as_str().unwrap().len(), 16);
+    assert!(
+        found["details"]["argsDigest"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:")
+    );
+    let symbol = find("mcp:onus_symbol", "denied");
+    assert_eq!(
+        symbol["details"]["missing"],
+        serde_json::json!(["read:path:services/user-preferences/src/types.ts"])
+    );
+    find("mcp:onus_run_test", "denied");
+    find("mcp:onus_env_destroy", "allowed");
+    // One entry per question, two per action.
+    let destroys = entries
+        .iter()
+        .filter(|e| e["action"] == "mcp:onus_env_destroy")
+        .count();
+    assert_eq!(destroys, 2, "{raw}");
+}
+
+#[test]
+fn an_expired_token_is_refused_with_its_expiry() {
+    let repo = shop_repo();
+    let (keys, token, public) =
+        task_token("task: quick\nwrites: [\"services/billing/**\"]\nttl: 1s\n");
+    let deadline = Instant::now() + Duration::from_millis(2100);
+    while Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let audit = keys.path().join("audit.jsonl");
+    let mut mcp = Mcp::start_with(
+        repo.path(),
+        &[
+            "--token",
+            &token,
+            "--key-public",
+            public.to_str().unwrap(),
+            "--audit",
+            audit.to_str().unwrap(),
+        ],
+    );
+    let (failed, msg) = mcp.tool("onus_lanes", serde_json::json!({}));
+    assert!(failed);
+    let msg = msg.as_str().unwrap();
+    assert!(
+        msg.contains("the token of task `quick` expired at "),
+        "{msg}"
+    );
+    assert!(msg.contains("onus token mint"), "{msg}");
+    let (failed, _) = mcp.tool("onus_status", serde_json::json!({}));
+    assert!(failed);
+    drop(mcp);
+    let raw = std::fs::read_to_string(&audit).unwrap();
+    assert!(raw.contains("\"decision\":\"denied\""), "{raw}");
 }

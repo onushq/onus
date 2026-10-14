@@ -17,12 +17,13 @@
 use std::collections::BTreeSet;
 
 use anyhow::{Context, Result, bail};
-use onus_core::CodebaseMap;
+use onus_core::{CodebaseMap, Component};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::scope::{Kind, Right, glob_regex};
-use crate::token::{Grant, RootKey, Verified, mint};
+use crate::token::{Grant, RootKey, Verified, mint_granted};
+use biscuit_auth::PublicKey;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -94,8 +95,16 @@ pub struct Request {
     pub reason: String,
     /// Files (outside the asked paths) that depend on code in them.
     pub blast_radius: u32,
-    /// Sensitivity labels of the components the asked paths are in.
+    /// Sensitivity labels of the components the asked paths (and the files
+    /// the evidence names) are in.
     pub sensitive: Vec<String>,
+    /// Who may decide the request besides an admin, from onus.yaml or
+    /// CODEOWNERS: the owners of every component the asked paths are in
+    /// (for a request that asks for no rights, the owners of the files the
+    /// evidence names). Left out when empty, so older requests keep their
+    /// ids.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owners: Vec<String>,
     /// Seconds since the Unix epoch.
     pub at: u64,
 }
@@ -112,9 +121,9 @@ impl Request {
         sensitive_labels: &[String],
         at: u64,
     ) -> Request {
-        let (blast_radius, sensitive) = match map {
-            Some(m) => impact(m, &scopes, sensitive_labels),
-            None => (0, vec![]),
+        let (blast_radius, sensitive, owners) = match map {
+            Some(m) => impact(m, &scopes, &evidence, sensitive_labels),
+            None => (0, vec![], vec![]),
         };
         let mut r = Request {
             id: String::new(),
@@ -125,16 +134,32 @@ impl Request {
             reason: reason.to_string(),
             blast_radius,
             sensitive,
+            owners,
             at,
         };
-        let json = serde_json::to_string(&r).unwrap_or_default();
+        r.id = r.content_id();
+        r
+    }
+
+    /// The id the request's contents give it: the first 6 bytes of the
+    /// sha256 of its JSON with the id left empty. A request changed after it
+    /// was filed no longer matches its id. Whether a failing test reproduced
+    /// is left out: an assessment adds it, so an assessed request keeps its
+    /// id. The id therefore does not protect it; see [`decide`].
+    pub fn content_id(&self) -> String {
+        let mut copy = self.clone();
+        copy.id = String::new();
+        for e in &mut copy.evidence {
+            e.reproduced = None;
+            e.run = None;
+        }
+        let json = serde_json::to_string(&copy).unwrap_or_default();
         let mut h = Sha256::new();
         h.update(json.as_bytes());
-        r.id = h.finalize()[..6]
+        h.finalize()[..6]
             .iter()
             .map(|b| format!("{b:02x}"))
-            .collect();
-        r
+            .collect()
     }
 
     pub fn best_grade(&self) -> Option<u8> {
@@ -142,9 +167,26 @@ impl Request {
     }
 }
 
-/// Files outside the asked paths that depend on code inside them, and the
-/// sensitive labels of the components the asked paths are in.
-fn impact(map: &CodebaseMap, scopes: &[Right], sensitive_labels: &[String]) -> (u32, Vec<String>) {
+/// Files outside the asked paths that depend on code inside them, the
+/// sensitive labels of the components the asked paths and the repository
+/// files the evidence names are in, and who owns the asked area.
+///
+/// Owners decide, so the agent must not be able to pick one. They are the
+/// people who own every component the asked paths reach, so asking for one
+/// more path never adds anyone. There are none (an admin decides) when no
+/// one owns them all, when part of an asked path is in no component (such
+/// as onus.yaml or CI workflows), or when a right is not a path. A path
+/// reaches components by their roots, not only by the files there now, so a
+/// file that does not exist yet counts too. The evidence adds no owner,
+/// except in a request that asks for nothing, which grants nothing: a
+/// broken-test report with no scopes goes to the owners of the test. Labels
+/// only make a decision stricter, so the evidence's count.
+fn impact(
+    map: &CodebaseMap,
+    scopes: &[Right],
+    evidence: &[Evidence],
+    sensitive_labels: &[String],
+) -> (u32, Vec<String>, Vec<String>) {
     let res: Vec<regex::Regex> = scopes
         .iter()
         .filter(|r| matches!(r.kind, Kind::Write | Kind::Read))
@@ -178,24 +220,138 @@ fn impact(map: &CodebaseMap, scopes: &[Right], sensitive_labels: &[String]) -> (
             }
         }
     }
-    let comps: BTreeSet<&str> = map
+    let named: BTreeSet<&str> = evidence
+        .iter()
+        .filter(|e| matches!(e.kind.as_str(), "failing-test" | "trace" | "draft-diff"))
+        .map(|e| e.reference.trim().trim_start_matches("./"))
+        .collect();
+    let component_of = |keep: &dyn Fn(&str) -> bool| -> BTreeSet<&str> {
+        map.files
+            .iter()
+            .filter(|f| keep(&f.path))
+            .filter_map(|f| f.component_id.as_deref())
+            .collect()
+    };
+    let paths: Vec<&Right> = scopes
+        .iter()
+        .filter(|r| {
+            matches!(
+                r.kind,
+                Kind::Read | Kind::Write | Kind::Guard | Kind::Unlock
+            )
+        })
+        .collect();
+    let path_res: Vec<regex::Regex> = paths
+        .iter()
+        .filter_map(|r| regex::Regex::new(&glob_regex(&r.pattern)).ok())
+        .collect();
+    let asked_file = |p: &str| path_res.iter().any(|re| re.is_match(p));
+    let mut asked = component_of(&asked_file);
+    // Every right is a path, and each is all inside some component.
+    let mut held = paths.len() == scopes.len();
+    for r in &paths {
+        let (reach, whole) = reached(map, &r.pattern);
+        asked.extend(reach);
+        held &= whole;
+    }
+    // An asked file in no component has no owner, so no one owns it all.
+    held &= !map
         .files
         .iter()
-        .filter(|f| files.contains(f.path.as_str()))
-        .filter_map(|f| f.component_id.as_deref())
-        .collect();
+        .any(|f| asked_file(&f.path) && f.component_id.is_none());
+    let evidenced = component_of(&|p| named.contains(p));
     let mut labels: BTreeSet<String> = BTreeSet::new();
-    for c in &map.components {
-        if comps.contains(c.id.as_str()) {
-            labels.extend(
-                c.labels
-                    .iter()
-                    .filter(|l| sensitive_labels.contains(l))
-                    .cloned(),
-            );
-        }
+    for c in map
+        .components
+        .iter()
+        .filter(|c| asked.contains(c.id.as_str()) || evidenced.contains(c.id.as_str()))
+    {
+        labels.extend(
+            c.labels
+                .iter()
+                .filter(|l| sensitive_labels.contains(l))
+                .cloned(),
+        );
     }
-    (dependents.len() as u32, labels.into_iter().collect())
+    let owners_of = |ids: &BTreeSet<&str>| -> Vec<BTreeSet<String>> {
+        map.components
+            .iter()
+            .filter(|c| ids.contains(c.id.as_str()))
+            .map(|c| c.owners.iter().cloned().collect())
+            .collect()
+    };
+    let owners: BTreeSet<String> = if scopes.is_empty() {
+        owners_of(&evidenced).into_iter().flatten().collect()
+    } else if !held {
+        BTreeSet::new()
+    } else {
+        owners_of(&asked)
+            .into_iter()
+            .reduce(|all, these| all.intersection(&these).cloned().collect())
+            .unwrap_or_default()
+    };
+    (
+        dependents.len() as u32,
+        labels.into_iter().collect(),
+        owners.into_iter().collect(),
+    )
+}
+
+/// The components a path glob reaches, from their roots: the most specific
+/// one whose roots match all of it, with those nested inside that one, or
+/// every one it may meet when none matches all of it. The flag says whether
+/// one does.
+fn reached<'m>(map: &'m CodebaseMap, glob: &str) -> (BTreeSet<&'m str>, bool) {
+    // The length of the fixed start of the deepest root that `keep` accepts.
+    let depth = |c: &Component, keep: &dyn Fn(&str) -> bool| {
+        c.roots
+            .iter()
+            .filter(|r| keep(r))
+            .map(|r| fixed(r).len())
+            .max()
+    };
+    let holder = map
+        .components
+        .iter()
+        .filter_map(|c| Some((depth(c, &|r| holds(r, glob))?, c)))
+        .max_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.id.cmp(&a.1.id)));
+    let reach = map
+        .components
+        .iter()
+        .filter(|c| match (holder, depth(c, &|r| meets(r, glob))) {
+            (_, None) => false,
+            (None, Some(_)) => true,
+            (Some((_, k)), _) if k.id == c.id => true,
+            (Some((d, _)), Some(m)) => m > d,
+        })
+        .map(|c| c.id.as_str())
+        .collect();
+    (reach, holder.is_some())
+}
+
+/// The start of a glob before its first wildcard.
+fn fixed(glob: &str) -> &str {
+    glob.find(['*', '?', '[', '{']).map_or(glob, |i| &glob[..i])
+}
+
+/// Whether the component root `root` matches every path `glob` matches.
+fn holds(root: &str, glob: &str) -> bool {
+    if root == "**" {
+        return true;
+    }
+    // `services/orders/**`, the usual root, also matches the folder itself.
+    if let Some(dir) = root.strip_suffix("/**").filter(|d| fixed(d) == *d) {
+        return glob == dir || glob.starts_with(&format!("{dir}/"));
+    }
+    // Otherwise only a single path is known to be inside.
+    fixed(glob) == glob && regex::Regex::new(&glob_regex(root)).is_ok_and(|re| re.is_match(glob))
+}
+
+/// Whether `glob` may match a path the component root `root` matches: the
+/// fixed start of one begins the other's.
+fn meets(root: &str, glob: &str) -> bool {
+    let (a, b) = (fixed(root), fixed(glob));
+    a.starts_with(b) || b.starts_with(a)
 }
 
 /// When a request is granted without a person.
@@ -225,7 +381,10 @@ pub enum Decision {
 
 /// Applies the policy. Only path rights of a permission request with
 /// reproduced failing-test evidence, outside sensitive components and with
-/// a small blast radius, are granted automatically.
+/// a small blast radius, are granted automatically. It believes
+/// `reproduced`, which the request's id does not cover: a caller sets it
+/// from its own run (as `onus escalation assess` does) or clears it, and
+/// never passes on what a request file says.
 pub fn decide(req: &Request, policy: &Policy) -> Decision {
     let mut why_not = Vec::new();
     if req.kind != EscalationKind::Permission {
@@ -248,7 +407,7 @@ pub fn decide(req: &Request, policy: &Policy) -> Decision {
     }
     if !req.sensitive.is_empty() {
         why_not.push(format!(
-            "the paths are in components labeled {}",
+            "the request reaches components labeled {}",
             req.sensitive.join(", ")
         ));
     }
@@ -280,8 +439,17 @@ pub fn decide(req: &Request, policy: &Policy) -> Decision {
 }
 
 /// The token for a granted request: the original token's rights plus what
-/// was asked, for the same task and until the same expiry.
+/// was asked, for the same task and until the same expiry. It names the
+/// request, so it proves this request was granted and no other. A request
+/// changed after it was filed is refused: its scopes are not what was
+/// decided.
 pub fn grant(req: &Request, original: &Verified, root: &RootKey) -> Result<String> {
+    if req.content_id() != req.id {
+        bail!(
+            "request {} was changed after it was filed, so it is not what was decided: nothing is minted",
+            req.id
+        );
+    }
     if req.task != original.task {
         bail!(
             "the request is for task `{}`, the token for `{}`",
@@ -293,19 +461,47 @@ pub fn grant(req: &Request, original: &Verified, root: &RootKey) -> Result<Strin
     rights.extend(req.scopes.iter().cloned());
     rights.sort();
     rights.dedup();
-    mint(
+    mint_granted(
         root,
         &Grant {
             task: original.task.clone(),
             rights,
             expires: original.expires,
+            // The grant is for the same agent.
+            agent: original.agent.clone(),
         },
+        &req.id,
     )
+}
+
+/// Checks that `granted` is the grant of `req`: the request is as it was
+/// filed, and the token verifies with the root key, was minted for this
+/// request, is for the request's task and holds every right asked for. The
+/// errors say what is wrong.
+pub fn verify_granted(req: &Request, granted: &str, root: &PublicKey) -> Result<Verified, String> {
+    if req.content_id() != req.id {
+        return Err("the request file was changed after it was filed".into());
+    }
+    let v = crate::token::verify(granted, root)
+        .map_err(|_| "its granted token does not verify with the root key".to_string())?;
+    if v.task != req.task {
+        return Err(format!("its granted token is for task `{}`", v.task));
+    }
+    if v.escalation.as_deref() != Some(req.id.as_str()) {
+        return Err(
+            "its token was not minted to grant it (onus escalation grant mints one)".into(),
+        );
+    }
+    if let Some(r) = req.scopes.iter().find(|r| !v.rights.contains(r)) {
+        return Err(format!("its granted token does not hold `{r}`"));
+    }
+    Ok(v)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::token::mint;
 
     fn req(kind: EscalationKind, scope: &str, evidence: &[&str], reproduced: bool) -> Request {
         let mut ev: Vec<Evidence> = evidence
@@ -382,6 +578,152 @@ mod tests {
         assert!(Evidence::parse("hunch:x").is_err());
     }
 
+    fn two_component_map() -> CodebaseMap {
+        let component = |id: &str, owner: &str, labels: &[&str]| {
+            serde_json::json!({
+                "id": id, "kind": "service", "roots": [format!("services/{id}/**")],
+                "publicEntrypoints": [], "owners": [owner], "labels": labels,
+                "confidence": "declared",
+            })
+        };
+        let file = |path: &str, component: &str| {
+            serde_json::json!({
+                "path": path, "componentId": component, "language": "typescript",
+                "isTest": path.contains(".test."), "lines": 1, "contentHash": "x", "imports": [],
+            })
+        };
+        serde_json::from_value(serde_json::json!({
+            "schemaVersion": 1, "commit": "worktree",
+            "builtWith": { "onus": "test", "providers": {}, "configHash": "inferred" },
+            "components": [component("orders", "@a", &[]), component("billing", "@b", &["payments"])],
+            "files": [
+                file("services/orders/src/a.ts", "orders"),
+                file("services/billing/src/b.test.ts", "billing"),
+            ],
+            "symbols": [], "edges": [], "externals": [], "packages": [], "tests": [],
+            "rules": [], "diagnostics": [],
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn owners_come_from_the_asked_paths_and_from_the_evidence_only_when_nothing_is_asked() {
+        let map = two_component_map();
+        let r = Request::new(
+            "sms",
+            EscalationKind::Permission,
+            vec!["write:path:services/orders/**".parse().unwrap()],
+            vec![Evidence::parse("failing-test:services/billing/src/b.test.ts").unwrap()],
+            "needed",
+            Some(&map),
+            &["payments".into()],
+            100,
+        );
+        // The evidence cannot add a person who may grant the request.
+        assert_eq!(r.owners, ["@a"]);
+        // The test is in payments code, so a person decides.
+        assert_eq!(r.sensitive, ["payments"]);
+        assert_eq!(r.content_id(), r.id);
+
+        // A broken test with no scopes goes to the owners of the test.
+        let blocked = Request::new(
+            "sms",
+            EscalationKind::BrokenTest,
+            vec![],
+            vec![
+                Evidence::parse("failing-test:./services/billing/src/b.test.ts").unwrap(),
+                Evidence::parse("rationale:services/orders/src/a.ts").unwrap(),
+            ],
+            "the test expects UTC",
+            Some(&map),
+            &["payments".into()],
+            100,
+        );
+        assert_eq!(blocked.owners, ["@b"]);
+
+        // Asking for more never adds an owner: only someone who owns all of
+        // it may decide, and here no one does, so an admin decides.
+        let both = Request::new(
+            "sms",
+            EscalationKind::Permission,
+            vec![
+                "write:path:services/orders/**".parse().unwrap(),
+                "write:path:services/billing/**".parse().unwrap(),
+            ],
+            vec![Evidence::parse("rationale:needed").unwrap()],
+            "needed",
+            Some(&map),
+            &["payments".into()],
+            100,
+        );
+        assert!(both.owners.is_empty(), "{:?}", both.owners);
+        assert_eq!(both.sensitive, ["payments"]);
+    }
+
+    #[test]
+    fn a_path_reaches_its_component_before_any_file_is_there() {
+        let map = two_component_map();
+        let ask = |scopes: &[&str]| {
+            Request::new(
+                "sms",
+                EscalationKind::Permission,
+                scopes.iter().map(|s| s.parse().unwrap()).collect(),
+                vec![Evidence::parse("rationale:needed").unwrap()],
+                "needed",
+                Some(&map),
+                &["payments".into()],
+                100,
+            )
+        };
+        // A new file in billing is billing's: its owner and its label.
+        let new = ask(&["write:path:services/billing/src/new-fx.ts"]);
+        assert_eq!(new.owners, ["@b"]);
+        assert_eq!(new.sensitive, ["payments"]);
+        let empty = ask(&["write:path:services/billing/later/**"]);
+        assert_eq!(empty.owners, ["@b"]);
+        assert_eq!(empty.sensitive, ["payments"]);
+
+        // So it cannot be slipped in beside orders' paths.
+        let slipped = ask(&[
+            "write:path:services/billing/src/new-fx.ts",
+            "write:path:services/orders/**",
+        ]);
+        assert!(slipped.owners.is_empty(), "{:?}", slipped.owners);
+        assert_eq!(slipped.sensitive, ["payments"]);
+
+        // Paths outside every component, a path that reaches past one, and
+        // rights that are not paths have no owner: an admin decides.
+        for other in [
+            "write:path:onus.yaml",
+            "write:path:.github/workflows/**",
+            "write:path:services/**",
+            "write:path:services/orders*/**",
+            "net:host:example.com",
+        ] {
+            let r = ask(&["write:path:services/orders/**", other]);
+            assert!(r.owners.is_empty(), "{other}: {:?}", r.owners);
+        }
+        // One that reaches billing among others carries its label.
+        assert_eq!(ask(&["write:path:services/**"]).sensitive, ["payments"]);
+        assert_eq!(ask(&["write:path:services/orders/**"]).owners, ["@a"]);
+    }
+
+    #[test]
+    fn without_a_map_there_are_no_owners_and_the_id_is_unchanged() {
+        let r = req(
+            EscalationKind::Permission,
+            "write:path:x/**",
+            &["rationale:needed"],
+            false,
+        );
+        assert!(r.owners.is_empty());
+        let json = serde_json::to_value(&r).unwrap();
+        assert!(json.get("owners").is_none(), "{json}");
+        // A request written before owners existed still matches its id.
+        let old: Request = serde_json::from_value(json).unwrap();
+        assert_eq!(old.content_id(), r.id);
+    }
+
     #[test]
     fn a_grant_adds_exactly_what_was_asked() {
         let root = RootKey::generate();
@@ -391,6 +733,7 @@ mod tests {
                 task: "sms".into(),
                 rights: vec!["write:path:services/notifications/**".parse().unwrap()],
                 expires: 2_000_000_000,
+                agent: None,
             },
         )
         .unwrap();
@@ -415,6 +758,107 @@ mod tests {
         assert!(
             g.authorize(Kind::Write, "services/notifications/a.ts", 1_900_000_000)
                 .is_ok()
+        );
+    }
+
+    #[test]
+    fn granted_requests_verify_and_tampering_is_named() {
+        let root = RootKey::generate();
+        let original = |task: &str, root: &RootKey| {
+            let t = mint(
+                root,
+                &Grant {
+                    task: task.into(),
+                    rights: vec!["write:path:services/notifications/**".parse().unwrap()],
+                    expires: 2_000_000_000,
+                    agent: Some(crate::token::AgentClaim {
+                        tool: "claude-code".into(),
+                        ..Default::default()
+                    }),
+                },
+            )
+            .unwrap();
+            crate::token::verify(&t, &root.public()).unwrap()
+        };
+        let r = req(
+            EscalationKind::Permission,
+            "write:path:services/billing/src/**",
+            &["failing-test:t.ts"],
+            true,
+        );
+        assert_eq!(r.content_id(), r.id);
+        let granted = grant(&r, &original("sms", &root), &root).unwrap();
+        let v = verify_granted(&r, &granted, &root.public()).unwrap();
+        assert_eq!(v.task, "sms");
+        // The grant keeps the agent.
+        assert_eq!(v.agent.unwrap().tool, "claude-code");
+
+        // A scope edited in the request file: nothing verifies, nothing is minted.
+        let mut edited = r.clone();
+        edited.scopes = vec!["write:path:**".parse().unwrap()];
+        assert_eq!(
+            verify_granted(&edited, &granted, &root.public()).unwrap_err(),
+            "the request file was changed after it was filed"
+        );
+        let err = grant(&edited, &original("sms", &root), &root).unwrap_err();
+        assert!(err.to_string().contains("nothing is minted"), "{err}");
+        // Another task's token in its place.
+        let mut other_req = r.clone();
+        other_req.task = "other".into();
+        other_req.id = other_req.content_id();
+        let other = grant(&other_req, &original("other", &root), &root).unwrap();
+        assert_eq!(
+            verify_granted(&r, &other, &root.public()).unwrap_err(),
+            "its granted token is for task `other`"
+        );
+        // A token signed by another key.
+        let stranger = RootKey::generate();
+        let forged = grant(&r, &original("sms", &stranger), &stranger).unwrap();
+        assert_eq!(
+            verify_granted(&r, &forged, &root.public()).unwrap_err(),
+            "its granted token does not verify with the root key"
+        );
+        // The task's own token, copied in beside a request it filed itself:
+        // signed by the root key, but not a grant of that request.
+        let own = mint(
+            &root,
+            &Grant {
+                task: "sms".into(),
+                rights: vec!["write:path:services/billing/src/**".parse().unwrap()],
+                expires: 2_000_000_000,
+                agent: None,
+            },
+        )
+        .unwrap();
+        assert!(
+            verify_granted(&r, &own, &root.public())
+                .unwrap_err()
+                .contains("was not minted to grant it")
+        );
+        // Another request's grant.
+        let mut wider = r.clone();
+        wider.scopes.push("net:host:sms.example".parse().unwrap());
+        wider.id = wider.content_id();
+        assert!(
+            verify_granted(&wider, &granted, &root.public())
+                .unwrap_err()
+                .contains("was not minted to grant it")
+        );
+        // A token for the request that lacks what was asked.
+        let short = crate::token::mint_granted(
+            &root,
+            &Grant {
+                task: "sms".into(),
+                rights: r.scopes.clone(),
+                expires: 2_000_000_000,
+                agent: None,
+            },
+            &wider.id,
+        )
+        .unwrap();
+        assert_eq!(
+            verify_granted(&wider, &short, &root.public()).unwrap_err(),
+            "its granted token does not hold `net:host:sms.example`"
         );
     }
 }

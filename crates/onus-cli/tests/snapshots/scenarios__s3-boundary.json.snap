@@ -33,7 +33,12 @@ expression: json
         "confidence": "static",
         "rulesOfTheGame": false,
         "intentMismatch": false,
-        "needsPerson": true
+        "needsPerson": true,
+        "dependentComponents": 0,
+        "tested": "tested",
+        "owners": [
+          "@team-payments"
+        ]
       },
       "locations": [
         {
@@ -63,7 +68,12 @@ expression: json
         "confidence": "static",
         "rulesOfTheGame": false,
         "intentMismatch": false,
-        "needsPerson": false
+        "needsPerson": false,
+        "dependentComponents": 0,
+        "tested": "tested",
+        "owners": [
+          "@team-orders"
+        ]
       },
       "locations": [
         {

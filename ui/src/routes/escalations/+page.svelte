@@ -60,8 +60,9 @@
 	}
 
 	const grade = (n: number) => ['', 'failing test', 'trace', 'map path', 'draft diff', 'rationale'][n] ?? `grade ${n}`;
-	const decisionTone = (d: string) => (d === 'granted' ? 'add' : d === 'denied' ? 'del' : 'signal');
-	const open = $derived((list.value?.requests ?? []).filter((r) => !r.decision || r.decision.decision === 'needs-person').length);
+	const decisionTone = (d: string) => (d === 'granted' || d === 'answered' ? 'add' : d === 'denied' ? 'del' : 'signal');
+	const waiting = (d: string) => d === 'needs-person' || d === 'sent-to-onus-cloud';
+	const open = $derived((list.value?.requests ?? []).filter((r) => !r.decision || waiting(r.decision.decision)).length);
 </script>
 
 <PageHead title="Escalations" guide="scopes">
@@ -89,6 +90,7 @@
 						<div class="flex shrink-0 items-center gap-1.5">
 							{#if r.sensitive.length}<Badge tone="signal">{r.sensitive.join(', ')}</Badge>{/if}
 							<Badge tone="faint">blast {r.blastRadius}</Badge>
+							{#if item.cloud}<Badge tone="info">Onus Cloud</Badge>{/if}
 							{#if item.decision}<Badge tone={decisionTone(item.decision.decision)}>{item.decision.decision}</Badge>{:else}<Badge tone="info">open</Badge>{/if}
 							<span class="hidden w-16 text-right text-xs text-muted-foreground sm:inline">{ago(r.at)}</span>
 						</div>
@@ -106,6 +108,12 @@
 								{:else}<li class="text-muted-foreground">No evidence</li>{/each}
 							</ul>
 							{#if item.decision}<p class="text-xs text-muted-foreground">{item.decision.decision} by {item.decision.by}: {item.decision.reason}</p>{/if}
+							{#if item.cloud}
+								<p class="text-xs text-muted-foreground">
+									Filed in Onus Cloud ({item.cloud.repository}): a person decides there, and this door mints a grant.
+									{#if item.cloud.webUrl}<a class="underline" href={item.cloud.webUrl} target="_blank" rel="noreferrer">Open it</a>{/if}
+								</p>
+							{/if}
 							<div class="grid gap-3 md:grid-cols-2">
 								<Field label="The task's token"><Input class="font-mono" bind:value={act.token} /></Field>
 								<Field label="You (for a person's decision)"><Input bind:value={act.by} placeholder="@team-orders" /></Field>

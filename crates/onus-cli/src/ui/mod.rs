@@ -46,6 +46,10 @@ pub struct UiArgs {
     /// The root key pair, root.key and root.pub (default: ~/.onus-keys).
     #[arg(long, value_name = "DIR")]
     keys: Option<PathBuf>,
+    /// A held-out suite for the judge: a directory outside the repository holding
+    /// held-out.yaml (`onus help lanes`).
+    #[arg(long, env = "ONUS_HELD_OUT", value_name = "DIR")]
+    held_out: Option<PathBuf>,
     /// Use this session token instead of a random one (for developing the
     /// interface against a running server).
     #[arg(long, value_name = "TOKEN", hide = true, env = "ONUS_UI_TOKEN")]
@@ -66,6 +70,8 @@ pub struct State {
     pub keys: PathBuf,
     /// The root public key that verifies task tokens.
     pub public_key: PathBuf,
+    /// The held-out suite the judge runs (`--held-out`), read at each judgment.
+    pub held_out: Option<PathBuf>,
 }
 
 /// Where a repository's records are kept unless flags say otherwise.
@@ -76,12 +82,36 @@ pub struct Places {
     pub escalations: Option<PathBuf>,
     pub keys: Option<PathBuf>,
     pub public_key: Option<PathBuf>,
+    pub held_out: Option<PathBuf>,
+}
+
+/// Where a repository keeps its records in `.onus/`: what `onus ui`, `onus mcp`
+/// and `onus provenance --submission-id` read and write.
+#[derive(Debug, Clone)]
+pub struct Kept {
+    pub outcomes: PathBuf,
+    pub audit: PathBuf,
+    pub escalations: PathBuf,
+    /// Submissions (`<id>.json`) and their judgments (`<id>.judgment.json`).
+    pub submissions: PathBuf,
+}
+
+/// The `.onus/` layout of the worktree `root`.
+pub fn places(root: &Path) -> Kept {
+    let dot = root.join(".onus");
+    Kept {
+        outcomes: dot.join("outcomes.jsonl"),
+        audit: dot.join("audit.jsonl"),
+        escalations: dot.join("escalations"),
+        submissions: dot.join("submissions"),
+    }
 }
 
 impl State {
     /// The state for the worktree `root`; records go to `.onus/` in it.
     pub fn new(root: PathBuf, token: String, port: u16, places: Places) -> State {
         let dot = root.join(".onus");
+        let kept = self::places(&root);
         let keys = places
             .keys
             .or_else(|| home().map(|h| h.join(".onus-keys")))
@@ -90,15 +120,12 @@ impl State {
             token,
             port,
             server: onus_cli::daemon::Server::new(),
-            outcomes: places
-                .outcomes
-                .unwrap_or_else(|| dot.join("outcomes.jsonl")),
-            audit: places.audit.unwrap_or_else(|| dot.join("audit.jsonl")),
-            escalations: places
-                .escalations
-                .unwrap_or_else(|| dot.join("escalations")),
-            submissions: dot.join("submissions"),
+            outcomes: places.outcomes.unwrap_or(kept.outcomes),
+            audit: places.audit.unwrap_or(kept.audit),
+            escalations: places.escalations.unwrap_or(kept.escalations),
+            submissions: kept.submissions,
             public_key: places.public_key.unwrap_or_else(|| keys.join("root.pub")),
+            held_out: places.held_out,
             keys,
             root,
         }
@@ -124,6 +151,8 @@ pub fn run(args: UiArgs) -> Result<i32> {
     let root = onus_cli::daemon::canonical(&onus_cli::daemon::worktree_root(&start))
         .with_context(|| format!("cannot open {}", start.display()))?;
     let token = args.session_token.clone().unwrap_or_else(random_token);
+    // Checked now, so a suite inside the worktree fails at start.
+    crate::lanes::load_held_out(args.held_out.as_deref(), &root)?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
         .enable_all()
@@ -144,6 +173,7 @@ pub fn run(args: UiArgs) -> Result<i32> {
                 escalations: args.escalations,
                 keys: args.keys,
                 public_key: None,
+                held_out: args.held_out,
             },
         ));
         let url = format!("http://127.0.0.1:{}/#token={token}", bound.port());

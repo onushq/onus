@@ -18,11 +18,12 @@
 	import Inline from '#lib/components/Inline.svelte';
 	import LaneBadge from '#lib/components/LaneBadge.svelte';
 	import Loading from '#lib/components/Loading.svelte';
+	import NativeSelect from '#lib/components/NativeSelect.svelte';
 	import PageHead from '#lib/components/PageHead.svelte';
 	import RefPicker from '#lib/components/RefPicker.svelte';
 	import { ago, download, short } from '#lib/format.ts';
 	import { Task } from '#lib/task.svelte.ts';
-	import type { Classification, Judgment, Lane, LanesPolicy, Run, Submission } from '#lib/types.ts';
+	import type { Classification, HeldOutReport, Judgment, Lane, LanesPolicy, Run, Submission } from '#lib/types.ts';
 	import ChevronDown from '@lucide/svelte/icons/chevron-down';
 	import CircleCheck from '@lucide/svelte/icons/circle-check';
 	import CircleDashed from '@lucide/svelte/icons/circle-dashed';
@@ -38,9 +39,14 @@
 	const runs = new Task<{ runs: Run[] }>();
 	const submission = new Task<Submission>();
 	const classification = new Task<Classification>();
-	const judgment = new Task<{ classification: Classification; judgment: Judgment }>();
+	// `heldOut` comes with a judgment of an unsaved submission, for people only.
+	const judgment = new Task<{ classification: Classification; judgment: Judgment; heldOut?: HeldOutReport | null }>();
 	const saved = new Task<{ dir: string; submissions: SavedSubmission[] }>();
 	let savedId = $state('');
+	// What the held-out checks did, kept beside a saved submission's judgment.
+	let heldOut = $state<HeldOutReport | null>(null);
+	// A configuration from lanes.judges, or '' for the rotation's choice.
+	let judgeConfig = $state('');
 
 	interface SavedSubmission {
 		id: string;
@@ -81,12 +87,15 @@
 		evidence = on ? [...evidence, id] : evidence.filter((e) => e !== id);
 	}
 
+	type Shown = { submission: Submission; judgment: { classification: Classification; judgment: Judgment } | null; heldOut: HeldOutReport | null };
+
 	async function openSaved(id: string) {
-		const r = await api<{ submission: Submission; judgment: { classification: Classification; judgment: Judgment } | null }>('submissions.show', { id });
+		const r = await api<Shown>('submissions.show', { id });
 		savedId = id;
 		submission.value = r.submission;
 		judgment.reset();
 		if (r.judgment) judgment.value = r.judgment;
+		heldOut = r.heldOut ?? null;
 		classification.run(() => api<Classification>('lanes.classify', { submission: r.submission }));
 		document.getElementById('submission')?.scrollIntoView({ behavior: 'smooth' });
 	}
@@ -94,6 +103,7 @@
 	async function submit(e: SubmitEvent) {
 		e.preventDefault();
 		savedId = '';
+		heldOut = null;
 		classification.reset();
 		judgment.reset();
 		const sub = await submission.run(() =>
@@ -114,9 +124,16 @@
 	async function judge() {
 		const sub = submission.value;
 		if (!sub) return;
-		// A submission an agent handed in keeps its verdict beside it.
-		const r = await judgment.run(() => (savedId ? api('submissions.judge', { id: savedId }) : api('lanes.judge', { submission: sub })));
-		if (r && savedId) saved.run(() => api('submissions.list'));
+		const forced = judgeConfig || undefined;
+		heldOut = null;
+		// A submission an agent handed in keeps its verdict, and what the held-out checks did, beside it.
+		const r = await judgment.run(() => (savedId ? api('submissions.judge', { id: savedId, judgeConfig: forced }) : api('lanes.judge', { submission: sub, judgeConfig: forced })));
+		if (r && !savedId) heldOut = r.heldOut ?? null;
+		if (r && savedId) {
+			const id = savedId;
+			saved.run(() => api('submissions.list'));
+			heldOut = (await api<Shown>('submissions.show', { id })).heldOut ?? null;
+		}
 	}
 
 	const p = $derived(policy.value?.policy);
@@ -156,15 +173,28 @@
   rules:
     - { lane: auto-merge, match: every, kinds: [internal], components: [docs] }
     - { lane: human, subkinds: [migration-changed] }
-  heldOut: { command: "npm run test:held-out", image: "node:22", setup: "npm ci" }`}</pre>
+  judges:
+    - name: default
+    - name: strict
+      heldOutLimit: 20`}</pre>
+			<p class="mt-2 text-xs text-muted-foreground">Held-out checks live outside the repository, where agents cannot read them: start this page with <code>onus ui --held-out DIR</code>.</p>
 		{:else}
 			<div class="grid grid-cols-2 gap-4 text-sm md:grid-cols-5">
 				<div class="grid gap-1"><span class="text-xs text-muted-foreground">Default lane</span><LaneBadge lane={p.default ?? 'judge'} /></div>
 				<div class="grid gap-1"><span class="text-xs text-muted-foreground">Audited auto-merges</span><span class="font-medium">{((p.auditRate ?? 0) * 100).toFixed(1)}%</span></div>
 				<div class="grid gap-1"><span class="text-xs text-muted-foreground">Record before auto-merge</span><span class="font-medium">{p.minRecord ?? 0} merged changes</span></div>
-				<div class="grid gap-1"><span class="text-xs text-muted-foreground">Held-out checks</span><code class="w-fit text-xs">{p.heldOut?.command ?? 'none'}</code></div>
+				<div class="grid gap-1">
+					<span class="text-xs text-muted-foreground">Held-out checks</span>
+					<span class="text-xs">{policy.value?.heldOutSuite ? 'a suite from --held-out' : 'no suite'}{#if p.heldOut}, and <code>{p.heldOut.command}</code> in onus.yaml, which agents can read{/if}</span>
+				</div>
 				<div class="grid gap-1"><span class="text-xs text-muted-foreground">Taste reviewer</span><code class="w-fit text-xs">{p.taste?.command.join(' ') ?? 'none'}</code></div>
 			</div>
+			{#if policy.value?.judges?.length}
+				<p class="mt-4 text-sm">
+					<span class="text-xs text-muted-foreground">Judge configurations, one picked per change:</span>
+					{#each policy.value.judges as j (j.name)}<code class="ml-2 text-xs">{j.id}</code>{/each}
+				</p>
+			{/if}
 			{#if p.rules?.length}
 				<div class="mt-4 overflow-hidden rounded-lg border">
 					<Table.Root>
@@ -288,6 +318,12 @@
 
 	<Card title="The judge" subtitle="Verification first, taste last: re-runs the evidence in fresh containers, checks intent, contracts and tests, runs held-out checks.">
 		{#snippet actions()}
+			{#if policy.value?.judges?.length}
+				<NativeSelect class="h-8 w-auto" bind:value={judgeConfig} aria-label="Judge configuration">
+					<option value="">Rotation picks</option>
+					{#each policy.value.judges as j (j.name)}<option value={j.name}>{j.name}</option>{/each}
+				</NativeSelect>
+			{/if}
 			<Button onclick={judge} disabled={judgment.running}><Gavel />{judgment.running ? 'Judging…' : 'Run the judge'}</Button>
 		{/snippet}
 		{#if judgment.running}
@@ -300,6 +336,7 @@
 				<div class="flex flex-wrap items-center gap-3">
 					<Badge tone={verdictTone(j.verdict)} class="h-7 px-3 text-sm uppercase tracking-wide">{j.verdict}</Badge>
 					<span class="flex items-center gap-2 text-sm text-muted-foreground">in the <LaneBadge lane={j.lane} /> lane · judge {j.judge}</span>
+					{#if j.rotation}<span class="text-sm text-muted-foreground">Configuration: <strong class="text-foreground">{j.rotation.config}</strong> ({j.rotation.index} of {j.rotation.of}{j.rotation.forced ? ', chosen by a person' : ''})</span>{/if}
 					<Button variant="outline" size="sm" class="ml-auto" href={outcomeHref}><NotebookPen />Record the outcome</Button>
 				</div>
 				{#if j.reasons.length}
@@ -320,6 +357,31 @@
 						</li>
 					{/each}
 				</ol>
+				{#if heldOut}
+					<div class="grid gap-2">
+						<span class="text-sm font-medium">Held-out checks <span class="ml-1 text-xs font-normal text-muted-foreground">suite {heldOut.suite} · for people only: the agent sees counts{heldOut.reach.map === false ? ' · chosen without the head map, which could not be built' : ''}</span></span>
+						<div class="overflow-hidden rounded-lg border">
+							<Table.Root>
+								<Table.Header><Table.Row><Table.Head class="pl-3">Check</Table.Head><Table.Head>Why</Table.Head><Table.Head>With</Table.Head><Table.Head>Status</Table.Head><Table.Head class="pr-3 text-right">Exit</Table.Head></Table.Row></Table.Header>
+								<Table.Body>
+									{#each heldOut.checks as c (c.id)}
+										<Table.Row>
+											<Table.Cell class="pl-3 align-top font-mono text-xs">
+												{c.id}
+												{#if c.outputTail}<details class="mt-1"><summary class="cursor-pointer text-muted-foreground">output</summary><pre class="mt-1 max-h-60 overflow-auto text-xs">{c.outputTail}</pre></details>{/if}
+											</Table.Cell>
+											<Table.Cell class="align-top text-xs">{c.why}</Table.Cell>
+											<Table.Cell class="align-top font-mono text-xs">{c.with?.join(', ') || '–'}</Table.Cell>
+											<Table.Cell class="align-top"><Badge tone={c.status === 'passed' ? 'add' : c.status === 'not-run' ? 'signal' : 'del'}>{c.status}</Badge></Table.Cell>
+											<Table.Cell class="pr-3 text-right align-top tabular-nums">{c.exitCode ?? '–'}</Table.Cell>
+										</Table.Row>
+									{/each}
+								</Table.Body>
+							</Table.Root>
+						</div>
+						{#if heldOut.notSelected.length}<p class="text-xs text-muted-foreground">Not chosen for this change: <span class="font-mono">{heldOut.notSelected.join(', ')}</span></p>{/if}
+					</div>
+				{/if}
 			</div>
 		{:else}
 			<p class="text-sm text-muted-foreground">The judge needs a container engine (Docker or Podman) to re-run the evidence.</p>

@@ -4,9 +4,12 @@ use std::path::Path;
 
 use ignore::WalkBuilder;
 
-/// Directories that never contain source worth analyzing.
+/// Directories that never contain source worth analyzing. `.onus` holds
+/// Onus's own records (the audit log every agent call writes to, submissions,
+/// escalations), which must not make the map stale.
 pub const SKIPPED_DIRS: &[&str] = &[
     ".git",
+    ".onus",
     "node_modules",
     "dist",
     "build",

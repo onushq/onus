@@ -15,10 +15,10 @@ expression: md
 <details><summary>Evidence per row (files and lines)</summary>
 
 1. **Boundary condition changed in `applyDiscount`: `order.subtotalCents > DISCOUNT_THRESHOLD_CENTS` is now `order.subtotalCents >= DISCOUNT_THRESHOLD_CENTS`**
-   - kind `security-sensitive` / `boundary-condition-changed` · confidence `static` · labels payments · 2 dependent files
+   - kind `security-sensitive` / `boundary-condition-changed` · confidence `static` · labels payments · 2 dependent files · tested
    - `services/billing/src/discount.ts` line 20
 2. **8 changed lines of code inside `orders`**
-   - kind `internal` / `internal-changes` · confidence `static` · +6 −2 in 1 file
+   - kind `internal` / `internal-changes` · confidence `static` · tested · +6 −2 in 1 file
    - `services/orders/src/orders.ts` lines 4, 39 (before the change)
    - `services/orders/src/orders.ts` lines 4, 21–24, 43
 

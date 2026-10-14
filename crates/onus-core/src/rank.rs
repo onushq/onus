@@ -4,8 +4,8 @@
 //! each of those groups: security-sensitive changes, breaking
 //! changes, dependency and novelty, rules of the game, config, additive
 //! contracts, new relationships, tests and finally internal changes. Ties
-//! break on low confidence (unknowns rank as higher risk), then sensitivity
-//! labels, then blast radius, then id.
+//! break on low confidence (unknowns rank as higher risk), then changed
+//! lines no test ran, then sensitivity labels, then blast radius, then id.
 
 use std::cmp::Reverse;
 
@@ -40,6 +40,8 @@ pub fn tier(change: &SemanticChange) -> u8 {
         ChangeKind::Additive if change.level == ChangeLevel::Relationship => TIER_RELATIONSHIP,
         ChangeKind::Additive => TIER_ADDITIVE_CONTRACT,
         ChangeKind::Test => TIER_TEST,
+        // An edit to a declared contract's code.
+        ChangeKind::Internal if change.hints.rules_of_the_game => TIER_RULES_OF_THE_GAME,
         ChangeKind::Internal if change.subkind == SUBKIND_INTERNAL_CHANGES => TIER_INTERNAL,
         ChangeKind::Internal if change.level == ChangeLevel::Behavior => TIER_INTERNAL_BEHAVIOR,
         ChangeKind::Internal => TIER_INTERNAL_RENAME,
@@ -53,6 +55,7 @@ pub fn sort_key(change: &SemanticChange) -> impl Ord + '_ {
         !change.hints.needs_person,
         tier(change),
         change.hints.confidence != Confidence::Low,
+        !change.hints.coverage.is_some_and(|c| c.ran < c.changed),
         Reverse(change.hints.labels.len()),
         Reverse(change.hints.blast_radius),
         change.id.as_str(),
@@ -88,6 +91,11 @@ mod tests {
                 rules_of_the_game: false,
                 intent_mismatch: false,
                 needs_person: false,
+                dependent_components: 0,
+                dependents: vec![],
+                tested: None,
+                owners: vec![],
+                coverage: None,
             },
             locations: vec![],
             stats: None,
@@ -208,5 +216,23 @@ mod tests {
         let mut rows = vec![a, b, c, d];
         rank(&mut rows);
         assert_eq!(ids(&rows), ["d", "b", "c", "a"]);
+    }
+
+    #[test]
+    fn changed_lines_no_test_ran_break_ties() {
+        use crate::change::LineCoverage;
+        let mut a = change("a", ChangeKind::Internal, ChangeLevel::Behavior, "x");
+        let mut b = change("b", ChangeKind::Internal, ChangeLevel::Behavior, "x");
+        let c = change("c", ChangeKind::Internal, ChangeLevel::Behavior, "x");
+        a.hints.coverage = Some(LineCoverage { changed: 4, ran: 4 });
+        b.hints.coverage = Some(LineCoverage { changed: 4, ran: 1 });
+        let mut rows = vec![a.clone(), b, c.clone()];
+        rank(&mut rows);
+        assert_eq!(ids(&rows), ["b", "a", "c"]);
+        // Without coverage, the old order.
+        let mut rows = vec![c, a];
+        rows[1].hints.coverage = None;
+        rank(&mut rows);
+        assert_eq!(ids(&rows), ["a", "c"]);
     }
 }

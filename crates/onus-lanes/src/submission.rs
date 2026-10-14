@@ -40,6 +40,13 @@ pub struct ScopeUsed {
     /// Attenuations, as Datalog.
     #[serde(default)]
     pub attenuations: Vec<String>,
+    /// When the token expires (Unix seconds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires: Option<u64>,
+    /// The first 16 hex digits of the token's sha256, to tell tokens apart
+    /// without keeping one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
 }
 
 /// A person's approval of one row of the report (a weakened test, say).

@@ -5,22 +5,28 @@
 //! Every type serializes to the JSON shapes described in `PLAN.md` section 4
 //! and has a generated JSON Schema under `schemas/`.
 
+pub mod behavior;
 pub mod change;
 pub mod config;
 pub mod hash;
+pub mod held_out;
 pub mod ids;
 pub mod implementations;
 pub mod map;
 pub mod paths;
 pub mod plugins;
 pub mod protocol;
+pub mod provenance;
 pub mod provider;
 pub mod rank;
 pub mod schema;
 pub mod secrets;
+pub mod signal;
 
+pub use behavior::*;
 pub use change::*;
 pub use config::*;
+pub use held_out::*;
 pub use map::*;
 pub use provider::{
     DiscoveryProvider, FactProvider, LanguageAdapter, PartialMap, ProviderError, Workspace,

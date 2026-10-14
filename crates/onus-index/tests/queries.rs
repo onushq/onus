@@ -112,6 +112,171 @@ fn tests_owners_components_and_files() {
     assert!(file.symbols.iter().any(|s| s.name == "placeOrder"));
 }
 
+/// The shop's map with coverage: lcov that names `discount.test.ts` running
+/// `noDiscount`, aggregate coverage of the rest of `discount.ts`, and
+/// `payments.ts` loaded but never run.
+fn index_with_coverage() -> MapIndex {
+    use onus_core::CoverageOrigin;
+    use onus_map::coverage::{CoverageInput, add_coverage};
+    let mut map = build_map(&shop(), &BuildOptions::default()).unwrap();
+    let lcov = "TN:services/billing/src/discount.test.ts\nSF:/work/services/billing/src/discount.ts\nDA:16,2\nend_of_record\n\
+                TN:\nSF:/work/services/billing/src/discount.ts\nDA:20,5\nDA:21,3\nDA:31,2\nend_of_record\n\
+                SF:/work/services/billing/src/payments.ts\nDA:13,0\nDA:28,0\nDA:29,0\nDA:36,0\nend_of_record\n";
+    add_coverage(
+        &mut map,
+        None,
+        &[CoverageInput {
+            label: "lcov.info".into(),
+            bytes: lcov.as_bytes().to_vec(),
+            origin: CoverageOrigin::Supplied,
+            manifest: None,
+            command: None,
+            written: None,
+        }],
+    )
+    .unwrap();
+    MapIndex::new(map)
+}
+
+#[test]
+fn coverage_says_how_each_test_link_is_known() {
+    use onus_index::{LinkStrength, TargetCoverage};
+    let idx = index_with_coverage();
+    // Referred to, and the measured run executed it.
+    let apply = idx.tests_for("applyDiscount", 10).unwrap();
+    assert_eq!(apply.tests[0].file, "services/billing/src/discount.test.ts");
+    assert_eq!(apply.tests[0].link, LinkStrength::StaticRan);
+    assert_eq!(
+        apply.coverage,
+        Some(TargetCoverage {
+            executable: 3,
+            ran: 3
+        })
+    );
+    // Only coverage links the private function to the test that ran it.
+    assert!(
+        index()
+            .tests_for("noDiscount", 10)
+            .unwrap()
+            .tests
+            .is_empty()
+    );
+    let private = idx.tests_for("noDiscount", 10).unwrap();
+    assert_eq!(private.tests.len(), 1);
+    assert_eq!(
+        private.tests[0].file,
+        "services/billing/src/discount.test.ts"
+    );
+    assert_eq!(private.tests[0].link, LinkStrength::Ran);
+    // Referred to, but never run.
+    let invoice = idx.tests_for("createInvoice", 10).unwrap();
+    assert_eq!(invoice.tests[0].link, LinkStrength::StaticNotRun);
+    assert_eq!(invoice.coverage.map(|c| c.ran), Some(0));
+    // A file counts all its measured lines, and a test coverage saw running
+    // code in it ran the file.
+    let file = idx
+        .tests_for("services/billing/src/discount.ts", 10)
+        .unwrap();
+    assert_eq!(
+        file.coverage,
+        Some(TargetCoverage {
+            executable: 4,
+            ran: 4
+        })
+    );
+    assert_eq!(file.tests[0].link, LinkStrength::Ran);
+    let json = serde_json::to_value(&private).unwrap();
+    assert_eq!(json["tests"][0]["link"], "ran");
+    assert_eq!(json["coverage"]["executable"], 1);
+    // A file the coverage does not measure: not measured, not "no code".
+    let unmeasured = idx.tests_for("placeOrder", 10).unwrap();
+    assert_eq!(unmeasured.coverage, None);
+    assert!(
+        unmeasured
+            .tests
+            .iter()
+            .all(|t| t.link == LinkStrength::Static)
+    );
+    // Without coverage: static links and no coverage field.
+    let plain = index().tests_for("applyDiscount", 10).unwrap();
+    assert_eq!(plain.tests[0].link, LinkStrength::Static);
+    let json = serde_json::to_value(&plain).unwrap();
+    assert_eq!(json["tests"][0]["link"], "static");
+    assert!(json.get("coverage").is_none());
+    // Impact lists the tests with their links too.
+    let impact = idx
+        .impact("noDiscount", onus_index::Change::ChangeBehavior, 10)
+        .unwrap();
+    assert_eq!(impact.tests[0].link, LinkStrength::Ran);
+}
+
+#[test]
+fn overview_matches_component_for_every_component() {
+    let idx = index();
+    let overview = idx.overview();
+    assert_eq!(overview.components.len(), idx.map().components.len());
+    for c in &overview.components {
+        let one = idx.component(&c.id).unwrap();
+        assert_eq!(c.kind, one.kind, "{}", c.id);
+        assert_eq!(c.uses, one.uses, "{}", c.id);
+        assert_eq!(c.used_by, one.used_by, "{}", c.id);
+        assert_eq!(c.externals, one.externals, "{}", c.id);
+        assert_eq!(c.events_published, one.events_published, "{}", c.id);
+        assert_eq!(c.events_consumed, one.events_consumed, "{}", c.id);
+        assert_eq!(c.public_symbols, one.public_symbols, "{}", c.id);
+        assert_eq!(c.public, one.public, "{}", c.id);
+        assert_eq!(c.files, one.files, "{}", c.id);
+    }
+    // Links say the same as the components' `uses`.
+    for l in &overview.links {
+        let from = overview.components.iter().find(|c| c.id == l.from);
+        if let Some(from) = from {
+            assert_eq!(from.uses.get(&l.to), Some(&l.count), "{l:?}");
+        }
+        assert_eq!(l.kinds.values().sum::<usize>(), l.count);
+    }
+}
+
+#[test]
+fn overview_names_owners_labels_and_contracts() {
+    let idx = index();
+    let overview = idx.overview();
+    assert_eq!(overview.commit, idx.map().commit);
+    let prefs = overview
+        .components
+        .iter()
+        .find(|c| c.id == "user-preferences")
+        .unwrap();
+    assert_eq!(prefs.owners, ["@team-growth"]);
+    assert_eq!(prefs.labels, ["pii"]);
+    assert!(prefs.used_by.contains_key("notifications"));
+    assert!(prefs.lines > 0);
+    let contract = overview
+        .contracts
+        .iter()
+        .find(|c| c.symbol.id == "user-preferences:src/types.ts#UserPreferences")
+        .unwrap();
+    assert_eq!(contract.invariants, ["phone numbers are stored in E.164"]);
+    let billing = overview
+        .components
+        .iter()
+        .find(|c| c.id == "billing")
+        .unwrap();
+    assert!(billing.uses.contains_key("money"));
+    let placed = overview
+        .events
+        .iter()
+        .find(|e| e.name == "OrderPlaced")
+        .unwrap();
+    assert_eq!(placed.publishers, ["orders"]);
+    assert!(placed.consumers.contains(&"notifications".to_string()));
+    // Asked as a query, it is the same overview.
+    let answer = idx.answer(&Query::Overview).unwrap();
+    assert_eq!(answer, serde_json::to_value(&overview).unwrap());
+    let q: Query = serde_json::from_str(r#"{"query":"overview"}"#).unwrap();
+    assert_eq!(q, Query::Overview);
+}
+
 #[test]
 fn answers_are_deterministic_json() {
     let (a, b) = (index(), index());
@@ -129,6 +294,7 @@ fn answers_are_deterministic_json() {
         Query::Component {
             id: "billing".into(),
         },
+        Query::Overview,
     ] {
         assert_eq!(a.answer(&q).unwrap(), b.answer(&q).unwrap(), "{q:?}");
     }
@@ -229,4 +395,71 @@ fn invariants_come_from_declared_contracts() {
         1
     );
     assert!(idx.invariants("billing").unwrap().contracts.is_empty());
+}
+
+#[test]
+fn tests_reaching_follows_dependents_to_depth() {
+    // a.ts ← b.ts ← c.ts, a test on b and one on c, and a changed test file.
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    let files = [
+        ("a.ts", "export function a(n: number) { return n + 1 }\n"),
+        (
+            "b.ts",
+            "import { a } from './a'\nexport function b(n: number) { return a(n) * 2 }\n",
+        ),
+        (
+            "c.ts",
+            "import { b } from './b'\nexport function c(n: number) { return b(n) - 3 }\n",
+        ),
+        (
+            "b.test.ts",
+            "import { b } from './b'\ntest('b doubles', () => { expect(b(1)).toBe(4) })\n",
+        ),
+        (
+            "c.test.ts",
+            "import { c } from './c'\ntest('c subtracts', () => { expect(c(1)).toBe(1) })\n",
+        ),
+        (
+            "z.test.ts",
+            "import { c } from './c'\ntest('z', () => { expect(c(2)).toBe(3) })\n",
+        ),
+    ];
+    for (name, text) in files {
+        std::fs::write(src.join(name), text).unwrap();
+    }
+    let idx = MapIndex::new(build_map(dir.path(), &BuildOptions::default()).unwrap());
+    let changed = vec!["src/a.ts".to_string(), "src/z.test.ts".to_string()];
+    let files = |depth: u32| -> Vec<(String, bool, u32)> {
+        idx.tests_reaching(&changed, depth)
+            .into_iter()
+            .map(|r| (r.file, r.changed, r.depth))
+            .collect()
+    };
+    // Changed tests first; a changed test file is not walked from.
+    assert_eq!(files(0), [("src/z.test.ts".to_string(), true, 0)]);
+    assert_eq!(
+        files(1),
+        [
+            ("src/z.test.ts".to_string(), true, 0),
+            ("src/b.test.ts".to_string(), false, 1)
+        ]
+    );
+    let two = idx.tests_reaching(&changed, 2);
+    assert_eq!(
+        two.iter().map(|r| r.file.as_str()).collect::<Vec<_>>(),
+        ["src/z.test.ts", "src/b.test.ts", "src/c.test.ts"]
+    );
+    assert_eq!(two[2].depth, 2);
+    assert_eq!(two[2].via.as_deref(), Some("src/a.ts"));
+    // Deeper than 2 is clamped.
+    assert_eq!(idx.tests_reaching(&changed, 9), two);
+    // A file the change edits directly selects its own tests at depth 0.
+    let direct = idx.tests_reaching(&["src/b.ts".to_string()], 0);
+    assert_eq!(direct.len(), 1);
+    assert_eq!(
+        (direct[0].file.as_str(), direct[0].depth),
+        ("src/b.test.ts", 0)
+    );
 }

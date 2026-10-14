@@ -174,12 +174,16 @@ export interface TestRef {
 	component: string | null;
 	cases: number;
 	skipped: number;
+	/** How the link is known, strongest first: coverage saw the test run it, the test refers to it and it ran, no coverage, or it never ran. */
+	link?: 'ran' | 'static-ran' | 'static' | 'static-not-run';
 }
 
 export interface Tests {
 	target: string;
 	total: number;
 	truncated: boolean;
+	/** The target's lines in the coverage, when there is some. */
+	coverage?: { executable: number; ran: number } | null;
 	tests: TestRef[];
 }
 
@@ -245,6 +249,12 @@ export interface SemanticChange {
 		rulesOfTheGame: boolean;
 		intentMismatch: boolean;
 		needsPerson: boolean;
+		/** Other components that depend on what the row changed. */
+		dependentComponents?: number;
+		/** Whether tests or traces reach the files the row changes. */
+		tested?: 'tested' | 'traced' | 'untested';
+		/** The row's changed executable lines and how many ran in tests. */
+		coverage?: { changed: number; ran: number } | null;
 	};
 	locations: Location[];
 	stats?: { linesAdded: number; linesRemoved: number; files: number } | null;
@@ -273,17 +283,54 @@ export interface SemanticReport {
 	structure: { movedFiles: { from: string; to: string }[]; formattingOnly: string[] };
 	textStats: { files: number; linesAdded: number; linesRemoved: number };
 	mapDiagnostics: { file?: string; message: string }[];
+	/** Which changed lines tests ran, when coverage of the head was given. */
+	coverage?: {
+		changed: number;
+		ran: number;
+		notRun: Location[];
+		notMeasured: string[];
+		/** `command` is the run's, for recorded coverage. */
+		sources: { format: string; path: string; origin: string; manifest?: string | null; command?: string | null }[];
+		notes?: string[];
+	} | null;
 }
 
 export interface Applied {
 	lane: Lane;
+	/** `default`, `policy`, `input`, `floor`, `model`, `record` or `audit`. */
 	source: string;
 	reason: string;
+	/** The ids of the report rows behind it. */
+	rows?: string[];
+}
+
+/** A feature that pushed the learned risk up. */
+export interface LearnedFactor {
+	feature: string;
+	value: number;
+	contribution: number;
+	/** In plain words: "2 breaking rows". */
+	text: string;
+}
+
+/** The learned lane model's view of a change; it can only raise a lane. */
+export interface LearnedRisk {
+	/** `applied`, `missing`, `stale` or `invalid`. */
+	status: string;
+	model?: string | null;
+	risk?: number | null;
+	judgeAt: number;
+	humanAt: number;
+	raised: boolean;
+	factors: LearnedFactor[];
+	/** Why a missing, stale or invalid model was ignored. */
+	note?: string | null;
 }
 
 export interface Classification {
 	lane: Lane;
 	applied: Applied[];
+	learned?: LearnedRisk;
 }
 
 export interface ReportAnswer {
@@ -341,6 +388,33 @@ export interface Judgment {
 	steps: Step[];
 	reasons: string[];
 	judge: string;
+	/** The configuration from lanes.judges that judged, when there are any. */
+	rotation?: { config: string; index: number; of: number; forced: boolean } | null;
+	/** The held-out step in counts; it never names a check. */
+	heldOut?: { suite?: string; selected: number; ran: number; passed: number } | null;
+}
+
+/** What the held-out checks did, for people only (`<id>.held-out.json`). */
+export interface HeldOutReport {
+	suite: string;
+	judge: string;
+	/** `map` is false when the head map could not be built, absent when no check needed it. */
+	reach: { touched: string[]; pairs: [string, string][]; map?: boolean };
+	checks: {
+		id: string;
+		why: 'combination' | 'subject' | 'touched' | 'always' | 'neighbour';
+		with?: string[];
+		status: 'passed' | 'failed' | 'not-run' | 'error';
+		exitCode?: number | null;
+		outputTail?: string;
+	}[];
+	notSelected: string[];
+}
+
+export interface JudgeConfig {
+	name: string;
+	taste?: { command: string[] } | null;
+	heldOutLimit?: number | null;
 }
 
 export interface CheckCommand {
@@ -361,6 +435,10 @@ export interface LaneRule {
 export interface LanesPolicy {
 	configured: boolean;
 	judge: string;
+	/** Each configuration in lanes.judges with its judge id. */
+	judges?: { name: string; id: string }[];
+	/** Whether `onus ui --held-out` gave a suite. */
+	heldOutSuite?: boolean;
 	policy: {
 		default?: Lane;
 		auditRate?: number;
@@ -368,6 +446,7 @@ export interface LanesPolicy {
 		rules?: LaneRule[];
 		heldOut?: CheckCommand | null;
 		taste?: { command: string[] } | null;
+		judges?: JudgeConfig[];
 	};
 }
 
@@ -522,9 +601,20 @@ export interface EscalationRequest {
 	at: number;
 }
 
+/** Where a request was filed in Onus Cloud (`<id>.cloud.json`). */
+export interface EscalationCloud {
+	url: string;
+	organisation: string | null;
+	repository: string;
+	escalationId: string;
+	webUrl: string | null;
+	filedAt: number;
+}
+
 export interface EscalationItem {
 	request: EscalationRequest;
 	decision: { action: string; decision: string; by: string; reason: string; at: number } | null;
+	cloud?: EscalationCloud | null;
 	file: string;
 }
 

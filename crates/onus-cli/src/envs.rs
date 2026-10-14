@@ -102,7 +102,10 @@ pub fn grants(token: Option<&str>, key: Option<&Path>) -> Result<Grants> {
     if v.expires != 0 && v.expires <= now {
         bail!("the token has expired");
     }
-    let mut g = Grants::default();
+    let mut g = Grants {
+        task: Some(v.task.clone()),
+        ..Grants::default()
+    };
     for r in &v.rights {
         // Only what the token, with its attenuations, still allows now.
         if !matches!(r.kind, Kind::Net | Kind::Secret)

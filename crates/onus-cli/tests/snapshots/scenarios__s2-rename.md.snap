@@ -14,7 +14,7 @@ expression: md
 <details><summary>Evidence per row (files and lines)</summary>
 
 1. **`formatMoney` renamed to `formatCurrency`**
-   - kind `internal` / `rename` · confidence `static` · 41 dependent files
+   - kind `internal` / `rename` · confidence `static` · 41 dependent files · used by 3 other components · untested
    - `packages/money/src/format.test.ts` lines 2, 6
    - `packages/money/src/format.ts` line 12
    - `packages/money/src/index.ts` line 1

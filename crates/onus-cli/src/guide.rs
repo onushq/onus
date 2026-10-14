@@ -22,7 +22,7 @@ pub const TOPICS: &[Topic] = &[
     },
     Topic {
         name: "reports",
-        summary: "Reading a report: rows, ranking, evidence and the JSON",
+        summary: "Reading a report: rows, ranking, evidence, the changed lines tests ran and the JSON",
         text: include_str!("../guide/reports.md"),
     },
     Topic {
@@ -57,8 +57,13 @@ pub const TOPICS: &[Topic] = &[
     },
     Topic {
         name: "lanes",
-        summary: "Risk lanes, change submissions, the verifying judge and outcome records",
+        summary: "Risk lanes, change submissions, the learned model, the verifying judge, outcome records and provenance",
         text: include_str!("../guide/lanes.md"),
+    },
+    Topic {
+        name: "production",
+        summary: "Production signals, rollout plans per lane and automatic rollback",
+        text: include_str!("../guide/production.md"),
     },
     Topic {
         name: "web-interface",
@@ -67,12 +72,12 @@ pub const TOPICS: &[Topic] = &[
     },
     Topic {
         name: "environments",
-        summary: "Environments built from a commit, the evidence store, and traces into the map",
+        summary: "Environments built from a commit, the evidence store, traces and coverage into the map, and the behavior diff",
         text: include_str!("../guide/environments.md"),
     },
     Topic {
         name: "cloud",
-        summary: "Onus Cloud from the CLI: onus login, hosted environments, evidence and agents",
+        summary: "Onus Cloud from the CLI: onus login, scoped tokens, hosted environments, evidence, escalations, maps and agents",
         text: include_str!("../guide/cloud.md"),
     },
     Topic {
@@ -104,6 +109,9 @@ const ALIASES: &[(&str, &str)] = &[
     ("onus-cloud", "cloud"),
     ("scip", "plugins"),
     ("lsp", "plugins"),
+    ("provenance", "lanes"),
+    ("signals", "production"),
+    ("rollout", "production"),
 ];
 
 pub fn find(name: &str) -> Option<&'static Topic> {

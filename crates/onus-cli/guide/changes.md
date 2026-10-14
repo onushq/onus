@@ -9,7 +9,7 @@ Every row has a **kind** (one of seven), a **subkind** (the specific change) and
 | dependency | Third-party code changed: a new, upgraded or removed npm package, a lockfile, or a patched package (which needs a person). |
 | config | Configuration changed. CI, policies, onus.yaml and CODEOWNERS are also rules of the game. Migrations, root build config and infrastructure need a person. |
 | additive | Something new that existing callers do not notice: an optional field, a new export, a new event consumer, a new read; also a contract change whose users were all updated in the same change. |
-| test | Tests were weakened (rules of the game), or removed together with the code they tested. |
+| test | Tests were weakened (rules of the game), removed together with the code they tested, or edited to match behavior that changed (`--behavior`). |
 | internal | Everything else, collapsed into one row per component, plus renames, generated code and notable edits outside sensitive components. |
 
 "Sensitive component" means a component with a label of medium or high sensitivity in onus.yaml; `payments`, `auth` and `pii` are high unless onus.yaml says otherwise.
@@ -20,7 +20,7 @@ These are compared per component, so moving code around inside a component never
 
 | Subkind | Kind | When |
 |---|---|---|
-| new-external-service | security-sensitive | A component starts calling an external service that is new to the repository, or that sends a kind of data (phone numbers, email addresses, payment details, ...) the component never sent before. Its novelty lists `new-vendor:<vendor>` and `new-data-egress:<kind>`. A new npm package that is the service's SDK is folded into this row (`new-dependency:<package>`). |
+| new-external-service | security-sensitive | A component starts calling an external service that is new to the repository, or that sends a kind of data (phone numbers, email addresses, payment details, ...) the component never sent before. Its novelty lists `new-vendor:<vendor>` and `new-data-egress:<kind>`. A new npm package that is the service's SDK is folded into this row (`new-dependency:<package>`, and `new-package:<package>` when no other component used it). |
 | new-external-call | additive | A component starts calling a service another component already uses, sending nothing new. |
 | external-service-removed | internal | A component stops calling a service. |
 | new-event-consumer | additive | A component starts subscribing to an event. The row says whether the publishers also changed; with no publisher in the map it is low confidence. |
@@ -67,6 +67,12 @@ When every user was updated in the same change, or nothing outside it uses the s
 
 Renaming a parameter is not a contract change. When a contract declared in onus.yaml has invariants, the row repeats them.
 
+A contract declared in onus.yaml is a rule of the game. When its code changes (it is added or removed, or the body, shape or value of it or one of its members differs; formatting, comments and moves do not count), every row about it is marked `rulesOfTheGame` and needs a person. When no row is about it, for example a body-only edit, Onus adds one:
+
+| Subkind | Kind | When |
+|---|---|---|
+| declared-contract-edited | internal | The code of a contract declared in onus.yaml changed and no other row is about it. Rules of the game. |
+
 ## Renames and moves
 
 | Subkind | Kind | When |
@@ -112,6 +118,7 @@ Some changes need a person whatever their size or shape, so they get their own r
 |---|---|---|---|
 | ci-changed | config | yes | .github/workflows/*, .gitlab-ci.yml, .circleci/, .buildkite/, Jenkinsfile |
 | onus-config-changed | config | yes | onus.yaml (the report used the base version) |
+| lanes-model-changed | config | yes | *lanes-model.json, the learned lane model (the lane used the base version) |
 | onus-pack-changed | config | yes | a framework pack listed in onus.yaml (the report used the base version) |
 | codeowners-changed | config | yes | CODEOWNERS |
 | policy-changed | config | yes | *.rego, policy/, policies/ |
@@ -138,6 +145,15 @@ Rows for a changed config file name what changed: the top-level keys of JSON and
 | tests-removed-with-code | test | Removed test cases or assertions that used code this change deletes. They covered nothing that still exists, so they do not weaken the tests and do not need a person. |
 
 A removed case that reappears among the change's new cases (the same body, or the same title in a file of the same name, as when tests move with their code) is neither. New test cases are not a row; the component's internal row counts them.
+
+With `onus report --behavior`, the tests that reach the change also run at the base and at the head (`onus help environments`). What they showed is one row per component, at confidence `traced`:
+
+| Subkind | Kind | When |
+|---|---|---|
+| behavior-newly-failing | internal | A case passes at the base and fails at the head, and again when run once more; or a new case fails at the head. Needs a person, and blocks the change until one approves the row. |
+| behavior-changed | test | The base version of a test the change edited fails against the head's code, while the head's version passes: the behavior it pinned changed, and the test was edited to match. Snapshot mismatches land here. Rules of the game. |
+| behavior-newly-passing | internal | A case fails at the base and passes at the head. |
+| behavior-output-changed | internal | A case fails at both, with a different message. |
 
 ## Notable edits inside functions
 
@@ -184,3 +200,8 @@ Grouped rows keep every file and line in their evidence.
 - `novelty`: `new-vendor:<vendor>`, `new-data-egress:<kind>`, `new-dependency:<package>`, `new-package:<package>`, `secret`.
 - `confidence`: `declared` (from onus.yaml), `compiler` (confirmed by a compiler, indexer or language server), `static` (read from the code), `inferred` (from conventions) or `low` (Onus could not resolve something).
 - `rulesOfTheGame`, `intentMismatch`, `needsPerson`.
+- `dependentComponents`: other components (not the row's own) that depend on what the row changed. For most rows that is the subject. For a component's internal row it is the functions and classes its changed lines are in, so a body-only edit of a widely used function counts its users. 0 for other rows about a whole component. `dependents` lists those components (absent when there are none).
+- `tested`: for rows that change code, whether tests reach the files it changes: `tested` (a test exercises every changed file), `traced` (each changed file is tested or seen in a runtime trace) or `untested`. Absent for rows that change no code. It is per file, not line coverage.
+- `owners`: the owners of the row's component, from onus.yaml or else CODEOWNERS; a row merged from several components has all of theirs. Absent when nobody owns it. Used to route a review (`onus help ci`), not to rank.
+
+The lane classifier reads these hints (`onus help lanes`).

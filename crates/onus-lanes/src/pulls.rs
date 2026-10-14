@@ -6,9 +6,11 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use onus_core::Lane;
+use onus_core::{ApprovalRule, Lane};
 use serde::{Deserialize, Serialize};
 
+use crate::learned::Features;
+use crate::rollout::RolloutPlan;
 use crate::submission::{AgentSetup, Approval};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -28,6 +30,36 @@ pub struct PullRecord {
     pub judge: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub approvals: Vec<Approval>,
+    /// The components the change touched (from its report): what per-area
+    /// history counts reverts and incidents against.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub components: Vec<String>,
+    /// Everyone asked to review so far (`@login`, `@org/team`), so nobody
+    /// is asked twice.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requested: Vec<String>,
+    /// Who approved the head commit, from the reviews that counted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reviewed_by: Vec<String>,
+    /// Whose approval counted (`lanes.approval`, after any fallback), when
+    /// a review was needed or given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval: Option<ApprovalRule>,
+    /// `lanes.auditAfterMerge` when this change was classified; `ci closed`
+    /// samples with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit_after_merge: Option<f64>,
+    /// What the change looked like when it was classified; `ci closed`
+    /// copies it onto the outcome, for the learned lane model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub features: Option<Features>,
+    /// A person with write access said Onus caught a problem in it
+    /// (`/onus caught`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub caught: bool,
+    /// The rollout plan for its final lane.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollout: Option<RolloutPlan>,
 }
 
 pub fn load(path: &Path) -> Result<Vec<PullRecord>> {
@@ -71,6 +103,16 @@ pub fn latest<'a>(records: &'a [PullRecord], change: &str) -> Option<&'a PullRec
 /// `Co-authored-by` trailer naming an agent; else the person who opened
 /// the pull request.
 pub fn detect_agent(message: &str, branch: &str, author: &str) -> AgentSetup {
+    detect_agent_source(message, branch, author).0
+}
+
+/// [`detect_agent`], and what told: `trailer`, `branch`, `bot`,
+/// `co-author` or `person`.
+pub fn detect_agent_source(
+    message: &str,
+    branch: &str,
+    author: &str,
+) -> (AgentSetup, &'static str) {
     let setup = |tool: &str, model: &str, config: &str| AgentSetup {
         tool: tool.into(),
         model: model.into(),
@@ -82,7 +124,8 @@ pub fn detect_agent(message: &str, branch: &str, author: &str) -> AgentSetup {
             let mut parts = v.split('/').map(str::trim);
             let tool = parts.next().unwrap_or("");
             if !tool.is_empty() {
-                return setup(tool, parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+                let model = parts.next().unwrap_or("");
+                return (setup(tool, model, parts.next().unwrap_or("")), "trailer");
             }
         }
     }
@@ -98,7 +141,7 @@ pub fn detect_agent(message: &str, branch: &str, author: &str) -> AgentSetup {
         ("onus/", "onus-gateway"),
     ];
     if let Some((_, tool)) = BRANCHES.iter().find(|(p, _)| branch.starts_with(p)) {
-        return setup(tool, "", "");
+        return (setup(tool, "", ""), "branch");
     }
     let login = author.to_ascii_lowercase();
     const BOTS: &[(&str, &str)] = &[
@@ -113,10 +156,10 @@ pub fn detect_agent(message: &str, branch: &str, author: &str) -> AgentSetup {
     ];
     let bare = login.trim_end_matches("[bot]");
     if let Some((_, tool)) = BOTS.iter().find(|(b, _)| *b == bare) {
-        return setup(tool, "", "");
+        return (setup(tool, "", ""), "bot");
     }
     if login.ends_with("[bot]") {
-        return setup(bare, "", "");
+        return (setup(bare, "", ""), "bot");
     }
     for line in message.lines() {
         if let Some(v) = trailer(line, "co-authored-by") {
@@ -130,15 +173,18 @@ pub fn detect_agent(message: &str, branch: &str, author: &str) -> AgentSetup {
                 ("aider", "aider"),
             ] {
                 if who.contains(name) {
-                    return setup(tool, "", "");
+                    return (setup(tool, "", ""), "co-author");
                 }
             }
         }
     }
-    setup(
+    (
+        setup(
+            "person",
+            if author.is_empty() { "unknown" } else { author },
+            "",
+        ),
         "person",
-        if author.is_empty() { "unknown" } else { author },
-        "",
     )
 }
 
@@ -183,6 +229,23 @@ mod tests {
             key("x\n\nonus-agent: aider", "claude/x", "Copilot"),
             "aider//"
         );
+        // And what told.
+        let source = |m: &str, b: &str, a: &str| detect_agent_source(m, b, a).1;
+        assert_eq!(
+            source("x\n\nOnus-Agent: aider", "claude/x", "mike"),
+            "trailer"
+        );
+        assert_eq!(source("Fix", "codex/add-sms", "mike"), "branch");
+        assert_eq!(source("Fix", "feature", "renovate[bot]"), "bot");
+        assert_eq!(
+            source(
+                "Fix\n\nCo-authored-by: Claude <noreply@anthropic.com>",
+                "feature",
+                "mike"
+            ),
+            "co-author"
+        );
+        assert_eq!(source("Fix", "feature", "mike"), "person");
     }
 
     #[test]
@@ -199,11 +262,44 @@ mod tests {
             verdict: None,
             judge: None,
             approvals: vec![],
+            components: vec![],
+            requested: vec![],
+            reviewed_by: vec![],
+            approval: None,
+            audit_after_merge: None,
+            features: None,
+            caught: false,
+            rollout: None,
         };
         append(&path, &rec(Lane::Human, 1)).unwrap();
         append(&path, &rec(Lane::Judge, 2)).unwrap();
         let all = load(&path).unwrap();
         assert_eq!(latest(&all, "acme/shop#1").unwrap().lane, Lane::Judge);
         assert!(latest(&all, "acme/shop#2").is_none());
+        // Review fields are left out when empty, so old lines stay the same.
+        let line = serde_json::to_string(&rec(Lane::Human, 1)).unwrap();
+        assert!(
+            !line.contains("requested")
+                && !line.contains("reviewedBy")
+                && !line.contains("approval")
+        );
+        let mut reviewed = rec(Lane::Human, 3);
+        reviewed.requested = vec!["@team-growth".into()];
+        reviewed.reviewed_by = vec!["@grace".into()];
+        reviewed.approval = Some(ApprovalRule::Owner);
+        let line = serde_json::to_string(&reviewed).unwrap();
+        assert!(line.contains(
+            r#""requested":["@team-growth"],"reviewedBy":["@grace"],"approval":"owner""#
+        ));
+        assert_eq!(serde_json::from_str::<PullRecord>(&line).unwrap(), reviewed);
+        // The audit share is left out of older lines and round-trips.
+        assert!(!line.contains("auditAfterMerge"));
+        let old: PullRecord = serde_json::from_str(&line).unwrap();
+        assert_eq!(old.audit_after_merge, None);
+        let mut sampled = rec(Lane::AutoMerge, 4);
+        sampled.audit_after_merge = Some(0.05);
+        let line = serde_json::to_string(&sampled).unwrap();
+        assert!(line.contains(r#""auditAfterMerge":0.05"#));
+        assert_eq!(serde_json::from_str::<PullRecord>(&line).unwrap(), sampled);
     }
 }

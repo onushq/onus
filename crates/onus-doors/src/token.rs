@@ -1,11 +1,14 @@
 //! Task tokens: Biscuit tokens that carry a task's rights.
 //!
 //! A token's first block, signed with the root key, holds the task id, one
-//! `right(kind, pattern, regex)` fact per right and a check that the token
-//! has not expired. Whoever holds a token can attenuate it: an appended
-//! block of checks that narrows what it allows (for a sub-agent). Nobody can
-//! widen it: facts in later blocks are not trusted by the authorizer, and
-//! changing the first block breaks its signature.
+//! `right(kind, pattern, regex)` fact per right, the agent the task is for
+//! when the plan names one (`agent(tool, model, config, team)`), the
+//! escalation request it grants when it was minted for one
+//! (`escalation(id)`) and a check that the token has not expired. Whoever
+//! holds a token can attenuate it: an appended block of checks that narrows
+//! what it allows (for a sub-agent). Nobody can widen it: facts in later
+//! blocks are not trusted by the authorizer, and changing the first block
+//! breaks its signature.
 //!
 //! Values reach Datalog only as parameters, never as text pasted into a
 //! rule, so a path cannot inject logic.
@@ -13,9 +16,12 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, Result, anyhow, bail};
+/// The root public key type tokens are verified with.
+pub use biscuit_auth::PublicKey;
 use biscuit_auth::builder::{Algorithm, Term};
-use biscuit_auth::{AuthorizerBuilder, Biscuit, BlockBuilder, KeyPair, PrivateKey, PublicKey};
-use serde::Serialize;
+use biscuit_auth::{AuthorizerBuilder, Biscuit, BlockBuilder, KeyPair, PrivateKey};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::scope::{Kind, Right, Scope};
 
@@ -64,6 +70,21 @@ pub fn public_key(hex: &str) -> Result<PublicKey> {
         .map_err(|e| anyhow!("not an Ed25519 public key: {e}"))
 }
 
+/// The agent a task is for, as its plan names it. Only the root key writes
+/// it, so whoever holds the token cannot change it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentClaim {
+    /// The harness, such as `claude-code` or `codex`.
+    pub tool: String,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub config: String,
+    #[serde(default)]
+    pub team: String,
+}
+
 /// What a token grants.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -72,6 +93,18 @@ pub struct Grant {
     pub rights: Vec<Right>,
     /// Seconds since the Unix epoch.
     pub expires: u64,
+    /// The agent the task is for, when the plan names one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentClaim>,
+}
+
+/// A short id for a token, to log instead of the token: the first 16 hex
+/// characters of its sha256.
+pub fn token_id(raw: &str) -> String {
+    Sha256::digest(raw.trim().as_bytes())[..8]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// Datalog limits: generous on time (regexes compile inside the run, and
@@ -97,6 +130,16 @@ fn str(s: &str) -> Term {
 
 /// Mints a token for `grant`, signed with `root`.
 pub fn mint(root: &RootKey, grant: &Grant) -> Result<String> {
+    build(root, grant, None)
+}
+
+/// Mints the token that grants escalation request `request`: `grant`, plus
+/// the request's id, so the token proves which request it was granted for.
+pub fn mint_granted(root: &RootKey, grant: &Grant, request: &str) -> Result<String> {
+    build(root, grant, Some(request))
+}
+
+fn build(root: &RootKey, grant: &Grant, request: Option<&str>) -> Result<String> {
     if grant.task.is_empty() {
         bail!("a token needs a task id");
     }
@@ -116,6 +159,29 @@ pub fn mint(root: &RootKey, grant: &Grant) -> Result<String> {
                     ("pattern", str(&r.pattern)),
                     ("regex", str(&r.regex())),
                 ]),
+                HashMap::new(),
+            )
+            .map_err(|e| anyhow!("{e}"))?;
+    }
+    if let Some(a) = &grant.agent {
+        builder = builder
+            .code_with_params(
+                "agent({tool}, {model}, {config}, {team});",
+                params(&[
+                    ("tool", str(&a.tool)),
+                    ("model", str(&a.model)),
+                    ("config", str(&a.config)),
+                    ("team", str(&a.team)),
+                ]),
+                HashMap::new(),
+            )
+            .map_err(|e| anyhow!("{e}"))?;
+    }
+    if let Some(id) = request {
+        builder = builder
+            .code_with_params(
+                "escalation({id});",
+                params(&[("id", str(id))]),
                 HashMap::new(),
             )
             .map_err(|e| anyhow!("{e}"))?;
@@ -141,6 +207,12 @@ pub struct Verified {
     pub rights: Vec<Right>,
     /// The checks each attenuation added, as Datalog.
     pub attenuations: Vec<String>,
+    /// The agent the root key named, if any (tokens minted before agents
+    /// were named have none).
+    pub agent: Option<AgentClaim>,
+    /// The escalation request the root key granted with this token, if it
+    /// was minted for one.
+    pub escalation: Option<String>,
 }
 
 /// Checks a token's signatures and reads what it grants. It does not check
@@ -163,6 +235,22 @@ pub fn verify(token: &str, root: &PublicKey) -> Result<Verified> {
     let rights: Vec<(String, String)> = authorizer
         .query("r($k, $p) <- right($k, $p, $re)")
         .map_err(|e| anyhow!("{e}"))?;
+    let agents: Vec<(String, String, String, String)> = authorizer
+        .query("a($t, $m, $c, $e) <- agent($t, $m, $c, $e)")
+        .map_err(|e| anyhow!("{e}"))?;
+    let agent = agents
+        .into_iter()
+        .next()
+        .map(|(tool, model, config, team)| AgentClaim {
+            tool,
+            model,
+            config,
+            team,
+        });
+    let escalations: Vec<(String,)> = authorizer
+        .query("e($i) <- escalation($i)")
+        .map_err(|e| anyhow!("{e}"))?;
+    let escalation = escalations.into_iter().next().map(|(i,)| i);
     let mut parsed = Vec::new();
     for (k, p) in rights {
         let kind = Kind::parse(&k).with_context(|| format!("unknown right kind `{k}`"))?;
@@ -187,11 +275,14 @@ pub fn verify(token: &str, root: &PublicKey) -> Result<Verified> {
         expires,
         rights: scope.rights,
         attenuations,
+        agent,
+        escalation,
     })
 }
 
-/// `2026-10-08T19:00:00Z` → Unix seconds (UTC, as Biscuit prints dates).
-fn parse_rfc3339(s: &str) -> Option<u64> {
+/// `2026-10-08T19:00:00Z` → Unix seconds (UTC, as Biscuit prints dates);
+/// None for anything else.
+pub fn parse_rfc3339(s: &str) -> Option<u64> {
     let s = s.strip_suffix('Z').or_else(|| s.strip_suffix("+00:00"))?;
     let (date, time) = s.split_once('T')?;
     let d: Vec<i64> = date
@@ -202,7 +293,23 @@ fn parse_rfc3339(s: &str) -> Option<u64> {
         .split(':')
         .map(|p| p.split('.').next().unwrap_or(p).parse().ok())
         .collect::<Option<_>>()?;
-    let (y, m, day) = (d[0], d[1], d[2]);
+    let (&[y, m, day], 2..=3) = (d.as_slice(), t.len()) else {
+        return None;
+    };
+    // A date that does not exist is none, never another day.
+    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+    let month_days = match m {
+        2 if leap => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    let fits = (0..=23).contains(&t[0])
+        && (0..=59).contains(&t[1])
+        && t.get(2).is_none_or(|s| (0..=60).contains(s));
+    if !(1..=12).contains(&m) || !(1..=month_days).contains(&day) || !fits {
+        return None;
+    }
     // Days from civil (Howard Hinnant's algorithm).
     let y = if m <= 2 { y - 1 } else { y };
     let era = y.div_euclid(400);
@@ -319,6 +426,7 @@ mod tests {
                 "net:host:sms.test.example",
             ]),
             expires: LATER,
+            agent: None,
         }
     }
 
@@ -398,5 +506,93 @@ mod tests {
         let v = verify(&token, &root.public()).unwrap();
         let sneaky = "x\"); right(\"write\", \"**\", \".*\"); operation(\"write\", \"a";
         assert!(v.authorize(Kind::Write, sneaky, NOW).is_err());
+    }
+
+    #[test]
+    fn the_agent_comes_from_the_root_key_only() {
+        let root = RootKey::generate();
+        // Tokens minted without an agent have none.
+        let plain = mint(&root, &grant()).unwrap();
+        assert_eq!(verify(&plain, &root.public()).unwrap().agent, None);
+
+        let claim = AgentClaim {
+            tool: "claude-code".into(),
+            model: "opus".into(),
+            config: String::new(),
+            team: "growth".into(),
+        };
+        let mut g = grant();
+        g.agent = Some(claim.clone());
+        let token = mint(&root, &g).unwrap();
+        let v = verify(&token, &root.public()).unwrap();
+        assert_eq!(v.agent.as_ref(), Some(&claim));
+        // Attenuation keeps it.
+        let narrow = v
+            .attenuate(&rights(&["write:path:services/notifications/src/**"]))
+            .unwrap();
+        assert_eq!(verify(&narrow, &root.public()).unwrap().agent, Some(claim));
+        // Values that look like Datalog are stored as they are.
+        let sneaky = "x\"); right(\"write\", \"**\", \".*\"); agent(\"y";
+        g.agent = Some(AgentClaim {
+            tool: sneaky.into(),
+            ..Default::default()
+        });
+        let v = verify(&mint(&root, &g).unwrap(), &root.public()).unwrap();
+        assert_eq!(v.agent.as_ref().unwrap().tool, sneaky);
+        assert_eq!(v.rights.len(), 3);
+        assert!(
+            v.authorize(Kind::Write, "services/billing/a.ts", NOW)
+                .is_err()
+        );
+        // Ids are short, stable and not the token.
+        assert_eq!(token_id(&token).len(), 16);
+        assert_eq!(token_id(&format!(" {token}\n")), token_id(&token));
+    }
+
+    #[test]
+    fn a_granted_token_names_its_request_and_only_the_root_key_can() {
+        let root = RootKey::generate();
+        let plain = verify(&mint(&root, &grant()).unwrap(), &root.public()).unwrap();
+        assert_eq!(plain.escalation, None);
+        let granted = mint_granted(&root, &grant(), "a1b2c3d4e5f6").unwrap();
+        let v = verify(&granted, &root.public()).unwrap();
+        assert_eq!(v.escalation.as_deref(), Some("a1b2c3d4e5f6"));
+        // A block appended by whoever holds a token is not trusted for it.
+        let forged = plain
+            .token
+            .append(
+                BlockBuilder::new()
+                    .code("escalation(\"a1b2c3d4e5f6\");")
+                    .unwrap(),
+            )
+            .unwrap()
+            .to_base64()
+            .unwrap();
+        assert_eq!(verify(&forged, &root.public()).unwrap().escalation, None);
+    }
+
+    #[test]
+    fn only_real_dates_are_read() {
+        assert_eq!(parse_rfc3339("2026-10-12T10:00:00Z"), Some(1_791_799_200));
+        assert_eq!(
+            parse_rfc3339("2026-10-12T10:00:00.250+00:00"),
+            Some(1_791_799_200)
+        );
+        assert_eq!(parse_rfc3339("2026-10-12T10:00Z"), Some(1_791_799_200));
+        assert_eq!(parse_rfc3339("2024-02-29T00:00:00Z"), Some(1_709_164_800));
+        for bad in [
+            "2026-13-45T99:99Z",
+            "2026-02-29T00:00:00Z",
+            "2026-04-31T00:00:00Z",
+            "2026-10-00T00:00:00Z",
+            "2026-10-12T24:00:00Z",
+            "2026-10-12T10:60:00Z",
+            "2026-10-12T10:00:61Z",
+            "2026-10-12T10Z",
+            "2026-10-12T10:00:00:00Z",
+            "2026-10-12T10:00:00+02:00",
+        ] {
+            assert_eq!(parse_rfc3339(bad), None, "{bad}");
+        }
     }
 }

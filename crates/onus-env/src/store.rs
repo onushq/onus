@@ -2,7 +2,7 @@
 //! one manifest per run, named by the sha256 of its own contents.
 //!
 //! ```text
-//! <store>/objects/ab/cdef…   artifacts (output logs, JUnit XML, traces)
+//! <store>/objects/ab/cdef…   artifacts (output logs, JUnit XML, traces, coverage)
 //! <store>/runs/<id>.json     manifests
 //! ```
 
@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
+pub use onus_core::{CaseOutcome, JunitCase};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -24,6 +25,9 @@ pub enum ArtifactKind {
     Junit,
     /// OpenTelemetry traces (OTLP JSON).
     Trace,
+    /// Line coverage (lcov, Cobertura XML or Istanbul JSON). Last, so the
+    /// order of the other kinds in a manifest is unchanged.
+    Coverage,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,6 +69,9 @@ pub struct EnvironmentInfo {
     pub hosts: Vec<String>,
     /// The names (never the values) of the secrets it was given.
     pub secrets: Vec<String>,
+    /// The task whose token made the environment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
 }
 
 /// One run of one command in an environment.
@@ -82,6 +89,20 @@ pub struct Manifest {
     pub artifacts: Vec<Artifact>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tests: Option<TestCounts>,
+    /// Files replaced in the tree before the run, when it was not the
+    /// commit as committed (the behavior diff's cross run, ADR 0019).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overlay: Option<Overlay>,
+}
+
+/// Files of another commit written over the environment's tree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Overlay {
+    /// The commit the files came from.
+    pub from_commit: String,
+    /// Their paths, relative to the repository root.
+    pub paths: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -215,16 +236,21 @@ impl Store {
     }
 }
 
+/// The `<testcase>` elements of a JUnit XML file: attributes, then the
+/// body when the element is not empty. Quoted attribute values may hold `>`.
+fn testcases() -> regex::Regex {
+    regex::Regex::new(r#"(?s)<testcase\b((?:[^>"']|"[^"]*"|'[^']*')*?)(?:/>|>(.*?)</testcase>)"#)
+        .expect("valid regex")
+}
+
 /// Counts the test cases of a JUnit XML file by their `<testcase>`
 /// elements, which every reporter writes (suite totals are optional, and
 /// some reporters, such as Node's, leave them out).
 pub fn junit_counts(xml: &str) -> TestCounts {
-    let case =
-        regex::Regex::new(r"(?s)<testcase\b[^>]*?(?:/>|>(.*?)</testcase>)").expect("valid regex");
     let mut counts = TestCounts::default();
-    for c in case.captures_iter(xml) {
+    for c in testcases().captures_iter(xml) {
         counts.tests += 1;
-        let body = c.get(1).map_or("", |m| m.as_str());
+        let body = c.get(2).map_or("", |m| m.as_str());
         if body.contains("<failure") {
             counts.failures += 1;
         } else if body.contains("<error") {
@@ -234,6 +260,91 @@ pub fn junit_counts(xml: &str) -> TestCounts {
         }
     }
     counts
+}
+
+/// The test cases of a JUnit XML file, in file order: vitest's (`classname`
+/// is the file), jest-junit's (a `file` attribute) and Node's (neither).
+pub fn junit_cases(xml: &str) -> Vec<JunitCase> {
+    let failure = regex::Regex::new(
+        r#"(?s)<(failure|error)\b((?:[^>"']|"[^"]*"|'[^']*')*?)(?:/>|>(.*?)</(?:failure|error)>)"#,
+    )
+    .expect("valid regex");
+    testcases()
+        .captures_iter(xml)
+        .map(|c| {
+            let attrs = attributes(c.get(1).map_or("", |m| m.as_str()));
+            let body = c.get(2).map_or("", |m| m.as_str());
+            let (outcome, message) = match failure.captures(body) {
+                Some(f) => {
+                    let outcome = if &f[1] == "error" {
+                        CaseOutcome::Error
+                    } else {
+                        CaseOutcome::Failed
+                    };
+                    let message = attributes(f.get(2).map_or("", |m| m.as_str()))
+                        .remove("message")
+                        .filter(|m| !m.trim().is_empty())
+                        .or_else(|| {
+                            let text = decode(f.get(3).map_or("", |m| m.as_str()));
+                            let text = text.trim();
+                            (!text.is_empty()).then(|| text.chars().take(400).collect())
+                        });
+                    (outcome, message)
+                }
+                None if body.contains("<skipped") => (CaseOutcome::Skipped, None),
+                None => (CaseOutcome::Passed, None),
+            };
+            let file = attrs.get("file").map(|f| {
+                let f = f.strip_prefix("/work/").unwrap_or(f);
+                f.strip_prefix("./").unwrap_or(f).to_string()
+            });
+            JunitCase {
+                name: attrs.get("name").cloned().unwrap_or_default(),
+                classname: attrs.get("classname").cloned().unwrap_or_default(),
+                file,
+                outcome,
+                message,
+            }
+        })
+        .collect()
+}
+
+/// The attributes of an element, their values decoded.
+fn attributes(text: &str) -> std::collections::BTreeMap<String, String> {
+    let attr = regex::Regex::new(r#"([A-Za-z_][\w:.-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')"#)
+        .expect("valid regex");
+    attr.captures_iter(text)
+        .map(|c| {
+            let value = c.get(2).or_else(|| c.get(3)).map_or("", |m| m.as_str());
+            (c[1].to_string(), decode(value))
+        })
+        .collect()
+}
+
+/// Decodes XML's character entities.
+fn decode(text: &str) -> String {
+    if !text.contains('&') {
+        return text.to_string();
+    }
+    let entity =
+        regex::Regex::new(r"&(lt|gt|quot|apos|amp|#[0-9]+|#x[0-9a-fA-F]+);").expect("valid regex");
+    entity
+        .replace_all(text, |c: &regex::Captures| match &c[1] {
+            "lt" => "<".to_string(),
+            "gt" => ">".to_string(),
+            "quot" => "\"".to_string(),
+            "apos" => "'".to_string(),
+            "amp" => "&".to_string(),
+            n => {
+                let code = match n.strip_prefix("#x") {
+                    Some(hex) => u32::from_str_radix(hex, 16).ok(),
+                    None => n[1..].parse().ok(),
+                };
+                code.and_then(char::from_u32)
+                    .map_or_else(|| c[0].to_string(), String::from)
+            }
+        })
+        .into_owned()
 }
 
 #[cfg(test)]
@@ -256,9 +367,11 @@ mod tests {
                 seed: None,
                 hosts: vec![],
                 secrets: vec![],
+                task: None,
             },
             artifacts: vec![],
             tests: None,
+            overlay: None,
         }
     }
 
@@ -290,6 +403,30 @@ mod tests {
     }
 
     #[test]
+    fn coverage_artifacts_sort_after_traces() {
+        let mut kinds = vec![
+            ArtifactKind::Coverage,
+            ArtifactKind::Trace,
+            ArtifactKind::Log,
+            ArtifactKind::Junit,
+        ];
+        kinds.sort();
+        assert_eq!(
+            kinds,
+            [
+                ArtifactKind::Log,
+                ArtifactKind::Junit,
+                ArtifactKind::Trace,
+                ArtifactKind::Coverage
+            ]
+        );
+        assert_eq!(
+            serde_json::to_string(&ArtifactKind::Coverage).unwrap(),
+            "\"coverage\""
+        );
+    }
+
+    #[test]
     fn junit_counts_count_test_cases() {
         // Suites nested, with totals.
         let xml = r#"<?xml version="1.0"?>
@@ -315,5 +452,103 @@ mod tests {
         // Node's reporter: test cases without a suite, totals in comments.
         let node = "<testsuites>\n\t<testcase name=\"a\" time=\"0.1\" classname=\"test\"/>\n\t<testcase name=\"b\" time=\"0.1\" classname=\"test\"/>\n\t<!-- tests 2 -->\n</testsuites>";
         assert_eq!(junit_counts(node).tests, 2);
+    }
+
+    #[test]
+    fn manifest_without_overlay_hashes_as_before() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path());
+        let json = String::from_utf8(serde_json::to_vec_pretty(&manifest()).unwrap()).unwrap();
+        assert!(!json.contains("overlay"), "{json}");
+        // The id this manifest had before manifests could carry an overlay.
+        assert_eq!(store.record(&manifest()).unwrap(), MANIFEST_ID);
+        // An overlay is recorded, and changes the id.
+        let mut m = manifest();
+        m.overlay = Some(Overlay {
+            from_commit: "base".into(),
+            paths: vec!["src/a.test.ts".into()],
+        });
+        let id = store.record(&m).unwrap();
+        assert_ne!(id, MANIFEST_ID);
+        let (_, back) = store.manifest(&id).unwrap();
+        assert_eq!(back.overlay.unwrap().from_commit, "base");
+    }
+
+    const MANIFEST_ID: &str = "f3b68b1356644ad6abd88aca358acd31af640c09f8937c312660a66133159541";
+
+    #[test]
+    fn junit_cases_reads_vitest_jest_and_node() {
+        // vitest: the classname is the file.
+        let vitest = r#"<?xml version="1.0" encoding="UTF-8" ?>
+<testsuites name="vitest tests" tests="3" failures="1" errors="0">
+  <testsuite name="src/discount.test.ts" tests="3" failures="1" skipped="1">
+    <testcase classname="src/discount.test.ts" name="discount &gt; applies at the threshold" time="0.002">
+      <failure message="expected 0 to be 10 // Object.is equality" type="AssertionError">
+AssertionError: expected 0 to be 10
+      </failure>
+    </testcase>
+    <testcase classname="src/discount.test.ts" name="discount &gt; gives 10 above" time="0.001"/>
+    <testcase classname="src/discount.test.ts" name="discount &gt; later" time="0">
+      <skipped/>
+    </testcase>
+  </testsuite>
+</testsuites>"#;
+        let cases = junit_cases(vitest);
+        assert_eq!(cases.len(), 3);
+        assert_eq!(cases[0].name, "discount > applies at the threshold");
+        assert_eq!(cases[0].classname, "src/discount.test.ts");
+        assert_eq!(cases[0].file, None);
+        assert_eq!(cases[0].outcome, CaseOutcome::Failed);
+        assert_eq!(
+            cases[0].message.as_deref(),
+            Some("expected 0 to be 10 // Object.is equality")
+        );
+        assert_eq!(cases[1].outcome, CaseOutcome::Passed);
+        assert_eq!(cases[2].outcome, CaseOutcome::Skipped);
+
+        // jest-junit: a file attribute, the suite title as classname, and a
+        // failure whose message is only in its body.
+        let jest = r#"<testsuites name="jest tests">
+  <testsuite name="refund" tests="2" file="/work/src/refund.test.js">
+    <testcase classname="refund rounds" name="refund rounds down" time="0.003" file="/work/src/refund.test.js">
+      <failure>Error: expect(received).toBe(expected)
+
+Expected: 4.99
+Received: 5
+    at Object.&lt;anonymous&gt; (/work/src/refund.test.js:4:20)</failure>
+    </testcase>
+    <testcase classname="refund" name="it &quot;works&quot; &amp; ends &#39;well&#39;" file="./src/refund.test.js">
+      <error message="boom"/>
+    </testcase>
+  </testsuite>
+</testsuites>"#;
+        let cases = junit_cases(jest);
+        assert_eq!(cases[0].file.as_deref(), Some("src/refund.test.js"));
+        assert_eq!(cases[0].classname, "refund rounds");
+        assert_eq!(cases[0].outcome, CaseOutcome::Failed);
+        let message = cases[0].message.as_deref().unwrap();
+        assert!(
+            message.starts_with("Error: expect(received).toBe(expected)"),
+            "{message}"
+        );
+        assert!(message.contains("Object.<anonymous> (/work/src/refund.test.js:4:20)"));
+        assert_eq!(cases[1].name, "it \"works\" & ends 'well'");
+        assert_eq!(cases[1].file.as_deref(), Some("src/refund.test.js"));
+        assert_eq!(cases[1].outcome, CaseOutcome::Error);
+        assert_eq!(cases[1].message.as_deref(), Some("boom"));
+
+        // Node's reporter: `>` unescaped inside attributes, no file.
+        let node = "<testsuites>\n\t<testcase name=\"gives 10 above the threshold\" time=\"0.000481\" classname=\"test\"/>\n\t<testcase name=\"5 > 3 at the threshold\" time=\"0.000457\" classname=\"test\" failure=\"Expected values to be strictly equal:10 !== 0\">\n\t\t<failure type=\"testCodeFailure\" message=\"Expected values to be strictly equal:10 !== 0\">\n[Error [ERR_TEST_FAILURE]: Expected values to be strictly equal:\n\n10 !== 0\n]\n\t\t</failure>\n\t</testcase>\n\t<!-- tests 2 -->\n</testsuites>";
+        let cases = junit_cases(node);
+        assert_eq!(cases.len(), 2);
+        assert_eq!(cases[0].outcome, CaseOutcome::Passed);
+        assert_eq!(cases[1].name, "5 > 3 at the threshold");
+        assert_eq!(cases[1].classname, "test");
+        assert_eq!(cases[1].outcome, CaseOutcome::Failed);
+        assert_eq!(
+            cases[1].message.as_deref(),
+            Some("Expected values to be strictly equal:10 !== 0")
+        );
+        assert_eq!(junit_counts(node).failures, 1);
     }
 }

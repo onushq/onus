@@ -47,8 +47,10 @@ pub struct MapIndex {
     file: HashMap<String, usize>,
     /// Repository path → symbols declared there.
     file_symbols: HashMap<String, Vec<usize>>,
-    /// Symbol or module id → tests that exercise it.
-    tested_by: HashMap<String, Vec<usize>>,
+    /// Symbol or module id → tests that exercise it, and how that is known.
+    tested_by: HashMap<String, Vec<(usize, Via)>>,
+    /// Repository path → index in `map.coverage.files`.
+    coverage_files: HashMap<String, usize>,
     /// The tree the map was built from, to read source text (`impact`).
     root: Option<std::path::PathBuf>,
 }
@@ -150,14 +152,37 @@ impl MapIndex {
             .map(|(i, f)| (f.path.clone(), i))
             .collect();
 
-        let mut tested_by: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut tested_by: HashMap<String, Vec<(usize, Via)>> = HashMap::new();
+        let mut link = |target: &str, ti: usize, via: Via| {
+            for key in [target, ids::module_of(target)] {
+                tested_by
+                    .entry(key.to_string())
+                    .or_default()
+                    .push((ti, via));
+            }
+        };
         for (ti, t) in map.tests.iter().enumerate() {
             for target in &t.exercises {
-                tested_by.entry(target.clone()).or_default().push(ti);
-                tested_by
-                    .entry(ids::module_of(target).to_string())
-                    .or_default()
-                    .push(ti);
+                link(target, ti, Via::Static);
+            }
+        }
+        // Tests coverage saw running a symbol (ADR 0017). A static link
+        // stays: coverage only adds.
+        let test_index: HashMap<&str, usize> = map
+            .tests
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (t.id.as_str(), i))
+            .collect();
+        let mut coverage_files = HashMap::new();
+        if let Some(cov) = &map.coverage {
+            for l in &cov.links {
+                if let Some(&ti) = test_index.get(l.test.as_str()) {
+                    link(&l.target, ti, Via::Coverage);
+                }
+            }
+            for (i, f) in cov.files.iter().enumerate() {
+                coverage_files.insert(f.path.clone(), i);
             }
         }
         for list in tested_by.values_mut() {
@@ -181,6 +206,7 @@ impl MapIndex {
             file,
             file_symbols,
             tested_by,
+            coverage_files,
         }
     }
 
@@ -436,6 +462,19 @@ impl MapIndex {
                     (c.id.clone(), dir)
                 })
                 .collect(),
+            coverage: self.map.coverage.as_ref().map(|c| {
+                let (ran, executable) = c.files.iter().fold((0, 0), |(r, e), f| {
+                    let (covered, lines) = f.lines();
+                    (r + covered.len() as u32, e + lines.len() as u32)
+                });
+                CoverageStatus {
+                    files: c.files.len(),
+                    executable,
+                    ran,
+                    links: c.links.len(),
+                    notes: c.notes.clone(),
+                }
+            }),
         }
     }
 
@@ -624,7 +663,9 @@ impl MapIndex {
             invariants: s.invariants.clone(),
             uses: count(Some(&self.out)),
             used_by: count(Some(&self.inc)),
-            tests: self.tested_by.get(id).map_or(0, Vec::len),
+            tests: self.tested_by.get(id).map_or(0, |list| {
+                list.iter().map(|(ti, _)| ti).collect::<BTreeSet<_>>().len()
+            }),
         })
     }
 
@@ -790,15 +831,29 @@ impl MapIndex {
                 }
             }
         }
-        let mut tests: BTreeSet<usize> = BTreeSet::new();
+        // Each test, and whether coverage saw it run the target.
+        let mut tests: BTreeMap<usize, bool> = BTreeMap::new();
         for k in &keys {
-            tests.extend(self.tested_by.get(k).into_iter().flatten().copied());
+            for &(ti, via) in self.tested_by.get(k).into_iter().flatten() {
+                *tests.entry(ti).or_default() |= via == Via::Coverage;
+            }
         }
+        let coverage = self.target_coverage(&keys);
+        let fallback = match coverage {
+            Some(c) if c.ran > 0 => LinkStrength::StaticRan,
+            Some(c) if c.executable > 0 => LinkStrength::StaticNotRun,
+            _ => LinkStrength::Static,
+        };
         let total = tests.len();
-        let list: Vec<TestRef> = tests
+        let mut ranked: Vec<(LinkStrength, usize)> = tests
+            .into_iter()
+            .map(|(ti, ran)| (if ran { LinkStrength::Ran } else { fallback }, ti))
+            .collect();
+        ranked.sort_unstable();
+        let list: Vec<TestRef> = ranked
             .into_iter()
             .take(limit)
-            .map(|ti| {
+            .map(|(link, ti)| {
                 let t = &self.map.tests[ti];
                 TestRef {
                     file: t.file.clone(),
@@ -809,6 +864,7 @@ impl MapIndex {
                         .iter()
                         .filter(|c| c.markers.iter().any(|m| m == "skip" || m == "todo"))
                         .count(),
+                    link,
                 }
             })
             .collect();
@@ -816,8 +872,139 @@ impl MapIndex {
             target: target.to_string(),
             total,
             truncated: total > limit,
+            coverage,
             tests: list,
         })
+    }
+
+    /// Test files that reach the changed files: changed test files first,
+    /// then tests that exercise a changed file's module or symbols, or
+    /// something that depends on them up to `depth` code-dependency hops
+    /// (clamped to 2; the edges [`MapIndex::dependents`] follows). Sorted by
+    /// (changed first, depth, file). The behavior diff runs these (ADR 0019).
+    pub fn tests_reaching(&self, changed: &[String], depth: u32) -> Vec<Reach> {
+        let depth = depth.min(2);
+        let test_files: BTreeSet<&str> = self.map.tests.iter().map(|t| t.file.as_str()).collect();
+        let mut best: BTreeMap<String, Reach> = BTreeMap::new();
+        // The closest reach of each file; a changed test keeps the changed
+        // file it also exercises, for the report.
+        let mut offer = |mut r: Reach| match best.get_mut(&r.file) {
+            Some(b) if (!b.changed, b.depth, &b.via) <= (!r.changed, r.depth, &r.via) => {
+                if b.via.is_none() {
+                    b.via = r.via;
+                }
+            }
+            Some(b) => {
+                r.via = r.via.or(b.via.take());
+                *b = r;
+            }
+            None => {
+                best.insert(r.file.clone(), r);
+            }
+        };
+        let mut paths: Vec<&String> = changed.iter().collect();
+        paths.sort();
+        paths.dedup();
+        for path in paths {
+            if test_files.contains(path.as_str()) {
+                offer(Reach {
+                    file: path.clone(),
+                    changed: true,
+                    depth: 0,
+                    via: None,
+                });
+                continue;
+            }
+            // The file's symbols and module, as a walk from the file starts.
+            let mut ids: BTreeSet<String> = self
+                .file_symbols
+                .get(path.as_str())
+                .into_iter()
+                .flatten()
+                .map(|&si| self.map.symbols[si].id.clone())
+                .collect();
+            ids.extend(self.file_module.get(path.as_str()).cloned());
+            let mut reached: BTreeMap<String, u32> = ids.iter().map(|id| (id.clone(), 0)).collect();
+            let mut queue: VecDeque<(u32, u32)> = ids
+                .iter()
+                .filter_map(|id| self.node.get(id).map(|&n| (n, 0)))
+                .collect();
+            let mut seen: BTreeSet<u32> = queue.iter().map(|&(n, _)| n).collect();
+            while let Some((n, d)) = queue.pop_front() {
+                if d >= depth {
+                    continue;
+                }
+                for &ei in &self.inc[n as usize] {
+                    let e = &self.map.edges[ei as usize];
+                    if !e.kind.is_code_dependency() || ids::is_global(&e.from) {
+                        continue;
+                    }
+                    let Some(&m) = self.node.get(&e.from) else {
+                        continue;
+                    };
+                    if seen.insert(m) {
+                        reached.entry(e.from.clone()).or_insert(d + 1);
+                        queue.push_back((m, d + 1));
+                    }
+                }
+            }
+            for (id, d) in &reached {
+                for &(ti, _) in self.tested_by.get(id).into_iter().flatten() {
+                    offer(Reach {
+                        file: self.map.tests[ti].file.clone(),
+                        changed: false,
+                        depth: *d,
+                        via: Some(path.clone()),
+                    });
+                }
+            }
+        }
+        let mut all: Vec<Reach> = best.into_values().collect();
+        all.sort_by(|a, b| (!a.changed, a.depth, &a.file).cmp(&(!b.changed, b.depth, &b.file)));
+        all
+    }
+
+    /// The executable lines of the targets' code and how many ran, from
+    /// coverage: a symbol's own lines, or a module's whole file, each file
+    /// line counted once. None without coverage, when no target is code in
+    /// a file, or when the coverage measured none of their files.
+    fn target_coverage(&self, keys: &BTreeSet<String>) -> Option<TargetCoverage> {
+        let cov = self.map.coverage.as_ref()?;
+        // File → the line span to count, or None for the whole file.
+        let mut spans: BTreeMap<&str, Vec<Option<(u32, u32)>>> = BTreeMap::new();
+        for k in keys {
+            if let Some(&i) = self.symbol.get(k.as_str()) {
+                if let Some(l) = &self.map.symbols[i].loc {
+                    spans
+                        .entry(l.file.as_str())
+                        .or_default()
+                        .push(Some((l.start, l.end)));
+                }
+            } else if let Some(f) = self.module_file.get(k.as_str()) {
+                spans.entry(f.as_str()).or_default().push(None);
+            }
+        }
+        if spans.is_empty() {
+            return None;
+        }
+        // None when the coverage measured none of the target's files: that
+        // is "not measured", not "no executable code".
+        let mut total = None::<TargetCoverage>;
+        for (file, spans) in spans {
+            let Some(&i) = self.coverage_files.get(file) else {
+                continue;
+            };
+            let total = total.get_or_insert_default();
+            let (covered, executable) = cov.files[i].lines();
+            let inside = |n: &u32| {
+                spans
+                    .iter()
+                    .any(|s| s.is_none_or(|(a, b)| a <= *n && *n <= b))
+            };
+            total.executable += executable.iter().filter(|n| inside(n)).count() as u32;
+            total.ran += covered.iter().filter(|n| inside(n)).count() as u32;
+        }
+        total
     }
 
     /// Who owns `target` (a component, file or symbol), from onus.yaml and
@@ -928,6 +1115,149 @@ impl MapIndex {
             events_published: events_published.into_iter().collect(),
             events_consumed: events_consumed.into_iter().collect(),
         })
+    }
+
+    /// Every component as [`MapIndex::component`] describes it, with its
+    /// lines; the links and events between components; the externals,
+    /// declared contracts and rules. One pass over the map, so it stays
+    /// fast on large maps.
+    pub fn overview(&self) -> Overview {
+        let at: HashMap<&str, usize> = self
+            .map
+            .components
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (c.id.as_str(), i))
+            .collect();
+        let mut components: Vec<ComponentSummary> = self
+            .map
+            .components
+            .iter()
+            .map(|c| ComponentSummary {
+                id: c.id.clone(),
+                kind: format!("{:?}", c.kind).to_lowercase(),
+                roots: c.roots.clone(),
+                owners: c.owners.clone(),
+                labels: c.labels.clone(),
+                package_name: c.package_name.clone(),
+                files: 0,
+                lines: 0,
+                public_symbols: 0,
+                public: Vec::new(),
+                uses: BTreeMap::new(),
+                used_by: BTreeMap::new(),
+                externals: Vec::new(),
+                events_published: Vec::new(),
+                events_consumed: Vec::new(),
+            })
+            .collect();
+        let of = |id: Option<&str>| id.and_then(|c| at.get(c).copied());
+        for f in &self.map.files {
+            if let Some(i) = of(f.component_id.as_deref()) {
+                components[i].files += 1;
+                components[i].lines += u64::from(f.lines);
+            }
+        }
+        for s in &self.map.symbols {
+            if s.visibility == onus_core::Visibility::Public
+                && let Some(i) = of(s.component_id.as_deref())
+            {
+                let c = &mut components[i];
+                c.public_symbols += 1;
+                if c.public.len() < DEFAULT_LIMIT {
+                    c.public.push(symbol_ref(s));
+                }
+            }
+        }
+        let mut externals: Vec<BTreeSet<String>> = vec![BTreeSet::new(); components.len()];
+        let mut published: Vec<BTreeSet<String>> = vec![BTreeSet::new(); components.len()];
+        let mut consumed: Vec<BTreeSet<String>> = vec![BTreeSet::new(); components.len()];
+        let mut links: BTreeMap<(&str, &str), BTreeMap<String, usize>> = BTreeMap::new();
+        let mut publishers: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+        let mut consumers: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+        for e in &self.map.edges {
+            let Some(from) = ids::component_of(&e.from) else {
+                continue;
+            };
+            let to = ids::component_of(&e.to);
+            match e.kind {
+                EdgeKind::CallsExternal => {
+                    if let Some(i) = of(Some(from)) {
+                        externals[i].insert(e.to.clone());
+                    }
+                }
+                EdgeKind::Publishes => {
+                    let name = ids::name_of(&e.to);
+                    publishers.entry(name).or_default().insert(from);
+                    if let Some(i) = of(Some(from)) {
+                        published[i].insert(name.to_string());
+                    }
+                }
+                EdgeKind::Consumes => {
+                    let name = ids::name_of(&e.to);
+                    consumers.entry(name).or_default().insert(from);
+                    if let Some(i) = of(Some(from)) {
+                        consumed[i].insert(name.to_string());
+                    }
+                }
+                k if k.is_code_dependency() => {
+                    let Some(to) = to.filter(|t| *t != from) else {
+                        continue;
+                    };
+                    *links
+                        .entry((from, to))
+                        .or_default()
+                        .entry(k.as_str().to_string())
+                        .or_default() += 1;
+                    if let Some(i) = of(Some(from)) {
+                        *components[i].uses.entry(to.to_string()).or_default() += 1;
+                    }
+                    if let Some(i) = of(Some(to)) {
+                        *components[i].used_by.entry(from.to_string()).or_default() += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        for (i, c) in components.iter_mut().enumerate() {
+            c.externals = std::mem::take(&mut externals[i]).into_iter().collect();
+            c.events_published = std::mem::take(&mut published[i]).into_iter().collect();
+            c.events_consumed = std::mem::take(&mut consumed[i]).into_iter().collect();
+        }
+        let names: BTreeSet<&str> = publishers.keys().chain(consumers.keys()).copied().collect();
+        let list = |m: &BTreeMap<&str, BTreeSet<&str>>, name: &str| -> Vec<String> {
+            m.get(name)
+                .into_iter()
+                .flatten()
+                .map(|c| c.to_string())
+                .collect()
+        };
+        Overview {
+            commit: self.map.commit.clone(),
+            onus: self.map.built_with.onus.clone(),
+            components,
+            links: links
+                .into_iter()
+                .map(|((from, to), kinds)| ComponentLink {
+                    from: from.to_string(),
+                    to: to.to_string(),
+                    count: kinds.values().sum(),
+                    kinds,
+                })
+                .collect(),
+            events: names
+                .into_iter()
+                .map(|name| EventLink {
+                    name: name.to_string(),
+                    publishers: list(&publishers, name),
+                    consumers: list(&consumers, name),
+                })
+                .collect(),
+            externals: self.map.externals.clone(),
+            contracts: self.invariants("").map(|i| i.contracts).unwrap_or_default(),
+            rules: self.map.rules.clone(),
+            diagnostics: self.map.diagnostics.len(),
+        }
     }
 
     /// A file: its component, symbols, imports and importers.
@@ -1084,6 +1414,23 @@ pub struct Status {
     pub diagnostics: usize,
     /// Each component's folder, which its symbol ids' paths are relative to.
     pub component_dirs: BTreeMap<String, String>,
+    /// The map's coverage, when it has some.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<CoverageStatus>,
+}
+
+/// What the map's coverage holds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageStatus {
+    /// Files with coverage.
+    pub files: usize,
+    pub executable: u32,
+    pub ran: u32,
+    /// Links from tests to the symbols they ran.
+    pub links: usize,
+    /// What was left out and why.
+    pub notes: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
@@ -1177,6 +1524,41 @@ pub struct TestRef {
     pub cases: usize,
     /// Cases marked skip or todo.
     pub skipped: usize,
+    /// How the link is known.
+    pub link: LinkStrength,
+}
+
+/// How a test is known to exercise its target, strongest first.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum LinkStrength {
+    /// Coverage shows this test running the target.
+    Ran,
+    /// The test refers to the target, and the measured run executed it.
+    StaticRan,
+    /// The test refers to the target; no coverage was given for it.
+    Static,
+    /// The test refers to the target, but the measured run never executed it.
+    StaticNotRun,
+}
+
+/// Where a test link comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum Via {
+    /// The test file refers to the target.
+    Static,
+    /// Coverage names the test running the target.
+    Coverage,
+}
+
+/// The target's executable lines and how many of them ran, from coverage.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetCoverage {
+    pub executable: u32,
+    pub ran: u32,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -1185,7 +1567,27 @@ pub struct Tests {
     pub target: String,
     pub total: usize,
     pub truncated: bool,
+    /// The target's lines in the coverage, when coverage was given. Tests
+    /// may be empty while some lines ran: the target ran through other code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<TargetCoverage>,
+    /// Strongest link first.
     pub tests: Vec<TestRef>,
+}
+
+/// A test file that reaches changed code (`tests_reaching`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Reach {
+    /// The test file.
+    pub file: String,
+    /// The test file itself changed.
+    pub changed: bool,
+    /// Code-dependency hops from a changed file (0: it exercises one).
+    pub depth: u32,
+    /// The changed file it reaches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -1217,6 +1619,85 @@ pub struct ComponentInfo {
     pub externals: Vec<String>,
     pub events_published: Vec<String>,
     pub events_consumed: Vec<String>,
+}
+
+/// The whole map at component level (`onus query overview`,
+/// schemas/map-overview.schema.json): what `onus ui` draws and what Onus
+/// Cloud shows for a kept map.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Overview {
+    /// The commit the map was built from.
+    pub commit: String,
+    /// The onus version that built the map.
+    pub onus: String,
+    /// Every component, in map order.
+    pub components: Vec<ComponentSummary>,
+    /// Code dependencies between components, sorted by (from, to).
+    pub links: Vec<ComponentLink>,
+    /// Events with the components that publish and consume them, by name.
+    pub events: Vec<EventLink>,
+    pub externals: Vec<onus_core::ExternalService>,
+    /// Every declared invariant, by symbol.
+    pub contracts: Vec<DeclaredInvariants>,
+    pub rules: Vec<onus_core::BoundaryRule>,
+    /// How many things the map could not resolve.
+    pub diagnostics: usize,
+}
+
+/// A component in an [`Overview`]: the same counts as [`ComponentInfo`],
+/// plus its lines.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ComponentSummary {
+    pub id: String,
+    pub kind: String,
+    pub roots: Vec<String>,
+    pub owners: Vec<String>,
+    pub labels: Vec<String>,
+    pub package_name: Option<String>,
+    pub files: usize,
+    pub lines: u64,
+    pub public_symbols: usize,
+    /// The first public symbols, by id.
+    pub public: Vec<SymbolRef>,
+    /// Components this one depends on, with the number of edges.
+    pub uses: BTreeMap<String, usize>,
+    /// Components that depend on this one, with the number of edges.
+    pub used_by: BTreeMap<String, usize>,
+    pub externals: Vec<String>,
+    pub events_published: Vec<String>,
+    pub events_consumed: Vec<String>,
+}
+
+/// Code dependencies from one component to another.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ComponentLink {
+    pub from: String,
+    pub to: String,
+    /// Edges in all.
+    pub count: usize,
+    /// Edges per kind: imports, calls, references-type, …
+    pub kinds: BTreeMap<String, usize>,
+}
+
+/// An event and the components on each side of it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct EventLink {
+    pub name: String,
+    pub publishers: Vec<String>,
+    pub consumers: Vec<String>,
+}
+
+/// The JSON Schema of [`Overview`], as `onus schema` writes it. It lives
+/// here because onus-core cannot name onus-index's types.
+pub fn overview_schema() -> (&'static str, String) {
+    let mut json =
+        serde_json::to_string_pretty(&schemars::schema_for!(Overview)).expect("schemas serialize");
+    json.push('\n');
+    ("map-overview.schema.json", json)
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -1349,6 +1830,9 @@ pub enum Query {
         #[serde(default)]
         target: String,
     },
+    /// Every component with its owners, labels, what it uses and what uses
+    /// it; the links, events, contracts and rules.
+    Overview,
 }
 
 fn one() -> u32 {
@@ -1407,6 +1891,7 @@ impl MapIndex {
                 limit,
             } => json(serde_json::to_value(self.impact(target, *change, *limit)?)),
             Query::Invariants { target } => json(serde_json::to_value(self.invariants(target)?)),
+            Query::Overview => json(serde_json::to_value(self.overview())),
         }
     }
 }

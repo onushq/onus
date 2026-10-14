@@ -6,11 +6,15 @@
 //! per-file facts of every file that did not change (a [`FactsCache`]
 //! shared by all worktrees of the repository). Queries between changes are
 //! answered from memory.
+//!
+//! The coverage files `tests.coverage` names join each rebuilt map (ADR
+//! 0017). They usually sit in folders the watcher ignores (`coverage/`), so
+//! each query also checks their modification times.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result};
 use onus_index::MapIndex;
@@ -38,6 +42,10 @@ struct State {
     build_ms: u64,
     /// Without a watcher: the file list and sizes the index was built from.
     fingerprint: Option<u64>,
+    /// The coverage files of `tests.coverage`, and their modification times
+    /// when the index was built.
+    coverage: Vec<String>,
+    coverage_stamp: Vec<Option<SystemTime>>,
 }
 
 /// About the map an answer came from.
@@ -84,6 +92,8 @@ impl Session {
                 version: 0,
                 build_ms: 0,
                 fingerprint: None,
+                coverage: Vec::new(),
+                coverage_stamp: Vec::new(),
             }),
             _watcher: watcher,
         })
@@ -125,7 +135,7 @@ impl Session {
             None => true,
             Some(_) if watching => now != state.built_at_change,
             Some(_) => Some(fingerprint(&self.root)) != state.fingerprint,
-        };
+        } || stamp(&self.root, &state.coverage) != state.coverage_stamp;
         if !stale && let Some(index) = &state.index {
             return Ok((
                 index.clone(),
@@ -139,7 +149,7 @@ impl Session {
         }
         let started = Instant::now();
         let fp = (!watching).then(|| fingerprint(&self.root));
-        let map = onus_map::build_map(
+        let mut map = onus_map::build_map(
             &self.root,
             &BuildOptions {
                 commit: Some("worktree".into()),
@@ -147,6 +157,13 @@ impl Session {
                 ..BuildOptions::default()
             },
         )?;
+        let coverage = onus_map::config::load_from_tree(&self.root)?
+            .map(|l| l.config.tests.coverage)
+            .unwrap_or_default();
+        let coverage_stamp = stamp(&self.root, &coverage);
+        add_coverage(&mut map, &self.root, &coverage);
+        state.coverage = coverage;
+        state.coverage_stamp = coverage_stamp;
         let index = Arc::new(MapIndex::new(map).with_root(&self.root));
         state.index = Some(index.clone());
         state.built_at_change = now;
@@ -162,6 +179,50 @@ impl Session {
                 watching,
             },
         ))
+    }
+}
+
+/// When each coverage file was last written; None when it is missing.
+fn stamp(root: &Path, files: &[String]) -> Vec<Option<SystemTime>> {
+    files
+        .iter()
+        .map(|f| {
+            std::fs::metadata(onus_core::paths::native(root, f))
+                .and_then(|m| m.modified())
+                .ok()
+        })
+        .collect()
+}
+
+/// Adds the coverage files that exist to the worktree's map. Source files
+/// edited since a coverage file was written are left out of it, and a file
+/// that cannot be read is a note in the map's coverage.
+fn add_coverage(map: &mut onus_core::CodebaseMap, root: &Path, files: &[String]) {
+    let mut notes = Vec::new();
+    let mut inputs = Vec::new();
+    for f in files {
+        let path = onus_core::paths::native(root, f);
+        if !path.exists() {
+            continue;
+        }
+        match std::fs::read(&path) {
+            Ok(bytes) => inputs.push(onus_map::coverage::CoverageInput {
+                label: f.clone(),
+                bytes,
+                origin: onus_core::CoverageOrigin::Supplied,
+                manifest: None,
+                command: None,
+                written: std::fs::metadata(&path).and_then(|m| m.modified()).ok(),
+            }),
+            Err(e) => notes.push(format!("cannot read coverage {f}: {e}")),
+        }
+    }
+    if inputs.is_empty() && notes.is_empty() {
+        return;
+    }
+    onus_map::coverage::add_coverage_noting(map, Some(root), &inputs);
+    if let Some(c) = &mut map.coverage {
+        c.notes.extend(notes);
     }
 }
 

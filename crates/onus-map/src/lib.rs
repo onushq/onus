@@ -5,6 +5,7 @@
 
 pub mod build;
 pub mod config;
+pub mod coverage;
 pub mod discover;
 pub mod init;
 pub mod merge;

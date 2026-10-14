@@ -34,6 +34,7 @@ pub fn rows(ctx: &Ctx, rows: &mut Vec<SemanticChange>) {
                 touched_manifests.insert(dep.file.clone());
                 let mut locations = vec![Location::head(&dep.file, dep.line, dep.line)];
                 locations.extend(import_sites);
+                let repo_new = !base_names.contains(name.as_str());
                 // Fold into a new external-service row for the same SDK.
                 if let Some(ext) = rows.iter_mut().find(|r| {
                     r.component.as_deref() == Some(comp.as_str())
@@ -45,12 +46,15 @@ pub fn rows(ctx: &Ctx, rows: &mut Vec<SemanticChange>) {
                             .any(|e| e.id == r.subject && e.packages.iter().any(|p| p == name))
                 }) {
                     ext.hints.novelty.push(format!("new-dependency:{name}"));
+                    // Third-party code new to the repository stays visible as such.
+                    if repo_new {
+                        ext.hints.novelty.push(format!("new-package:{name}"));
+                    }
                     ext.locations.extend(locations);
                     ext.locations.sort();
                     ext.locations.dedup();
                     continue;
                 }
-                let repo_new = !base_names.contains(name.as_str());
                 let why = if repo_new {
                     format!(
                         "New third-party code in the supply chain; `{name}` is not used anywhere else in this repository"
@@ -276,4 +280,60 @@ fn import_sites(ctx: &Ctx, comp: &str, name: &str) -> Vec<Location> {
                 .map(|s| Location::head(&s.file, s.line, s.line))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::{component, ctx, map};
+    use crate::text::TreeDiff;
+    use serde_json::json;
+
+    #[test]
+    fn an_sdk_new_to_the_repository_stays_new_when_folded() {
+        let dep = |comp: &str, name: &str| {
+            json!({
+                "componentId": comp, "name": name, "version": "1.0.0",
+                "section": "dependencies", "file": format!("packages/{comp}/package.json"), "line": 5,
+            })
+        };
+        let base = map(json!({
+            "components": [component("orders"), component("billing")],
+            "packages": [dep("billing", "@acme/pay")],
+        }));
+        let head = map(json!({
+            "components": [component("orders"), component("billing")],
+            "packages": [dep("billing", "@acme/pay"), dep("orders", "@acme/sms"), dep("orders", "@acme/pay")],
+            "externals": [
+                { "id": "external:acme-sms", "vendor": "Acme SMS", "category": "sms", "egress": [],
+                  "packages": ["@acme/sms"], "hosts": [], "source": "declared", "confidence": "declared" },
+                { "id": "external:acme-pay", "vendor": "Acme Pay", "category": "payments", "egress": [],
+                  "packages": ["@acme/pay"], "hosts": [], "source": "declared", "confidence": "declared" },
+            ],
+        }));
+        let text = TreeDiff::default();
+        let c = ctx(&base, &head, &text, None);
+        let external = |id: &str| {
+            change(
+                ChangeKind::SecuritySensitive,
+                "new-external-service",
+                ChangeLevel::Relationship,
+                id,
+                Some("orders"),
+                "",
+                id.into(),
+                String::new(),
+                vec![],
+            )
+        };
+        let mut rows = vec![external("external:acme-sms"), external("external:acme-pay")];
+        super::rows(&c, &mut rows);
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert_eq!(
+            rows[0].hints.novelty,
+            ["new-dependency:@acme/sms", "new-package:@acme/sms"]
+        );
+        // Already used by billing: new to orders only.
+        assert_eq!(rows[1].hints.novelty, ["new-dependency:@acme/pay"]);
+    }
 }

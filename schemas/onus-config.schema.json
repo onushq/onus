@@ -76,6 +76,69 @@
     "version"
   ],
   "$defs": {
+    "ApprovalRule": {
+      "description": "Whose approving review counts in the human lane.",
+      "oneOf": [
+        {
+          "description": "One of the change's owners, or a member of an owning team.",
+          "type": "string",
+          "const": "owner"
+        },
+        {
+          "description": "Any person with write access who did not open the pull request.",
+          "type": "string",
+          "const": "member"
+        }
+      ]
+    },
+    "BehaviorConfig": {
+      "description": "How `onus report --behavior` runs tests. Read from the base commit (or\n`--config`), so a change cannot alter the command that checks it.",
+      "type": "object",
+      "properties": {
+        "budget": {
+          "description": "Seconds for the whole behavior diff, environments included. Default\n600.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "command": {
+          "description": "Runs the selected test files and writes JUnit XML. `{files}` is\nreplaced with the selected test files, shell-quoted and relative to\nthe repository root.",
+          "type": "string"
+        },
+        "depth": {
+          "description": "Code-dependency hops from changed code to the tests (0 to 2).\nDefault 1.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "junit": {
+          "description": "Globs of the JUnit files the command writes. Default:\n`reports/onus-behavior*.xml`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "maxFiles": {
+          "description": "The most test files selected. Default 40.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "command"
+      ]
+    },
     "CheckCommand": {
       "description": "A command run in a container against the change.",
       "type": "object",
@@ -154,6 +217,17 @@
         "module"
       ]
     },
+    "ConfidenceInput": {
+      "type": "object",
+      "properties": {
+        "low": {
+          "description": "The lane of a change with a row that rests on parts of the map Onus\ncould not resolve. Default `judge`; `auto-merge` turns it off.",
+          "$ref": "#/$defs/Lane",
+          "default": "judge"
+        }
+      },
+      "additionalProperties": false
+    },
     "ContractConfig": {
       "type": "object",
       "properties": {
@@ -173,10 +247,52 @@
         "symbol"
       ]
     },
+    "CoveragePolicy": {
+      "type": "object",
+      "properties": {
+        "commands": {
+          "description": "The environment commands (as `onus env run` ran them) whose recorded\ncoverage counts. An agent picks the commands it runs, so coverage\nrecorded by any other command sends the change to the judge. Default\nnone: only coverage given with `--coverage` counts.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "minChanged": {
+          "description": "The share (0 to 1) of changed executable lines tests must run for a\nchange to stay in the auto-merge lane. Default 0 (no minimum).",
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "required": {
+          "description": "A change without coverage may not auto-merge. Default false.",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false
+    },
     "EnvironmentConfig": {
       "description": "A disposable environment: a container built from the repository at a\ncommit. Read from the operator's working tree, never from the commit\nunder test, so a change cannot alter its own environment.",
       "type": "object",
       "properties": {
+        "behavior": {
+          "description": "The behavior diff (`onus report --behavior`, ADR 0019): the tests\nthat reach a change, run at the base and at the head.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BehaviorConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "coverage": {
+          "description": "Globs of coverage files (lcov, Cobertura XML, Istanbul JSON) a run\nwrites, kept as evidence. `onus report --evidence` reads them when\nthe run was at the head commit.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "egressImage": {
           "description": "The egress proxy image, started when a task's token names hosts.\nDefault `ubuntu/squid`.",
           "type": [
@@ -319,6 +435,67 @@
       },
       "additionalProperties": false
     },
+    "HistoryInput": {
+      "type": "object",
+      "properties": {
+        "days": {
+          "description": "How many days back the outcome records count (1 to 3650). Default 90.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 90,
+          "minimum": 0
+        },
+        "incidents": {
+          "description": "Incidents per component. Default `{ human: 1 }`.",
+          "$ref": "#/$defs/Thresholds",
+          "default": {
+            "human": 1
+          }
+        },
+        "reverts": {
+          "description": "Reverts and rollbacks per component. Default `{ judge: 1 }`.",
+          "$ref": "#/$defs/Thresholds",
+          "default": {
+            "judge": 1
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "JudgeConfig": {
+      "description": "One judge configuration: the judge picks one per change, so an author\ncannot tune a change to a single reviewer (`onus help lanes`).",
+      "type": "object",
+      "properties": {
+        "heldOutLimit": {
+          "description": "At most this many held-out checks per judgment. Default the suite's `limit`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "name": {
+          "description": "A short name, shown in judgments and outcome summaries.",
+          "type": "string"
+        },
+        "taste": {
+          "description": "The reviewer for taste under this configuration. Default `lanes.taste`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TasteCommand"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name"
+      ]
+    },
     "LabelConfig": {
       "type": "object",
       "properties": {
@@ -404,8 +581,25 @@
     "LanesConfig": {
       "type": "object",
       "properties": {
+        "approval": {
+          "description": "Whose approval lets a human-lane change through: `owner` (one of the\nchange's owners, or a member of an owning team) or `member` (any\nperson with write access). Default `owner` when the change names\nowners, `member` when it names none (`onus help ci`).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ApprovalRule"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "auditAfterMerge": {
+          "description": "The share of changes approved without a person (`auto-merge`, or the\njudge's `approve`) that wait for a person to audit after they merge,\nchosen by a hash of the merge commit (0 to 1). Default 0.05.",
+          "type": "number",
+          "format": "double",
+          "default": 0.05
+        },
         "auditRate": {
-          "description": "The share of `auto-merge` changes sent to a person anyway, chosen by\na hash of the head commit (0 to 1). Default 0.05.",
+          "description": "The share of would-be `auto-merge` changes sent to a person before\nmerging, chosen by a hash of the head commit (0 to 1). Default 0.05.",
           "type": "number",
           "format": "double",
           "default": 0.05
@@ -416,10 +610,52 @@
           "default": "judge"
         },
         "heldOut": {
-          "description": "Checks the author never saw, run by the judge in a container.",
+          "description": "A check in onus.yaml; agents can read it. Prefer a suite given with\n`--held-out`.",
           "anyOf": [
             {
               "$ref": "#/$defs/CheckCommand"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "inputs": {
+          "description": "Built-in risk inputs; each can only raise a lane (`onus help lanes`).",
+          "$ref": "#/$defs/RiskInputs",
+          "default": {
+            "blastRadius": {
+              "judge": 3
+            },
+            "confidence": {
+              "low": "judge"
+            },
+            "history": {
+              "days": 90,
+              "incidents": {
+                "human": 1
+              },
+              "reverts": {
+                "judge": 1
+              }
+            },
+            "tests": {
+              "untested": "judge"
+            }
+          }
+        },
+        "judges": {
+          "description": "Judge configurations the judge rotates between (`onus help lanes`).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/JudgeConfig"
+          }
+        },
+        "learned": {
+          "description": "A learned model that may raise a change's lane, never lower it\n(`onus help lanes`). Off unless written.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LearnedConfig"
             },
             {
               "type": "null"
@@ -432,6 +668,17 @@
           "format": "uint32",
           "default": 10,
           "minimum": 0
+        },
+        "rollout": {
+          "description": "How each lane's changes meet production traffic: built-in plans\nunless written, one lane at a time (`onus help production`).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RolloutPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "rules": {
           "description": "Rules, in any order: a rule with `match: every` can set a lower\nstarting lane when every row of the change matches it; every other\nrule and the hard floors only move a change up.",
@@ -454,6 +701,74 @@
         }
       },
       "additionalProperties": false
+    },
+    "LearnedConfig": {
+      "description": "A learned model that may raise a change's lane, never lower it\n(`onus help lanes`).",
+      "type": "object",
+      "properties": {
+        "human": {
+          "description": "Raise lanes below `human` to `human` at or above this risk. Default 0.85.",
+          "type": "number",
+          "format": "double",
+          "default": 0.85
+        },
+        "judge": {
+          "description": "Raise lanes below `judge` to `judge` at or above this risk. Default 0.6.",
+          "type": "number",
+          "format": "double",
+          "default": 0.6
+        },
+        "model": {
+          "description": "The model file from `onus lanes train`, relative to the repository\nroot. Its name must end in `lanes-model.json`, so a change to it goes\nto a person. Default `onus.lanes-model.json`.",
+          "type": "string",
+          "default": "onus.lanes-model.json"
+        }
+      },
+      "additionalProperties": false
+    },
+    "MetricGuard": {
+      "description": "A limit on one metric during a rollout. Ratios compare the value with\nits baseline (the control, or the value before the deploy).",
+      "type": "object",
+      "properties": {
+        "max": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "maxRatio": {
+          "description": "The most `value / baseline` may be.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "metric": {
+          "description": "The metric's name, as the samples give it (`error_rate`).",
+          "type": "string"
+        },
+        "min": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "minRatio": {
+          "description": "The least `value / baseline` may be, for metrics that must not drop.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "metric"
+      ]
     },
     "OneOrMany": {
       "anyOf": [
@@ -481,6 +796,153 @@
         }
       },
       "additionalProperties": false
+    },
+    "RiskInputs": {
+      "description": "The built-in risk inputs of the classifier. They are on by default and\nonly ever raise a lane. Writing a field replaces its default as a whole.",
+      "type": "object",
+      "properties": {
+        "blastRadius": {
+          "description": "Other components that depend on what a row changed. Default\n`{ judge: 3 }`; `{}` turns it off.",
+          "$ref": "#/$defs/Thresholds",
+          "default": {
+            "judge": 3
+          }
+        },
+        "confidence": {
+          "description": "Rows that rest on parts of the map Onus could not resolve.",
+          "$ref": "#/$defs/ConfidenceInput",
+          "default": {
+            "low": "judge"
+          }
+        },
+        "coverage": {
+          "description": "The share of changed lines tests must run for a change to stay in\nthe auto-merge lane, from coverage of the head. Off unless written.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CoveragePolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "history": {
+          "description": "Reverts, rollbacks and incidents in the components a change touches,\nfrom the outcome records.",
+          "$ref": "#/$defs/HistoryInput",
+          "default": {
+            "days": 90,
+            "incidents": {
+              "human": 1
+            },
+            "reverts": {
+              "judge": 1
+            }
+          }
+        },
+        "tests": {
+          "description": "Rows that change code no test exercises and no trace has observed.",
+          "$ref": "#/$defs/TestsInput",
+          "default": {
+            "untested": "judge"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "RolloutConfig": {
+      "description": "How a change meets traffic: in steps, each baked for a while, rolled\nback when a guard is breached.",
+      "type": "object",
+      "properties": {
+        "bakeMinutes": {
+          "description": "How long each step runs healthy before the next.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
+        "guards": {
+          "description": "The metrics that roll the change back.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/MetricGuard"
+          }
+        },
+        "steps": {
+          "description": "Shares of traffic in percent: strictly ascending, from 1 to 100, the\nlast one 100. None for `none`.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "integer",
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0
+          }
+        },
+        "strategy": {
+          "$ref": "#/$defs/RolloutStrategy"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "strategy"
+      ]
+    },
+    "RolloutPolicy": {
+      "description": "The rollout plan of each lane. A lane left out keeps its built-in plan.",
+      "type": "object",
+      "properties": {
+        "auto-merge": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RolloutConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "human": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RolloutConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "judge": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RolloutConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "RolloutStrategy": {
+      "oneOf": [
+        {
+          "description": "No staged rollout.",
+          "type": "string",
+          "const": "none"
+        },
+        {
+          "description": "A share of traffic at a time.",
+          "type": "string",
+          "const": "canary"
+        },
+        {
+          "description": "Behind a feature flag, turned up a share of traffic at a time.",
+          "type": "string",
+          "const": "flag"
+        }
+      ]
     },
     "RuleConfig": {
       "type": "object",
@@ -545,12 +1007,68 @@
     "TestsConfig": {
       "type": "object",
       "properties": {
+        "command": {
+          "description": "How to run one test file, `{test}` replaced by its path\n(e.g. `npx vitest run {test}`). Used to reproduce failing-test\nevidence of escalations. Unset: they are not reproduced.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "coverage": {
+          "description": "Coverage files of the working tree (lcov, Cobertura XML, Istanbul\nJSON), relative to the repository root, read by the map server for\nagents (`onus mcp`, `onus query`). Files edited after a coverage file\nwas written are left out.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "globs": {
           "description": "Globs of test files. Defaults cover `*.test.*`, `*.spec.*` and\n`__tests__/`.",
           "type": "array",
           "items": {
             "type": "string"
           }
+        }
+      },
+      "additionalProperties": false
+    },
+    "TestsInput": {
+      "type": "object",
+      "properties": {
+        "untested": {
+          "description": "The lane of a change with a row whose code no test exercises and no\ntrace has observed. Default `judge`; `auto-merge` turns it off.",
+          "$ref": "#/$defs/Lane",
+          "default": "judge"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Thresholds": {
+      "description": "Counts at which a lane applies; the highest one met wins. A threshold of\nN means N or more; an unset one never applies.",
+      "type": "object",
+      "properties": {
+        "blocked": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "human": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "judge": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
         }
       },
       "additionalProperties": false

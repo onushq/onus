@@ -2,8 +2,8 @@
 
 use std::path::Path;
 
-use onus_core::OnusConfig;
 use onus_core::hash::sha256_hex;
+use onus_core::{Lane, OnusConfig, RolloutConfig, RolloutStrategy, Thresholds};
 
 use crate::MapError;
 
@@ -121,6 +121,66 @@ pub fn validate(config: &OnusConfig) -> Result<(), MapError> {
             ));
         }
     }
+    if let Some(lanes) = &config.lanes {
+        let inputs = &lanes.inputs;
+        for (key, t) in [
+            ("blastRadius", &inputs.blast_radius),
+            ("history.reverts", &inputs.history.reverts),
+            ("history.incidents", &inputs.history.incidents),
+        ] {
+            thresholds(&format!("lanes.inputs.{key}"), t, &mut problems);
+        }
+        if !(1..=3650).contains(&inputs.history.days) {
+            problems.push(format!(
+                "lanes.inputs.history.days must be between 1 and 3650, found {}",
+                inputs.history.days
+            ));
+        }
+        if let Some(c) = &inputs.coverage
+            && !(0.0..=1.0).contains(&c.min_changed)
+        {
+            problems.push(format!(
+                "lanes.inputs.coverage.minChanged is a share from 0 to 1, found {}",
+                c.min_changed
+            ));
+        }
+        if let Some(learned) = &lanes.learned {
+            let (judge, human) = (learned.judge, learned.human);
+            if !(0.0 < judge && judge <= human && human <= 1.0) {
+                problems.push(format!(
+                    "lanes.learned: the thresholds must be 0 < judge <= human <= 1, found judge {judge} and human {human}"
+                ));
+            }
+            if !learned.model.ends_with("lanes-model.json") {
+                problems.push(
+                    "lanes.learned.model: name the file …lanes-model.json, so a change to it goes to a person"
+                        .into(),
+                );
+            }
+        }
+        let mut names = std::collections::BTreeSet::new();
+        for j in &lanes.judges {
+            if j.name.trim().is_empty() || j.name.contains(['@', ' ']) {
+                problems.push(format!(
+                    "lanes.judges: the name `{}` may not be empty or contain `@` or spaces",
+                    j.name
+                ));
+            } else if !names.insert(j.name.as_str()) {
+                problems.push(format!("lanes.judges: the name `{}` is used twice", j.name));
+            }
+        }
+        if let Some(policy) = &lanes.rollout {
+            for lane in [Lane::AutoMerge, Lane::Judge, Lane::Human] {
+                if let Some(r) = policy.get(lane) {
+                    rollout(
+                        &format!("lanes.rollout.{}", lane.as_str()),
+                        r,
+                        &mut problems,
+                    );
+                }
+            }
+        }
+    }
     if let Some(events) = &config.extractors.events {
         for p in events.publish.iter().chain(&events.subscribe) {
             if !p.contains("$EVENT") {
@@ -132,6 +192,60 @@ pub fn validate(config: &OnusConfig) -> Result<(), MapError> {
         Ok(())
     } else {
         Err(MapError::Config(problems.join("; ")))
+    }
+}
+
+/// Steps ascend strictly from 1 to 100 and end at 100; `none` has none;
+/// every guard sets a limit.
+fn rollout(key: &str, r: &RolloutConfig, problems: &mut Vec<String>) {
+    let steps = &r.steps;
+    if r.strategy == RolloutStrategy::None {
+        if !steps.is_empty() {
+            problems.push(format!("{key}: strategy none takes no steps"));
+        }
+    } else {
+        if steps.last() != Some(&100) {
+            problems.push(format!("{key}: the steps must end at 100, found {steps:?}"));
+        }
+        if steps.iter().any(|s| !(1..=100).contains(s)) {
+            problems.push(format!(
+                "{key}: each step is a share of traffic from 1 to 100, found {steps:?}"
+            ));
+        }
+        if steps.windows(2).any(|w| w[1] <= w[0]) {
+            problems.push(format!("{key}: the steps must go up, found {steps:?}"));
+        }
+    }
+    for g in &r.guards {
+        if g.max.is_none() && g.min.is_none() && g.max_ratio.is_none() && g.min_ratio.is_none() {
+            problems.push(format!(
+                "{key}: the guard on {} sets no limit (max, min, maxRatio or minRatio)",
+                g.metric
+            ));
+        }
+    }
+}
+
+/// Thresholds are at least 1 and ascend with the lane.
+fn thresholds(key: &str, t: &Thresholds, problems: &mut Vec<String>) {
+    let set: Vec<(Lane, u32)> = [Lane::Judge, Lane::Human, Lane::Blocked]
+        .into_iter()
+        .filter_map(|l| t.get(l).map(|n| (l, n)))
+        .collect();
+    for (lane, n) in &set {
+        if *n == 0 {
+            problems.push(format!("{key}: {} must be at least 1", lane.as_str()));
+        }
+    }
+    for pair in set.windows(2) {
+        let ((low, a), (high, b)) = (pair[0], pair[1]);
+        if b < a {
+            problems.push(format!(
+                "{key}: {} ({b}) is below {} ({a})",
+                high.as_str(),
+                low.as_str()
+            ));
+        }
     }
 }
 
@@ -169,5 +283,114 @@ extractors:
         let err = parse(bad_rule).unwrap_err().to_string();
         assert!(err.contains("unknown component `b`"), "{err}");
         assert!(parse("version: 2\n").is_err());
+    }
+
+    #[test]
+    fn risk_input_thresholds_ascend_from_one() {
+        let err = |lanes: &str| {
+            parse(&format!("version: 1\nlanes:\n  inputs: {lanes}\n"))
+                .unwrap_err()
+                .to_string()
+        };
+        assert!(
+            err("{ blastRadius: { judge: 3, human: 2 } }")
+                .contains("lanes.inputs.blastRadius: human (2) is below judge (3)")
+        );
+        assert!(
+            err("{ history: { incidents: { human: 0 } } }")
+                .contains("lanes.inputs.history.incidents: human must be at least 1")
+        );
+        assert!(err("{ history: { days: 0 } }").contains("history.days"));
+        assert!(
+            parse("version: 1\nlanes:\n  inputs: { blastRadius: {}, history: { days: 30 } }\n")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_coverage_policy_is_a_share_and_off_unless_written() {
+        let lanes = |inputs: &str| parse(&format!("version: 1\nlanes:\n  inputs: {inputs}\n"));
+        let err = lanes("{ coverage: { minChanged: 80 } }")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("lanes.inputs.coverage.minChanged is a share from 0 to 1, found 80"),
+            "{err}"
+        );
+        let on = lanes("{ coverage: { minChanged: 0.8, required: true } }").unwrap();
+        let policy = on.config.lanes.unwrap().inputs.coverage.unwrap();
+        assert_eq!((policy.min_changed, policy.required), (0.8, true));
+        let off = lanes("{}").unwrap();
+        assert_eq!(off.config.lanes.unwrap().inputs.coverage, None);
+        let full = parse("version: 1\ntests:\n  coverage: [coverage/lcov.info]\nenvironment:\n  coverage: [\"coverage/*.info\"]\n").unwrap();
+        assert_eq!(full.config.tests.coverage, ["coverage/lcov.info"]);
+        assert_eq!(
+            full.config.environment.unwrap().coverage,
+            ["coverage/*.info"]
+        );
+    }
+
+    #[test]
+    fn a_learned_model_has_ordered_thresholds_and_a_named_file() {
+        let err = |learned: &str| {
+            parse(&format!("version: 1\nlanes:\n  learned: {learned}\n"))
+                .unwrap_err()
+                .to_string()
+        };
+        assert!(
+            err("{ judge: 0.9, human: 0.5 }").contains(
+                "lanes.learned: the thresholds must be 0 < judge <= human <= 1, found judge 0.9 and human 0.5"
+            )
+        );
+        assert!(err("{ judge: 0 }").contains("0 < judge"));
+        assert!(err("{ model: model.json }").contains(
+            "lanes.learned.model: name the file …lanes-model.json, so a change to it goes to a person"
+        ));
+        let loaded = parse("version: 1\nlanes:\n  learned: {}\n").unwrap();
+        let learned = loaded.config.lanes.unwrap().learned.unwrap();
+        assert_eq!(
+            (learned.model.as_str(), learned.judge, learned.human),
+            ("onus.lanes-model.json", 0.6, 0.85)
+        );
+        assert!(parse("version: 1\nlanes:\n  learned: { model: ops/lanes-model.json }\n").is_ok());
+    }
+
+    #[test]
+    fn rollout_plans_have_ascending_steps_that_end_at_100() {
+        let rollout = |lane: &str, plan: &str| {
+            parse(&format!(
+                "version: 1\nlanes:\n  rollout:\n    {lane}: {plan}\n"
+            ))
+        };
+        let ok = rollout(
+            "judge",
+            "{ strategy: canary, steps: [5, 25, 100], bakeMinutes: 30, guards: [{ metric: error_rate, maxRatio: 1.5 }, { metric: checkout_conversion, minRatio: 0.97 }] }",
+        )
+        .unwrap();
+        let policy = ok.config.lanes.unwrap().rollout.unwrap();
+        assert_eq!(policy.judge.unwrap().steps, [5, 25, 100]);
+        assert!(rollout("auto-merge", "{ strategy: none }").is_ok());
+        let err = |lane: &str, plan: &str| rollout(lane, plan).unwrap_err().to_string();
+        assert!(
+            err("judge", "{ strategy: canary, steps: [25, 5, 100] }")
+                .contains("lanes.rollout.judge: the steps must go up, found [25, 5, 100]")
+        );
+        assert!(
+            err("human", "{ strategy: flag, steps: [1, 5, 25] }")
+                .contains("lanes.rollout.human: the steps must end at 100, found [1, 5, 25]")
+        );
+        assert!(
+            err("auto-merge", "{ strategy: none, steps: [100] }")
+                .contains("lanes.rollout.auto-merge: strategy none takes no steps")
+        );
+        assert!(err("judge", "{ strategy: canary, steps: [0, 100] }").contains("from 1 to 100"));
+        assert!(
+            err(
+                "judge",
+                "{ strategy: canary, steps: [100], guards: [{ metric: error_rate }] }"
+            )
+            .contains("the guard on error_rate sets no limit")
+        );
+        assert!(rollout("blocked", "{ strategy: none }").is_err());
     }
 }

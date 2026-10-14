@@ -16,13 +16,16 @@ pub struct Entry {
     pub seq: u64,
     /// Seconds since the Unix epoch.
     pub at: u64,
-    /// The task (token) that asked, or `operator`.
+    /// The task (token) that asked, `operator`, or `local` (an MCP server
+    /// without a token).
     pub actor: String,
-    /// `mint`, `attenuate`, `push`, `escalate`, `grant`, `deny`, …
+    /// `mint`, `attenuate`, `push`, `fetch`, `auth`, `escalate`, `grant`,
+    /// `deny`, `adopt-token`, `mcp:<tool>`, …
     pub action: String,
     /// What was asked about: a ref, a scope, a request id.
     pub subject: String,
-    /// `allowed`, `refused`, `granted`, `needs-person`, …
+    /// `allowed`, `denied`, `done`, `failed`, `refused`, `granted`,
+    /// `needs-person`, …
     pub decision: String,
     pub reason: String,
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
@@ -107,19 +110,40 @@ impl AuditLog {
         Ok(entry)
     }
 
+    /// The last entry, read from the end of the file in blocks: appending
+    /// costs the same however long the log is.
     fn last(&self) -> Result<Option<Entry>> {
-        let Ok(f) = std::fs::File::open(&self.path) else {
+        use std::io::{Read, Seek, SeekFrom};
+        const BLOCK: u64 = 8 * 1024;
+        let Ok(mut f) = std::fs::File::open(&self.path) else {
             return Ok(None);
         };
-        let mut last = None;
-        for line in std::io::BufReader::new(f).lines() {
-            let line = line?;
-            if !line.trim().is_empty() {
-                last = Some(line);
+        let mut pos = f.metadata()?.len();
+        let mut tail: Vec<u8> = Vec::new();
+        loop {
+            let end = tail
+                .iter()
+                .rposition(|b| !b.is_ascii_whitespace())
+                .map(|i| i + 1);
+            if let Some(end) = end {
+                let start = tail[..end].iter().rposition(|b| *b == b'\n');
+                if start.is_some() || pos == 0 {
+                    let line = &tail[start.map_or(0, |i| i + 1)..end];
+                    let entry = serde_json::from_slice(line)
+                        .context("the audit log's last line is not an entry")?;
+                    return Ok(Some(entry));
+                }
+            } else if pos == 0 {
+                return Ok(None);
             }
+            let from = pos.saturating_sub(BLOCK);
+            let mut block = vec![0u8; (pos - from) as usize];
+            f.seek(SeekFrom::Start(from))?;
+            f.read_exact(&mut block)?;
+            block.extend_from_slice(&tail);
+            tail = block;
+            pos = from;
         }
-        last.map(|l| serde_json::from_str(&l).context("the audit log's last line is not an entry"))
-            .transpose()
     }
 
     /// Every entry, after checking the chain: sequence numbers count up from
@@ -156,6 +180,114 @@ impl AuditLog {
             out.push(e);
         }
         Ok(out)
+    }
+}
+
+/// Checks the chain over a run of entries cut from a log, such as a task's
+/// slice: sequence numbers count up by one, each entry names the hash of
+/// the one before, and each hash matches. The first entry's `prev` is taken
+/// as given, unless it is entry 1, whose `prev` must be the start of a log.
+/// What came before the run, and after it, is not checked.
+pub fn verify_run(entries: &[Entry]) -> Result<()> {
+    let Some(first) = entries.first() else {
+        bail!("there are no entries");
+    };
+    if first.seq == 1 && first.prev != GENESIS {
+        bail!("entry 1 does not start a log");
+    }
+    for (i, e) in entries.iter().enumerate() {
+        if let Some(before) = i.checked_sub(1).map(|b| &entries[b]) {
+            if e.seq != before.seq + 1 {
+                bail!("entry {} follows entry {}", e.seq, before.seq);
+            }
+            if e.prev != before.hash {
+                bail!(
+                    "entry {}: the chain is broken (an entry before it was changed or removed)",
+                    e.seq
+                );
+            }
+        }
+        if digest(e) != e.hash {
+            bail!("entry {} was changed after it was written", e.seq);
+        }
+    }
+    Ok(())
+}
+
+/// Whether an entry is about `task`: the task's own calls, its token's
+/// `mint`, and decisions others made for it (a grant names the task).
+pub fn concerns(e: &Entry, task: &str) -> bool {
+    e.actor == task
+        || (e.action == "mint" && e.subject == task)
+        || e.details["task"].as_str() == Some(task)
+}
+
+/// A task's slice of a log: the run of entries from the first that
+/// concerns it to the last, with whatever lies between, so the chain can be
+/// checked over it. Empty when no entry concerns the task.
+pub fn slice<'e>(entries: &'e [Entry], task: &str) -> &'e [Entry] {
+    let first = entries.iter().position(|e| concerns(e, task));
+    let last = entries.iter().rposition(|e| concerns(e, task));
+    match (first, last) {
+        (Some(a), Some(b)) => &entries[a..=b],
+        _ => &[],
+    }
+}
+
+/// A digest of a call's arguments: sha256 of their JSON with object keys
+/// sorted, so the same arguments in another order give the same digest.
+pub fn args_digest(v: &serde_json::Value) -> String {
+    let json = serde_json::to_string(&canonical(v)).unwrap_or_default();
+    format!("sha256:{}", hex(&Sha256::digest(json.as_bytes())))
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// `v` with every object rebuilt in key order.
+fn canonical(v: &serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    match v {
+        Value::Object(m) => {
+            let sorted: std::collections::BTreeMap<&String, Value> =
+                m.iter().map(|(k, v)| (k, canonical(v))).collect();
+            let mut out = serde_json::Map::new();
+            for (k, v) in sorted {
+                out.insert(k.clone(), v);
+            }
+            Value::Object(out)
+        }
+        Value::Array(a) => Value::Array(a.iter().map(canonical).collect()),
+        other => other.clone(),
+    }
+}
+
+/// A copy of a call's arguments small enough to log: strings longer than
+/// 200 characters keep their start, length and digest; arrays longer than
+/// 50 keep 50 items and a count.
+pub fn redact(v: &serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    const TEXT: usize = 200;
+    const ITEMS: usize = 50;
+    match v {
+        Value::String(s) if s.chars().count() > TEXT => {
+            let start: String = s.chars().take(TEXT).collect();
+            Value::String(format!(
+                "{start}… ({} chars, sha256:{})",
+                s.chars().count(),
+                hex(&Sha256::digest(s.as_bytes()))
+            ))
+        }
+        Value::Array(a) => {
+            let mut out: Vec<Value> = a.iter().take(ITEMS).map(redact).collect();
+            if a.len() > ITEMS {
+                out.push(Value::String(format!("… {} more", a.len() - ITEMS)));
+            }
+            Value::Array(out)
+        }
+        Value::Object(m) => Value::Object(m.iter().map(|(k, v)| (k.clone(), redact(v))).collect()),
+        other => other.clone(),
     }
 }
 
@@ -232,5 +364,142 @@ mod tests {
         let lines: Vec<&str> = text.lines().collect();
         std::fs::write(log.path(), format!("{}\n{}\n", lines[0], lines[2])).unwrap();
         assert!(log.verify().is_err());
+    }
+
+    #[test]
+    fn the_last_entry_is_read_from_the_end() {
+        let dir = tempfile::tempdir().unwrap();
+        for n in [1u64, 2, 10_000] {
+            let path = dir.path().join(format!("audit-{n}.jsonl"));
+            // Written in one go: appending 10 000 entries one by one syncs each.
+            let mut text = String::new();
+            let mut prev = GENESIS.to_string();
+            for i in 0..n {
+                let r = record(if i % 2 == 0 { "push" } else { "fetch" });
+                let mut e = Entry {
+                    seq: i + 1,
+                    at: i,
+                    actor: r.actor,
+                    action: r.action,
+                    subject: r.subject,
+                    decision: r.decision,
+                    reason: r.reason,
+                    details: r.details,
+                    prev: prev.clone(),
+                    hash: String::new(),
+                };
+                e.hash = digest(&e);
+                prev = e.hash.clone();
+                text.push_str(&serde_json::to_string(&e).unwrap());
+                text.push('\n');
+            }
+            std::fs::write(&path, text).unwrap();
+            let log = AuditLog::new(&path);
+            let all = log.verify().unwrap();
+            let last = log.last().unwrap().unwrap();
+            assert_eq!((last.seq, &last.hash), (n, &all.last().unwrap().hash));
+        }
+        // A file ending without a newline, or with blank lines.
+        let path = dir.path().join("audit-1.jsonl");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let log = AuditLog::new(&path);
+        let expected = log.last().unwrap().unwrap();
+        std::fs::write(&path, text.trim_end()).unwrap();
+        assert_eq!(log.last().unwrap().unwrap(), expected);
+        std::fs::write(&path, format!("{text}\n  \n")).unwrap();
+        assert_eq!(log.last().unwrap().unwrap(), expected);
+        assert!(
+            AuditLog::new(dir.path().join("none.jsonl"))
+                .last()
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_tasks_slice_is_checked_on_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = AuditLog::new(dir.path().join("audit.jsonl"));
+        let add = |actor: &str, action: &str, subject: &str, details: serde_json::Value| {
+            log.append(
+                Record {
+                    actor: actor.into(),
+                    action: action.into(),
+                    subject: subject.into(),
+                    decision: "allowed".into(),
+                    reason: String::new(),
+                    details,
+                },
+                100,
+            )
+            .unwrap();
+        };
+        add("local", "mcp:onus_find", "x", serde_json::Value::Null);
+        add("operator", "mint", "sms", serde_json::Value::Null);
+        add("sms", "mcp:onus_find", "y", serde_json::Value::Null);
+        add("other", "mcp:onus_find", "z", serde_json::Value::Null);
+        add(
+            "@lead",
+            "grant",
+            "abc123",
+            serde_json::json!({ "task": "sms" }),
+        );
+        add("other", "mcp:onus_find", "w", serde_json::Value::Null);
+        let all = log.verify().unwrap();
+        let s = slice(&all, "sms");
+        let seqs: Vec<u64> = s.iter().map(|e| e.seq).collect();
+        assert_eq!(seqs, [2, 3, 4, 5]);
+        verify_run(s).unwrap();
+        verify_run(&all).unwrap();
+        assert!(slice(&all, "nobody").is_empty());
+        assert!(verify_run(&[]).is_err());
+
+        // An edited entry, a removed one, and a slice out of order fail.
+        let mut edited = s.to_vec();
+        edited[1].subject = "elsewhere".into();
+        assert!(
+            verify_run(&edited)
+                .unwrap_err()
+                .to_string()
+                .contains("changed")
+        );
+        let gap = [s[0].clone(), s[2].clone()];
+        assert!(
+            verify_run(&gap)
+                .unwrap_err()
+                .to_string()
+                .contains("follows")
+        );
+        // Entry 1 must start a log.
+        let mut first = all[0].clone();
+        first.prev = "f".repeat(64);
+        first.hash = digest(&first);
+        assert!(
+            verify_run(&[first])
+                .unwrap_err()
+                .to_string()
+                .contains("start")
+        );
+    }
+
+    #[test]
+    fn arguments_are_digested_in_key_order_and_redacted() {
+        let a: serde_json::Value =
+            serde_json::from_str(r#"{"a":1,"b":{"y":2,"x":[1,{"q":1,"p":2}]}}"#).unwrap();
+        let b: serde_json::Value =
+            serde_json::from_str(r#"{"b":{"x":[1,{"p":2,"q":1}],"y":2},"a":1}"#).unwrap();
+        assert_eq!(args_digest(&a), args_digest(&b));
+        assert!(args_digest(&a).starts_with("sha256:"));
+        assert_ne!(args_digest(&a), args_digest(&serde_json::json!({"a": 2})));
+
+        let long = "x".repeat(250);
+        let items: Vec<u32> = (0..60).collect();
+        let r = redact(&serde_json::json!({ "text": long, "items": items, "short": "ok" }));
+        let text = r["text"].as_str().unwrap();
+        assert!(text.starts_with(&"x".repeat(200)));
+        assert!(text.contains("(250 chars, sha256:"), "{text}");
+        assert_eq!(r["items"].as_array().unwrap().len(), 51);
+        assert_eq!(r["items"][50], "… 10 more");
+        assert_eq!(r["short"], "ok");
     }
 }

@@ -5,7 +5,10 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use onus_core::{SemanticChange, SemanticReport, Side};
+use onus_core::{
+    BehaviorRun, BehaviorStatus, ReportCoverage, RunSide, SemanticChange, SemanticReport, Side,
+    TestReach,
+};
 
 /// Hidden marker so a bot can find and update its own comment.
 pub const COMMENT_MARKER: &str = "<!-- onus-report -->";
@@ -88,6 +91,255 @@ fn rules_line(report: &SemanticReport, rules_declared: bool) -> String {
     }
 }
 
+/// ` · **Tests ran:** 34 of 40 changed lines (85%)`
+fn coverage_line(cov: &ReportCoverage) -> String {
+    let ran = if cov.changed > 0 {
+        format!(
+            "{} of {} ({}%)",
+            thousands(cov.ran),
+            plural(cov.changed, "changed line", "changed lines"),
+            // Rounded down, so 100% means every line ran.
+            u64::from(cov.ran) * 100 / u64::from(cov.changed)
+        )
+    } else if cov.not_measured.is_empty() {
+        "no changed executable lines".into()
+    } else {
+        "no measured changed lines".into()
+    };
+    if cov.not_measured.is_empty() {
+        format!(" · **Tests ran:** {ran}")
+    } else {
+        format!(
+            " · **Tests ran:** {ran}; {} not in the coverage",
+            plural(
+                cov.not_measured.len() as u32,
+                "changed file",
+                "changed files"
+            )
+        )
+    }
+}
+
+/// `3–5, 9`, and whether that is more than one line.
+fn line_list(lines: &[[u32; 2]]) -> (String, bool) {
+    let parts: Vec<String> = lines
+        .iter()
+        .map(|[a, b]| {
+            if a == b {
+                a.to_string()
+            } else {
+                format!("{a}–{b}")
+            }
+        })
+        .collect();
+    let many = lines.len() > 1 || lines.first().is_some_and(|[a, b]| a != b);
+    (parts.join(", "), many)
+}
+
+/// The changed lines no test ran, the changed files the coverage leaves
+/// out, and where the coverage came from.
+fn coverage_details(out: &mut String, cov: &ReportCoverage) {
+    if cov.not_run.is_empty() && cov.not_measured.is_empty() && cov.notes.is_empty() {
+        return;
+    }
+    let mut by_file: BTreeMap<&str, Vec<[u32; 2]>> = BTreeMap::new();
+    for l in &cov.not_run {
+        by_file.entry(l.file.as_str()).or_default().push(l.lines);
+    }
+    let lines: u32 = cov
+        .not_run
+        .iter()
+        .map(|l| l.lines[1] - l.lines[0] + 1)
+        .sum();
+    let _ = writeln!(
+        out,
+        "<details><summary>Changed lines no test ran: {}</summary>",
+        match (lines, cov.not_measured.len() as u32) {
+            (0, 0) => "none".to_string(),
+            (0, files) => format!("{} not in the coverage", plural(files, "file", "files")),
+            (lines, 0) => format!(
+                "{} in {}",
+                plural(lines, "line", "lines"),
+                plural(by_file.len() as u32, "file", "files")
+            ),
+            (lines, files) => format!(
+                "{} in {}; {} not in the coverage",
+                plural(lines, "line", "lines"),
+                plural(by_file.len() as u32, "file", "files"),
+                plural(files, "file", "files")
+            ),
+        }
+    );
+    let _ = writeln!(out);
+    for (file, ranges) in &by_file {
+        let (list, many) = line_list(ranges);
+        let _ = writeln!(
+            out,
+            "- `{file}` {} {list}",
+            if many { "lines" } else { "line" }
+        );
+    }
+    for f in &cov.not_measured {
+        let _ = writeln!(out, "- not in the coverage (no test loaded it): `{f}`");
+    }
+    for n in &cov.notes {
+        let _ = writeln!(out, "- {n}");
+    }
+    for s in &cov.sources {
+        let _ = writeln!(
+            out,
+            "- coverage: {} `{}` ({}, {})",
+            s.format.as_str(),
+            s.path,
+            s.origin.as_str(),
+            plural(s.files, "file", "files")
+        );
+    }
+    let _ = writeln!(out);
+    let _ = writeln!(out, "</details>");
+    let _ = writeln!(out);
+}
+
+/// `**Behavior:** 3 test files run at base and head (selected from the
+/// map) · 1 changed, 0 newly failing · 48s of 600s`
+fn behavior_line(report: &SemanticReport, b: &BehaviorRun) -> String {
+    let time = format!(
+        "{}s of {}s",
+        thousands(b.elapsed_secs),
+        thousands(b.budget_secs)
+    );
+    if b.status == BehaviorStatus::Skipped {
+        return format!(
+            "**Behavior:** skipped: {}",
+            b.reason.as_deref().unwrap_or("nothing ran")
+        );
+    }
+    let count = |subkind: &str| {
+        report
+            .changes
+            .iter()
+            .filter(|c| c.subkind == subkind)
+            .count() as u32
+    };
+    let what = if b.selected.is_empty() {
+        "no tests reach the changed code".to_string()
+    } else {
+        let mut found = format!(
+            "{} changed, {} newly failing",
+            count("behavior-changed"),
+            count("behavior-newly-failing")
+        );
+        for (subkind, word) in [
+            ("behavior-newly-passing", "newly passing"),
+            ("behavior-output-changed", "failing differently"),
+        ] {
+            let n = count(subkind);
+            if n > 0 {
+                let _ = write!(found, ", {n} {word}");
+            }
+        }
+        format!(
+            "{} run at base and head (selected from the map) · {found}",
+            plural(b.selected.len() as u32, "test file", "test files")
+        )
+    };
+    let partial = match (b.status, &b.reason) {
+        (BehaviorStatus::Partial, Some(r)) => format!(" · **partial:** {r}"),
+        (BehaviorStatus::Partial, None) => " · **partial**".into(),
+        _ => String::new(),
+    };
+    format!("**Behavior:** {what}{partial} · {time}")
+}
+
+fn short(sha: &str) -> &str {
+    &sha[..sha.len().min(12)]
+}
+
+/// What each behavior run did, and which tests were chosen.
+fn behavior_details(out: &mut String, b: &BehaviorRun) {
+    if b.runs.is_empty() && b.selected.is_empty() {
+        return;
+    }
+    let _ = writeln!(out, "<details><summary>Behavior runs</summary>");
+    let _ = writeln!(out);
+    for r in &b.runs {
+        let files = plural(r.files, "file", "files");
+        let side = match r.side {
+            RunSide::Base | RunSide::Head => format!("{} `{}`", r.side.as_str(), short(&r.commit)),
+            RunSide::Retry => format!("retry (head again, {files})"),
+            RunSide::Cross => format!("cross (base tests on head code, {files})"),
+        };
+        let result = if r.timed_out {
+            "timed out".to_string()
+        } else {
+            let mut text = format!(
+                "{}, {} failed",
+                plural(r.cases, "case", "cases"),
+                thousands(r.failed)
+            );
+            if r.skipped > 0 {
+                let _ = write!(text, ", {} skipped", thousands(r.skipped));
+            }
+            text
+        };
+        let manifest = r
+            .manifest
+            .as_deref()
+            .map(|m| format!(" (manifest `{}`)", short(m)))
+            .unwrap_or_default();
+        let _ = writeln!(out, "- {side}: {result}{manifest}");
+    }
+    if !b.selected.is_empty() {
+        let list: Vec<String> = b
+            .selected
+            .iter()
+            .map(|s| {
+                let mut why = Vec::new();
+                if s.changed {
+                    why.push("changed".to_string());
+                }
+                if let Some(via) = &s.via {
+                    why.push(match s.depth {
+                        0 => format!("exercises `{via}`"),
+                        d => format!("{} from `{via}`", plural(d, "hop", "hops")),
+                    });
+                }
+                match (s.base, s.head) {
+                    (false, true) => why.push("head only".into()),
+                    (true, false) => why.push("base only".into()),
+                    _ => {}
+                }
+                format!("`{}` ({})", s.file, why.join("; "))
+            })
+            .collect();
+        let more = if b.truncated > 0 {
+            format!(
+                ", and {} left out (maxFiles)",
+                plural(b.truncated, "test file", "test files")
+            )
+        } else {
+            String::new()
+        };
+        let _ = writeln!(out, "- selected: {}{more}", list.join(", "));
+    }
+    let listed = |items: &[String]| {
+        if items.is_empty() {
+            "none".to_string()
+        } else {
+            items.join(", ")
+        }
+    };
+    let _ = writeln!(
+        out,
+        "- already failing at base: {} · flaky: {}",
+        listed(&b.already_failing),
+        listed(&b.flaky)
+    );
+    let _ = writeln!(out);
+    let _ = writeln!(out, "</details>");
+    let _ = writeln!(out);
+}
+
 fn kind_cell(c: &SemanticChange) -> String {
     if c.hints.intent_mismatch {
         format!("Outside stated intent · {}", c.kind_label)
@@ -108,26 +360,13 @@ fn evidence(c: &SemanticChange) -> Vec<String> {
     by_file
         .into_iter()
         .map(|((file, side), lines)| {
-            let parts: Vec<String> = lines
-                .iter()
-                .map(|[a, b]| {
-                    if a == b {
-                        a.to_string()
-                    } else {
-                        format!("{a}–{b}")
-                    }
-                })
-                .collect();
-            let word = if lines.len() == 1 && lines[0][0] == lines[0][1] {
-                "line"
-            } else {
-                "lines"
-            };
+            let (list, many) = line_list(&lines);
+            let word = if many { "lines" } else { "line" };
             let side = match side {
                 Side::Head => "",
                 Side::Base => " (before the change)",
             };
-            format!("`{file}` {word} {}{side}", parts.join(", "))
+            format!("`{file}` {word} {list}{side}")
         })
         .collect()
 }
@@ -161,10 +400,18 @@ pub fn to_markdown(report: &SemanticReport, rules_declared: bool) -> String {
     let _ = writeln!(out);
     let _ = writeln!(
         out,
-        "**Intent check:** {} · **Boundary rules:** {}",
+        "**Intent check:** {} · **Boundary rules:** {}{}",
         intent_line(report),
-        rules_line(report, rules_declared)
+        rules_line(report, rules_declared),
+        report
+            .coverage
+            .as_ref()
+            .map(coverage_line)
+            .unwrap_or_default()
     );
+    if let Some(b) = &report.behavior {
+        let _ = writeln!(out, "{}", behavior_line(report, b));
+    }
     if let Some(i) = &report.intent_check
         && !i.mismatches.is_empty()
     {
@@ -191,6 +438,9 @@ pub fn to_markdown(report: &SemanticReport, rules_declared: bool) -> String {
         }
     }
     let _ = writeln!(out);
+    if let Some(cov) = &report.coverage {
+        coverage_details(&mut out, cov);
+    }
 
     if !report.changes.is_empty() {
         let _ = writeln!(
@@ -211,6 +461,33 @@ pub fn to_markdown(report: &SemanticReport, rules_declared: bool) -> String {
                 facts.push(
                     plural(c.hints.blast_radius, "dependent file", "dependent files").to_string(),
                 );
+            }
+            if c.hints.dependent_components > 0 {
+                facts.push(format!(
+                    "used by {}",
+                    plural(
+                        c.hints.dependent_components,
+                        "other component",
+                        "other components"
+                    )
+                ));
+            }
+            if let Some(t) = c.hints.tested {
+                facts.push(
+                    match t {
+                        TestReach::Tested => "tested",
+                        TestReach::Traced => "traced, not tested",
+                        TestReach::Untested => "untested",
+                    }
+                    .into(),
+                );
+            }
+            if let Some(cov) = c.hints.coverage {
+                facts.push(format!(
+                    "tests ran {} of {}",
+                    thousands(cov.ran),
+                    plural(cov.changed, "changed line", "changed lines")
+                ));
             }
             if !c.hints.novelty.is_empty() {
                 facts.push(format!("novelty {}", c.hints.novelty.join(", ")));
@@ -234,6 +511,9 @@ pub fn to_markdown(report: &SemanticReport, rules_declared: bool) -> String {
         let _ = writeln!(out);
         let _ = writeln!(out, "</details>");
         let _ = writeln!(out);
+    }
+    if let Some(b) = &report.behavior {
+        behavior_details(&mut out, b);
     }
 
     let s = &report.structure;
@@ -283,4 +563,183 @@ pub fn to_markdown(report: &SemanticReport, rules_declared: bool) -> String {
     let _ = writeln!(out);
     let _ = writeln!(out, "</details>");
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use onus_core::{LineCoverage, Location};
+    use serde_json::json;
+
+    fn report() -> SemanticReport {
+        serde_json::from_value(json!({
+            "schemaVersion": 1, "base": "base", "head": "head",
+            "summary": { "meaningChanges": 1, "needsAttention": 0, "secrets": 0,
+                         "newRuleViolations": 0, "intentMismatches": 0 },
+            "changes": [{
+                "id": "internal-changes:billing", "kind": "internal",
+                "subkind": "internal-changes", "level": "behavior", "subject": "billing",
+                "component": "billing", "kindLabel": "Internal",
+                "title": "5 changed lines of code inside `billing`", "whyItMatters": "Stays inside",
+                "hints": { "labels": [], "blastRadius": 0, "novelty": [], "confidence": "static",
+                           "rulesOfTheGame": false, "intentMismatch": false, "needsPerson": false },
+                "locations": [{ "file": "src/discount.ts", "lines": [21, 28], "side": "head" }],
+            }],
+            "ruleViolations": [],
+            "structure": { "movedFiles": [], "formattingOnly": [] },
+            "textStats": { "files": 1, "linesAdded": 5, "linesRemoved": 0 },
+            "mapDiagnostics": [],
+        }))
+        .unwrap()
+    }
+
+    fn covered(r: &mut SemanticReport) {
+        r.changes[0].hints.coverage = Some(LineCoverage { changed: 5, ran: 3 });
+        r.coverage = Some(
+            serde_json::from_value(json!({
+                "sources": [{ "format": "lcov", "path": "coverage/lcov.info", "sha256": "ab",
+                              "origin": "supplied", "files": 41, "unmatched": 3 }],
+                "changed": 40, "ran": 34,
+                "notRun": [
+                    Location::head("src/eta.ts", 13, 13),
+                    Location::head("src/discount.ts", 21, 23),
+                    Location::head("src/discount.ts", 27, 28),
+                ],
+                "notMeasured": ["src/refunds.ts"],
+            }))
+            .unwrap(),
+        );
+    }
+
+    #[test]
+    fn coverage_shows_the_lines_no_test_ran() {
+        let mut r = report();
+        let before = to_markdown(&r, true);
+        covered(&mut r);
+        let md = to_markdown(&r, true);
+        assert!(md.contains(
+            "**Boundary rules:** no new violations · **Tests ran:** 34 of 40 changed lines (85%); 1 changed file not in the coverage\n"
+        ));
+        assert!(md.contains(
+            "<details><summary>Changed lines no test ran: 6 lines in 2 files; 1 file not in the coverage</summary>\n\n\
+             - `src/discount.ts` lines 21–23, 27–28\n\
+             - `src/eta.ts` line 13\n\
+             - not in the coverage (no test loaded it): `src/refunds.ts`\n\
+             - coverage: lcov `coverage/lcov.info` (supplied, 41 files)\n\n</details>\n\n\
+             <details><summary>Evidence per row"
+        ));
+        assert!(md.contains("· tests ran 3 of 5 changed lines\n"));
+        // The headline stays as it was.
+        assert_eq!(md.lines().nth(1), before.lines().nth(1));
+        // Without coverage, the report is as before.
+        r.coverage = None;
+        r.changes[0].hints.coverage = None;
+        assert_eq!(to_markdown(&r, true), before);
+        assert!(!before.contains("Tests ran") && !before.contains("tests ran"));
+    }
+
+    #[test]
+    fn no_changed_executable_lines() {
+        let mut r = report();
+        covered(&mut r);
+        let cov = r.coverage.as_mut().unwrap();
+        (cov.changed, cov.ran) = (0, 0);
+        cov.not_run.clear();
+        cov.not_measured.clear();
+        let md = to_markdown(&r, false);
+        assert!(md.contains("· **Tests ran:** no changed executable lines\n"));
+        assert!(!md.contains("Changed lines no test ran"));
+        // A changed file nothing measured is not "no changed lines".
+        let cov = r.coverage.as_mut().unwrap();
+        cov.not_measured = vec!["src/eta.ts".into()];
+        let md = to_markdown(&r, false);
+        assert!(md.contains(
+            "· **Tests ran:** no measured changed lines; 1 changed file not in the coverage\n"
+        ));
+        assert!(md.contains(
+            "<details><summary>Changed lines no test ran: 1 file not in the coverage</summary>"
+        ));
+    }
+
+    fn behavior(status: &str, reason: Option<&str>, selected: bool) -> BehaviorRun {
+        serde_json::from_value(json!({
+            "status": status, "reason": reason,
+            "command": "npx vitest run {files}", "budgetSecs": 600, "elapsedSecs": 48,
+            "selected": if selected { json!([
+                { "file": "src/discount.test.mjs", "changed": true, "depth": 0, "base": true, "head": true },
+                { "file": "src/cart.test.mjs", "changed": false, "depth": 0,
+                  "via": "src/discount.mjs", "base": true, "head": true },
+                { "file": "src/new.test.mjs", "changed": true, "depth": 0, "base": false, "head": true },
+            ]) } else { json!([]) },
+            "truncated": 0,
+            "runs": if selected { json!([
+                { "side": "base", "commit": "1a2b3c4d5e6f7a8b", "files": 2, "manifest": "9f8e7d6c5b4a3210",
+                  "exitCode": 0, "timedOut": false, "cases": 6, "failed": 0, "skipped": 0 },
+                { "side": "head", "commit": "abcdef0123456789", "files": 3, "manifest": "0011223344556677",
+                  "exitCode": 0, "timedOut": false, "cases": 6, "failed": 0, "skipped": 0 },
+                { "side": "cross", "commit": "abcdef0123456789", "files": 1, "manifest": "8899aabbccddeeff",
+                  "exitCode": 1, "timedOut": false, "cases": 2, "failed": 1, "skipped": 0 },
+            ]) } else { json!([]) },
+            "flaky": [], "alreadyFailing": [],
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn behavior_line_and_details() {
+        let mut r = report();
+        let before = to_markdown(&r, true);
+        r.changes[0].subkind = "behavior-changed".into();
+        r.behavior = Some(behavior("complete", None, true));
+        let md = to_markdown(&r, true);
+        assert!(md.contains(
+            "**Boundary rules:** no new violations\n**Behavior:** 3 test files run at base and head (selected from the map) · 1 changed, 0 newly failing · 48s of 600s\n"
+        ), "{md}");
+        assert!(md.contains(
+            "<details><summary>Behavior runs</summary>\n\n\
+             - base `1a2b3c4d5e6f`: 6 cases, 0 failed (manifest `9f8e7d6c5b4a`)\n\
+             - head `abcdef012345`: 6 cases, 0 failed (manifest `001122334455`)\n\
+             - cross (base tests on head code, 1 file): 2 cases, 1 failed (manifest `8899aabbccdd`)\n\
+             - selected: `src/discount.test.mjs` (changed), `src/cart.test.mjs` (exercises `src/discount.mjs`), `src/new.test.mjs` (changed; head only)\n\
+             - already failing at base: none · flaky: none\n\n</details>\n"
+        ), "{md}");
+        // After the evidence per row.
+        assert!(md.find("Behavior runs").unwrap() > md.find("Evidence per row").unwrap());
+        // The headline stays as it was.
+        assert_eq!(md.lines().nth(1), before.lines().nth(1));
+
+        // Partial, with its reason.
+        r.behavior = Some(behavior(
+            "partial",
+            Some("the budget of 600s ran out before the cross run"),
+            true,
+        ));
+        let md = to_markdown(&r, true);
+        assert!(md.contains(
+            "· 1 changed, 0 newly failing · **partial:** the budget of 600s ran out before the cross run · 48s of 600s\n"
+        ), "{md}");
+
+        // Nothing reaches the change.
+        r.behavior = Some(behavior("complete", None, false));
+        let md = to_markdown(&r, true);
+        assert!(md.contains("**Behavior:** no tests reach the changed code · 48s of 600s\n"));
+        assert!(!md.contains("Behavior runs"));
+
+        // Skipped.
+        r.behavior = Some(behavior(
+            "skipped",
+            Some("no container engine (docker or podman) is running"),
+            false,
+        ));
+        let md = to_markdown(&r, true);
+        assert!(md.contains(
+            "**Behavior:** skipped: no container engine (docker or podman) is running\n"
+        ));
+
+        // Without the block, the report is as before.
+        r.behavior = None;
+        r.changes[0].subkind = "internal-changes".into();
+        assert_eq!(to_markdown(&r, true), before);
+        assert!(!before.contains("Behavior"));
+    }
 }

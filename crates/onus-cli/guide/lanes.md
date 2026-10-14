@@ -1,12 +1,12 @@
 # Risk lanes and the judge
 
-Once Onus has described a change, lanes decide what happens to it: merge it automatically, have the judge verify it, send it to a person, or block it. Lanes come from rules you write and from hard floors no rule can lower; nothing about a lane is generated.
+Once Onus has described a change, lanes decide what happens to it: merge it automatically, have the judge verify it, send it to a person, or block it. Lanes come from rules you write and from hard floors no rule can lower. A learned model you train and commit can raise a lane, never lower it.
 
 | Lane | What happens |
 |---|---|
 | `auto-merge` | It merges when required checks pass (the action can enable GitHub's auto-merge). |
 | `judge` | `onus judge` verifies it; it merges on `approve`. |
-| `human` | A person reviews it. |
+| `human` | An owner of what changed (`lanes.approval`) who did not open it approves its head commit. Its owners are asked to review. |
 | `blocked` | It may not merge as it is. |
 
 ## Submitting a change
@@ -17,54 +17,185 @@ An agent (or a person) bundles a change with what a reviewer needs and nothing o
       --token "$TOKEN" --key-public root.pub \
       --agent-tool claude-code --agent-model sonnet --agent-config default --out submission.json
 
-The submission holds the stated intent, Onus's report, every changed path, the test runs from `onus run-test` (to be re-run), the token's verified scope, granted escalations, approvals (`--approve <row id>=<who>`), and the agent setup.
+The submission holds the stated intent, Onus's report, every changed path, the test runs from `onus run-test` (to be re-run), the token's verified scope, granted escalations (`--escalation <id>`, each verified with `--key-public`: granted, for the token's task, unchanged since it was filed; requests are read from `.onus/escalations`, or `--escalations-dir`), approvals (`--approve <row id>=<who>`), and the agent setup. When the token names an agent, that is the agent setup, whatever the flags say.
 
 ## Classifying
 
     onus classify --submission submission.json --outcomes outcomes.jsonl
     onus classify --report report.json              # a change without a submission (CI)
+    onus classify --submission submission.json --outcomes outcomes.jsonl --change acme/shop#42
 
-The answer is the lane and every rule that applied, in order:
+The answer is the lane and every rule that applied, in order. Each entry has a `source` (`default`, `policy`, `input`, `floor`, `model`, `record` or `audit`), a reason, and the ids of the report rows behind it (`rows`):
 
 1. The policy's `default` lane, or a lower one when a `match: every` rule covers every row of the change (for example, internal changes in a docs component).
 2. Rules that raise the lane when any row matches.
-3. Hard floors:
-   - **Blocked:** a committed secret, a write outside the token's scope, or weakened tests without a person's approval.
-   - **Human:** rows in sensitive code (`auth`, `payments`, `pii`, or any label of medium or high sensitivity), security-sensitive rows, rules of the game (tests, CI, policies, `onus.yaml`, declared contracts), and rows outside the stated intent.
-4. An agent setup with fewer than `minRecord` merged changes on record cannot auto-merge. A share (`auditRate`) of the remaining auto-merges is sent to a person as a random audit, chosen by a hash of the head commit.
+3. Risk inputs (`lanes.inputs`, below). They can only raise the lane.
+4. Hard floors:
+   - **Blocked:** a committed secret, a write outside the token's scope, weakened tests without a person's approval, or tests that pass at the base and fail at the head (`behavior-newly-failing`, from `onus report --behavior`) without a person's approval of that row.
+   - **Human:** rows in sensitive code (`auth`, `payments`, `pii`, or any label of medium or high sensitivity), security-sensitive rows, rules of the game (tests, CI, policies, `onus.yaml`, and edits to the code of a declared contract), rows outside the stated intent, and third-party code new to the repository (an npm package no component used before).
+   - **Judge:** a new dependency never auto-merges: a package new to a component, or a new dependency between components.
+5. The learned model (`lanes.learned`, below), read from the base commit: at or above its thresholds it raises a lower lane to `judge` or `human`. It never lowers a lane and never blocks.
+6. An agent setup with fewer than `minRecord` merged changes on record, or with an incident or a rollback among its recent changes, cannot auto-merge. A share (`auditRate`) of the remaining auto-merges is sent to a person before merging, chosen by a hash of the head commit.
+
+Every classification also carries the change's `rollout` plan for its lane: how it should meet production traffic, and when it rolls back (`onus help production`).
+
+## Risk inputs
+
+Four built-in inputs read facts Onus computes for every change. They are on by default, each can be tuned or turned off, and none can lower a lane. A fifth, `coverage`, is off unless written:
+
+| Input | Fires when | Default |
+|---|---|---|
+| `blastRadius` | A row changes something other components depend on (`dependentComponents` in the report), including a body-only edit of a function they call. The highest lane whose threshold the count meets applies. | 3 or more components → `judge` |
+| `tests` | A row changes code no test exercises and no runtime trace has observed (`tested: untested`). | `judge` |
+| `confidence` | A row rests on parts of the map Onus could not resolve (`confidence: low`). | `judge` |
+| `history` | A component the change touches had reverts, rollbacks or incidents in the last `days` days, read from `--outcomes` and the production signals beside it (`signals.jsonl`). A planned rollback does not count. | a revert → `judge`, an incident → `human`, over 90 days |
+| `coverage` | Tests ran less than `minChanged` (0 to 1) of the change's changed executable lines, from coverage of the head (`onus help reports`), or the coverage leaves out a changed file with runtime code; with `required: true`, also a change without coverage. | off |
+
+    lanes:
+      inputs:
+        blastRadius: { judge: 3, human: 10 }   # `{}` turns it off
+        tests: { untested: judge }             # `auto-merge` turns it off
+        confidence: { low: judge }
+        history:
+          days: 90
+          reverts: { judge: 1 }
+          incidents: { human: 1 }
+        coverage: { minChanged: 0.8, commands: ["npm test -- --coverage"] }   # off unless written
+
+Every classification also carries `features`: what the change looked like when it was classified, which the learned model trains on, and `learned` when `lanes.learned` is set.
+
+Test reach is per file: a file counts as tested when a test in the map exercises anything in it, and as traced when a runtime trace saw it (`onus help environments`). It is not line coverage; `coverage` is. Coverage comes from `onus report --coverage` or `--evidence`, or, for a submission made without a report (`onus ci pr`, `onus_submit`), from the coverage its evidence runs recorded at the head commit (`onus help environments`). The `coverage` input runs only while a change would auto-merge. It counts recorded coverage only from the commands listed in `commands`, since an agent picks the commands it runs and one could write a coverage file; when the report holds recorded coverage from any other command, the change goes to the judge, required or not. Coverage given with `--coverage` counts. History counts each change once per component, from every record in the window, so a revert and an incident count at the time they were recorded. Code outside every component counts as `root`. A backfill (`onus ci pr --at`) sees only what was recorded by then. Records shared by several repositories are scoped with `--change owner/repo#N`: only that repository's changes count, and the change itself is left out. `onus ci pr` does this for you.
+
+## A learned model that only raises
+
+Once outcome records show which changes went wrong, a model can learn from them. It may move a change up a lane, never below the lane the rules give it, and never to `blocked`.
+
+    onus ci records pull --dir rec
+    onus lanes train --outcomes rec/outcomes.jsonl          # writes onus.lanes-model.json
+    git add onus.lanes-model.json && git commit -m "Lanes model"
+
+    lanes:
+      learned:
+        model: onus.lanes-model.json   # the default
+        judge: 0.6                     # raise to the judge at or above this risk
+        human: 0.85                    # raise to a person at or above this risk
+
+**What it learns from.** Every classification computes a fixed set of features from the report (rows of each kind, blast radius, dependent components, lines and files, novelty, sensitive code, rows that need a person, map confidence, test reach, unverified contracts, rule violations, a stated intent), the submission (passing and failing test runs) and the records (earlier changes and problems in the same components, the agent setup's record). `onus ci pr` keeps them on the pull record, `onus ci closed` copies them onto the outcome, and reverts, incidents and audits keep them. `onus outcomes record --classification <file>` copies them from a classification, for outcomes recorded by hand.
+
+**What counts as a problem.** A change that had an incident, was reverted or rolled back (a planned rollback is not a problem: it counts as a clean merge), whose audit found a miss, or about which a person with write access said `/onus caught` (`onus help ci`). A merged change counts as clean once it is `--settle-days` old (default 14) at the latest record's time, so reverts and incidents have had time to show. Open changes, changes closed without a catch, unsettled merges and records without features are left out, and the output says how many.
+
+**Training.** A logistic regression on standardized features, class-balanced and L2-regularised, fitted by gradient descent from zero with a fixed number of steps. There is no randomness: the same records in any line order give the same file, byte for byte. A fifth of the changes, chosen by a hash of their ids, is held out: a first fit without them is measured on them, then the model is fitted on everything. It refuses with "too little data" (exit 1) below `--min-examples` (default 50) labelled changes or `--min-positives` (10) problems, or when the part left after holding out the fifth lacks problems or clean merges. With `--config` and `--out`, nothing is read from `--repo`, so it runs outside a repository. `--dry-run` measures and writes nothing. It prints:
+
+    { "out": "onus.lanes-model.json", "written": true, "model": "3f2a9c1e0b7d",
+      "examples": 412, "positives": 23,
+      "skipped": { "noFeatures": 80, "staleFeatures": 0, "unsettled": 12, "undecided": 35 },
+      "holdout": { "examples": 83, "positives": 5, "auc": 0.82,
+                   "atJudge": { "raised": 0.21, "recall": 0.8 }, "atHuman": { "raised": 0.04, "recall": 0.4 } },
+      "weights": [ { "feature": "kind.breaking", "weight": 1.21 }, … ] }
+
+`raised` is the share of held-out changes at or above a threshold, and `recall` the share of held-out problems at or above it. Tune `judge` and `human` with them: lower thresholds raise more changes and catch more problems. The risk is a relative score, not a calibrated probability, because the classes are balanced.
+
+**Applying it.** `onus classify`, `onus judge`, `onus ci pr`, `onus ui` and the MCP `onus_submit` tool read the model from the base commit (the submission's base; the working tree for `onus classify --report`), so a pull request cannot delete or retrain the model to avoid a raise. `--model <file>` hands in another one. A raise is listed with `source: "model"`:
+
+    model → human: the learned model puts this change's risk at 0.91 (a person from 0.85, the judge from 0.60): 2 breaking rows (+1.42), blast radius 38 (+0.97), 3 earlier problems in billing (+0.61); model 3f2a9c1e0b7d, trained on 412 outcomes
+
+When it does not raise, `learned` still holds the risk and its top factors, and the CI comment shows a **Learned risk:** line. A model file that is missing at the commit, was trained on another feature set (`stale`), or does not parse (`invalid`) is never an error: `learned.status` and `learned.note` say why, and the lane comes from rules only.
+
+**Rules of the game.** The model file and `onus.yaml` decide lanes, so a pull request that changes either goes to a person (`lanes-model-changed`, `onus-config-changed`). Retrain after a release that adds features: an older model reports `stale` until then.
+
+**What it is not.** Outcomes are shaped by the lanes changes got: a change a person reviewed was less likely to go wrong. The model learns what went wrong despite the lanes, which is the right target for raising a lane, but not a causal estimate of risk.
 
 ## The policy
 
     lanes:
       default: judge
       auditRate: 0.05
+      auditAfterMerge: 0.05
       minRecord: 10
       rules:
         - { lane: auto-merge, match: every, kinds: [internal], components: [docs] }
         - { lane: human, subkinds: [migration-changed, route-added] }
-      heldOut:
-        command: npm run test:held-out
-        image: node:22
-        setup: npm ci
       taste:
         command: [./scripts/review.sh]
+      judges:
+        - name: claude-reviewer                         # uses taste above
+        - name: gpt-reviewer
+          taste: { command: [./scripts/review-gpt.sh] }
+        - name: strict
+          heldOutLimit: 20
 
-A rule matches a row by `kinds`, `subkinds`, `components` and `labels` (an empty list matches anything). `onus help changes` lists the kinds and subkinds.
+A rule matches a row by `kinds`, `subkinds`, `components` and `labels` (an empty list matches anything). `onus help changes` lists the kinds and subkinds. Held-out checks are not in the policy: they live outside the repository (below).
 
 ## The judge
 
     onus judge --submission submission.json      # exit 0 approve, 2 reject, 3 escalate
+    onus judge --submission submission.json --held-out ~/acme-held-out/shop
 
-It verifies first and judges taste last, and stops being lenient at the first failure:
+It verifies first and judges taste last, and stops at the first failure:
 
-1. **Evidence:** each test run in the submission is run again at the head commit in a fresh container; a run that passed for the author must pass again. A run made in an environment (`onus env run`) names its manifest, and must match it: recorded at the head commit, with the same command and exit code (`onus help environments`).
+1. **Evidence:** each test run in the submission is run again at the head commit in a fresh container; a run that passed for the author must pass again. A run made in an environment (`onus env run`) names its manifest, and must match it: recorded at the head commit, with the same command and exit code (`onus help environments`). The first run that fails stops the step; the rest are not re-run.
 2. **Intent:** an intent must be stated, and no row may fall outside it.
 3. **Contracts:** no breaking contract changes and no boundary-rule violations.
-4. **Tests:** no weakened tests without a person's approval.
-5. **Held-out checks:** `heldOut.command` runs in a container at the head commit. Keep it out of the agent's read scope (`onus help scopes`); a failure is reported without its output.
+4. **Tests:** no weakened tests without a person's approval. With a report made with `--behavior`, a test edited to match changed behavior (`behavior-changed`) is a rule of the game, so it reaches a person instead.
+5. **Held-out checks:** checks the author never saw, from a suite outside the repository, chosen from the map for this change (below). They run in order, most relevant first, up to the first failure. The author sees only counts and `a held-out check failed (exit N)`: never a check's id, command or output.
 6. **Taste (optional):** `taste.command` gets the submission as JSON on stdin and prints `concern: …` lines. Concerns send the change to a person; taste can never approve, and it runs only when everything else passed. Onus itself calls no model.
 
+Once a step fails, every later step is `skipped` with `not reached: <step> failed`, and no more containers start. So `reasons` holds one failing step's reasons: the first thing to fix. Run `onus_check` (or `onus query check`) before submitting for the whole checklist.
+
+The judge's evidence step and the behavior diff are separate. The first re-checks what the author claims to have run; the second is Onus's own observation of the tests that reach the change, at both commits (`onus help environments`). A run whose manifest records files written over the head's tree (the behavior diff's cross run) is never accepted as evidence.
+
 The verdict is `approve`, `reject` with reasons the agent can act on, or `escalate` to a person. A change in the `human` lane is escalated even when every check passes; a `blocked` change is rejected.
+
+### Held-out suites
+
+A suite is a directory holding `held-out.yaml` and the files its checks need. Keep it outside the repository: in a private repository, a CI secret or Onus Cloud. The judge refuses a suite inside the repository's worktree, where the author could read it.
+
+    version: 1
+    image: node:22-alpine        # default image for checks (default node:22)
+    setup: npm ci                # default setup, run with network and without the suite
+    limit: 6                     # at most this many checks per change, most relevant first
+    checks:
+      - id: sms-respects-opt-out
+        command: node --test /held-out/sms-opt-out.test.mjs
+        covers: [notifications, user-preferences]
+      - id: send-sms-unit
+        command: node --test /held-out/send-sms.test.mjs
+        covers: ["notifications:src/sms.ts#sendSms"]
+      - id: smoke
+        command: npm run build   # no covers: runs for every change
+
+Each check runs in a container at the head commit with no network, the repository at `/work` (the working directory) and the suite at `/held-out`. The suite is copied into the test container only, never into the setup container, which has network. Ids are unique slugs; unknown fields are refused.
+
+Give it to the judge with `--held-out DIR` or `ONUS_HELD_OUT`: on `onus judge`, `onus ci pr`, `onus ui` and `onus mcp` (for `onus_judge`). Two commands help people write one, without a container engine:
+
+    onus held-out check ~/acme-held-out/shop --repo .              # valid? its hash, ids and covers
+    onus held-out select --held-out ~/acme-held-out/shop --submission sub.json   # what would run, and why
+
+**Chosen from the map.** The judge works out what the change reaches in the head map: the components of its rows and of the files git says changed (`touched`), its rows' subjects, and the pairs of components that interact with at least one side touched: a code dependency either way (a file import counts, so a change that breaks the symbols between two components still pairs them), or one publishes an event the other consumes. A `covers` entry is a component id, or a map id standing for its component; `event:` and `db-table:` ids count only as subjects. A check is chosen for its best reason:
+
+| reason | when |
+|---|---|
+| `combination` | two components it covers form a pair: the cross-feature test an author's own suite rarely has |
+| `subject` | a map id it covers is a row's subject, or the module of one |
+| `touched` | it covers a touched component |
+| `always` | it covers nothing (and `lanes.heldOut`) |
+| `neighbour` | it covers a component that interacts with a touched one |
+
+Within a reason checks keep their order in the file. The configuration's `heldOutLimit`, else the suite's `limit`, cuts the list. The head map is built only when some check has `covers`, with the same onus.yaml as the lanes; if it cannot be built, the rows alone decide, and the report says `"map": false`.
+
+**Who sees what.** The judgment carries `heldOut: {suite, selected, ran, passed}`, safe for the author. What each check did (`why`, `with`, status, exit code and output) is for people: `onus judge --show-held-out`, `held-out.json` beside `judgment.json` from `onus ci pr`, and the lanes page of `onus ui`. No agent tool returns it, and `onus_lanes` shows only that held-out checks are configured. When a check cannot run at all (an image that will not pull, say), the author reads only that the held-out checks could not run; the error is in the report.
+
+**The honest limit.** On a machine where an agent has a shell, a suite is only as hidden as that machine's file permissions. So is the report: `onus ui` and `onus mcp` keep it as `.onus/submissions/<id>.held-out.json` in the worktree, where such an agent can read it. Real secrecy comes from where the suite lives and where the judge runs: a CI secret, a private repository cloned with its own token, or Onus Cloud.
+
+`lanes.heldOut` in onus.yaml still works, as one check with id `lanes.heldOut` that runs for every change. Agents can read onus.yaml, so `onus judge` notes it on stderr; prefer a suite.
+
+### Judge configurations
+
+With `lanes.judges` set, one configuration judges each change. Each has a `name`, and optionally its own `taste` reviewer (default `lanes.taste`) and `heldOutLimit`. The rotation picks one from a hash of the head commit and the suite's full hash, so an author who cannot read the suite cannot predict which configuration will judge a commit. Without a suite the choice is predictable from the head commit.
+
+The judgment records `rotation: {config, index, of, forced}`, and its judge id is `<name>@<hash>`, so outcome records and `onus outcomes summary`'s `byJudge` track each configuration by name. `onus judge --judge-config <name>` (and the lanes page of `onus ui`) forces one, for example to judge an audited change again under another configuration; that is recorded as `forced: true`. Agents cannot choose. Without `judges` nothing changes, and the judge id stays the policy's hash.
+
+Agents do not see which configuration judged. `onus_judge` leaves out `rotation`, and its judge id is the policy's hash, the same for every configuration; the judgment kept beside the submission has both, for people. Otherwise an agent could amend its commit, judge it again, and repeat until a lenient configuration came up. That is the limit: an author who sees the configuration can still shop by amending. `lane.md` from `onus ci pr` names it, so in CI an author who reads the pull-request comment can push again until it likes the one it gets, and on a machine where an agent has a shell, it can read the kept judgment. What still holds there is the record: `byJudge` shows what each configuration let through, so a lenient one shows up in its reverts, incidents and audit misses.
 
 ## Outcomes
 
@@ -74,7 +205,23 @@ The GitHub Action keeps these records for you with `records: true`: outcomes whe
       --lane auto-merge --verdict approve --judge 1a2b3c4d --result merged --audited
     onus outcomes summary --file outcomes.jsonl
 
-The summary gives each agent setup and judge configuration its record (merged, reverted, incidents, audited, missed), the share of changes in the human lane (the review budget), and the miss rate of human audits of automatic approvals, the number that says whether the automatic lanes can be trusted.
+Pass `--component <id>` (repeatable) to name the components the change touched, for the history input, and `--classification <file>` to keep the change's features for the learned model. `onus ci pr` records them from the report, and `onus ci closed`, reverts and incidents keep them.
+
+The summary gives each agent setup its record, and each judge configuration its record of the changes it decided (a verdict on record): merged, reverted, incidents, audited, missed. It also gives the share of changes in the human lane (the review budget), and the miss rate of human audits of automatic approvals, the number that says whether the automatic lanes can be trusted. A judge configuration id is a hash of the lane policy and the Onus version, so changing either starts a new record; with `lanes.judges`, each configuration keeps its own record as `<name>@<hash>`.
+
+## Audits after merge
+
+Some changes merge with no person looking: the `auto-merge` lane, and the `judge` lane when the judge approves. A share of them (`auditAfterMerge`, default 0.05) is sampled for a person to audit after they merge. `onus ci closed` makes the choice from a hash of the merge commit, which does not exist until the merge, so an agent cannot know beforehand whether its change will be audited. The choice is written into the outcome as `"sampled": true` and nowhere else: not in the comment, the check or the CI log.
+
+`auditRate` is a different draw: it sends would-be auto-merges to a person before they merge. Set either to 0 to turn it off.
+
+    onus outcomes audits --file outcomes.jsonl          # what waits for a person, and the audit log
+    onus outcomes audit --file outcomes.jsonl --change acme/shop#42 --by @alice \
+      --result miss --note "the opt-out was ignored"
+
+`audits` prints `{awaiting, audited}`: the sampled changes no one audited yet, oldest first, and every audited change, most recent first. A sampled change that was later reverted or caused an incident still waits; leaving out the ones that went badly would bias the sample. `audit` records who audited, when, ok or a miss, and a note. `/onus audit ok|miss` on a merged pull request writes the same record (`onus help ci`).
+
+The summary's `sampledMissRate` is the number to watch: misses among the sampled changes a person audited. Because the sample is random, it estimates how many risky changes slip through without a person. `auditMissRate` counts every audit, including the ones people chose to make, and `awaitingAudit` counts what is still waiting.
 
 ## The production loop
 
@@ -85,8 +232,90 @@ What happens after merging changes the record:
       --involved notifications --involved "notifications:src/sms.ts#sendSms" --note "SMS sent twice"
     onus outcomes backlog --file outcomes.jsonl
 
-Reverts are found from commit messages (`This reverts commit …`) and recorded against the change they undo; a reverted change no longer counts toward its agent setup's record. A change turned off by a feature flag or a rolled-back rollout is recorded with `onus outcomes record --result rolled-back` and counts the same way. An agent setup with an incident among its last 20 changes cannot auto-merge. `backlog` lists the components and symbols incidents involved, most often first: where the next held-out tests should go. Onus does not write tests.
+Reverts are found from commit messages (`This reverts commit …`) and recorded against the change they undo; a reverted change no longer counts toward its agent setup's record. A change turned off by a feature flag or a rolled-back rollout is recorded with `onus ci rollback`, `onus ci rollout` or `onus outcomes record --result rolled-back` and counts the same way, unless it was `--planned`: a planned rollback still counts as a merged change. An agent setup with an incident or a rollback among its last 20 changes cannot auto-merge. Incidents and rollbacks also come straight from production: `onus signals ingest` records signals from monitoring and deploy tools and turns those tied to a change into its outcomes (`onus help production`). `backlog` lists the components and symbols incidents involved, most often first: where the next held-out tests should go. Onus does not write tests.
+
+## Provenance
+
+Every change carries one record of why it was allowed through: the intent, the agent and model, the token it held, the evidence, any escalations, the lane and the judge's steps, who or what approved it, and how it rolled out. `onus ci pr` writes it as `provenance.json` beside the submission while the pull request is open. `onus provenance` rebuilds it from the records as outcomes arrive:
+
+    onus provenance --change acme/shop#7 --records rec --from out/provenance.json --out p.json
+    onus provenance --submission-id 4fa91c        # a submission kept by onus ui or onus mcp
+    onus provenance --submission sub.json --audit audit.jsonl --escalations escalations --task sms
+    onus provenance --change acme/shop#7 --records rec --escalations cloud.json --token-inspection token.json
+    onus provenance --change acme/shop#7 --records rec --audit door-log.json --calls calls.json
+    onus provenance --change acme/shop#7 --records rec --agent-submission submissions/7.json
+    onus provenance --verify p.json
+
+`--from` is an earlier record of the change. Its facts from while the change was open (intent, report, token, evidence, escalations, lane reasons, judge, doors) are kept unless fresh ones are given. The stage, merge commit, approver and rollout are worked out again from the records every time. `--submission-id` reads `.onus/submissions/<id>.json`, its judgment, and the repository's `.onus` audit log, escalations and outcomes.
+
+A change made through Onus Cloud has no submission or door log in CI. Onus Cloud keeps its escalations instead, each with the door's inspection of the task token. `--escalations FILE` (also on `onus ci pr`) takes them as a JSON array (`schemas/escalation-decisions.schema.json`): `id`, `kind`, `scopes`, `state`, `decidedBy`, `decidedAt` (Unix seconds or an RFC 3339 date in UTC), `reason` or `answer`, `repository`, `pull`, `ref`, `commit`, and `token: {task, rights, expires}`. The API's `{"escalations": [...]}` with a nested `decision` is read too, and so is a stored row (`status`, `pullNumber`, `input`). Pass the API's views where you can: a stored row still `waiting` past its `expiresAt` is recorded as `expired`, as the view shows it.
+
+Which escalations are this change's:
+
+- For a pull request (`owner/repo#n`), those for another repository or pull request are left out. The repository is matched ignoring case.
+- An escalation that names the change is kept whatever its task. It names the change when it is on the pull request, the submission lists it, an earlier record (`--from`) kept it, or its `ref` or `commit` is one of the change's commits, its branch (`ci pr --branch`) or `refs/pull/<n>/head`. A `commit` elsewhere outweighs the branch's name, since a branch name may be used again. `ci pr` lists the change's commits with git; `onus provenance` does so in `--repo` when it holds them.
+- One that does not name the change is kept only for the change's task. With no task, it is left out.
+- The change's task is `--task`, the token's, the submission's, the inspection's or the earlier record's. Else it is the one task the escalations that name the change name. When they name several, none is picked. An escalation that does not name the change never says its task, so it never brings its token into the record.
+- For a local change (a head commit), the repository and pull request are not checked. Those of the change's task are kept, or all of them when the task is not known.
+
+An escalation that cannot be read (an unknown `state`, a value of the wrong type, a time that is not one) is left out with a warning, and `escalations` stays a gap that names it. The note names the field and what it should be, never the value given, so a token pasted into the wrong field never reaches the record. A list whose escalations are all for other changes is a gap too. An `expires` that is not a positive whole number is no expiry. `onus ci pr` never stops for this input: a file it cannot read is a warning and a gap. Only a token given instead of its inspection is refused, before anything is written. An inspection `onus ci pr` cannot read is named in the `token` gap. `onus provenance` fails on a file it cannot read, a missing one included.
+
+`--token-inspection FILE` takes the door's inspection of the token on its own (`{task, rights, expires}`, as `onus token inspect` prints it; an `expires` of 0 is no expiry). With `--task`, it must be for that task. Without the file, the first escalation of the task that kept an inspection gives it. Either way the rights are widened by the scopes Onus Cloud granted to the task. Those are what Onus Cloud granted, not what the door minted again: the agent may never have taken up a grant. `onus provenance --escalations` given a folder reads the escalation requests kept there, as before. Given a file with `--submission-id`, it also reads the requests kept in `.onus/escalations`, so what Onus Cloud's list leaves out (kind, scopes, grade) comes from them. On a rebuild with `--from` where Onus Cloud's list is the only fresh input, it updates the escalations kept earlier, so those only the door knew stay.
+
+The door log can travel with the work too. An agent attaches its task's slice of the log to the pull request in Onus Cloud with `onus_cloud_attach_evidence` (`doorLog: true`) or `onus cloud evidence <pull> --door-log --task <task>`. The slice is the run of entries from the task's first entry to its last, with whatever lies between, so its hash chain can be checked where it is read (`schemas/door-log.schema.json`). Through `onus mcp`, the server cuts it from its own log: the agent names nothing but the pull request. `--audit FILE` (also on `onus ci pr`) takes the slice, or a whole audit log as before. A slice's chain is checked from its first entry: whether any entry in it was changed or removed, not what came before it. The record keeps the task's entries with `doors.source: attached`, and whether the chain verified. A slice that does not verify is still recorded, as not intact, with the entries of the task it names, and the `doors` gap says why. A slice of another task than the change's keeps none of its entries, and the gap names both tasks. When nothing else names the change's task, the slice's task does, if the slice verifies.
+
+Through `onus mcp --token`, the door also sends its inspection of the token it holds with the slice (`inspection`: `{task, rights, attenuations, expires}`, never the token). So a change made through Onus Cloud by an agent that never escalated still has its token on record, as `token.source: attached`. Without an inspection, the slice's `mint` entry gives it, when the slice holds one. Either is taken only when the slice verifies and was cut at one of the change's commits (its `head`), and ranks below every other source. A slice cut at another commit may be another change's: it gives neither the task, the token nor any decision, keeps none of its entries, and the `doors` gap names the commit. So does a slice that does not say where it was cut, when the change's commits are known. Attach it after committing and pushing the work: onus attaches a slice only to the pull request whose head in Onus Cloud is the worktree's commit.
+
+An attached slice is the agent's word. The chain is plain sha256 with no key, so it shows that nothing in the slice was changed after it was cut, not who cut it: anyone can build a slice that verifies. So the `doors` gap stays even when it verifies, narrowed to say so. Its decisions on escalations are read only when it verifies, is of the change's task and was cut at one of its commits, and Onus Cloud's decision on the same escalation is recorded over it whatever its state; the `escalations` gap names any disagreement, and any decision only the slice gives. Its entries between the task's first and last include other tasks' entries on the same log, which travel with it. Each hash is over the entry's JSON as the door wrote it, so a host keeps the slice as it was sent (its text): a number written again another way (`1.0` as `1`, an integer past 2^53) no longer verifies.
+
+A door log that verifies but holds nothing of the change still leaves the `doors` gap: when the change's task is not known (give `--task`, also on `onus ci pr`), or the log holds no entry of the task. Whatever the source, a door log that does not verify never gives the token or the task.
+
+`--calls FILE` (also on `onus ci pr`) takes Onus Cloud's log of the calls made under the task token (`schemas/cloud-calls.schema.json`): a JSON array of `{at, method, route, scope, decision, tokenId, task, reason}`, where `decision` is `allowed`, `denied` or `failed`. The API's `{"calls": [...]}` with `createdAt` and `credentialId` is read too. The record sums them up in `doors.calls`: the totals, the first and last call, the token ids, the counts for each route and scope by decision, and every denial (at most 100) with its reason. Calls of another task are left out when the change's task is known, and calls never say the task. Calls that name no task are counted as the change's, on Onus Cloud's word, and `untasked` says how many. Onus Cloud's API rows name no task, so a host gives only the calls made under the change's task token. When the change's task is not known, every call given is counted and the `doors` gap says so. They are marked `source: onus-cloud`, apart from the door log: they are Onus Cloud's word and have no hash chain. With calls and no door log, `doors.source` is `onus-cloud`, `intact` is false, and the `doors` gap stays: the agent's own door log, with its MCP and gateway calls, did not reach the run. A call that cannot be read is left out with a warning, and the gap says the counts may be short. An empty list is on record: no call was made there. Only those fields are read: the API's rows carry more (`path`, `userAgent`, `credentialName`), some of it set by whoever made the call, and none of it is read or kept. A call with a `token`, or a field read that looks like one (an Onus Cloud token or API key, a PASETO, a run of base64url as long as a Biscuit), is left out like one that cannot be read; the warning and the gap name the field, never the value. A door log or a calls file that cannot be read at all is a warning and a `doors` gap, in `onus ci pr` and `onus provenance` alike, so a host refreshing a record keeps what came after the close.
+
+| Field | What it holds |
+|---|---|
+| `stage` | `open`, `merged` or `closed`. |
+| `intent` | Where the intent came from (`pull-request` or `submission`), its sha256, and the report's intent check. |
+| `agent` | The agent setup, how it was recognised (`trailer`, `branch`, `bot`, `co-author`, `person`, `submission`), and its track record (`merged`, `recentIncidents`, `recentRollbacks`). |
+| `token` | The task, rights, attenuations, expiry and a 16-digit fingerprint. Never the token itself. `source` says where it came from: `token` (verified by this run), `submission` (verified when the submission was made), `agent-submission` (the agent's own submission handed in beside the run, with `onus ci pr --submission` or `onus provenance --agent-submission`, such as one kept on the records branch: on its word, since the run cannot tell it was verified when it was made), `audit` (the door log's `mint` entry, widened by grants, when the log verifies), `inspection` (the door's inspection, from `--token-inspection` or kept by Onus Cloud with an escalation, widened by the grants there; not verified by the run) or `attached` (the door log the agent attached in Onus Cloud: the inspection sent with it, or its `mint` entry, when it verifies). The first that is given wins, in this order: `token`, `submission`, `audit`, `inspection`, `agent-submission`, `attached`. The agent's own submission ranks below the door's word. On a rebuild with `--from`, a kept token verified by a run or a submission, or taken from a door log this run read, comes before an inspection. |
+| `evidence` | Each test run: command, commit, image, exit code, manifest, and whether it ran at the head commit. |
+| `escalations` | Each request: kind, scopes, best evidence grade, and the last decision in the door log, by whom (`policy` for an automatic grant). A decision Onus Cloud kept, with Onus Cloud's id as `cloudId`: `granted`, `denied`, `needs-person` (waiting), `answered` (a blocked report a person answered), `open` (being checked), `withdrawn`, `expired` or `failed`. It replaces an open or waiting one, and a final decision from the submission or the door log stands against one Onus Cloud has not made yet. When both are final and differ, Onus Cloud's is recorded, since it decided, and the `escalations` gap names the disagreement. A decision only the agent gives (the escalations its own submission lists, or the door log it attached) stands against nothing: Onus Cloud's is recorded whatever its state. Kept on the agent's word alone, the `escalations` gap names it. `reason` is the decider's (the door log's reason, or Onus Cloud's `answer`), never why the agent asked. |
+| `lane`, `judge` | The final lane, every rule that applied, the lane policy's hash, and the judge's verdict, steps and reasons. |
+| `approval` | Who or what approved it (below), the people, the rows they approved, and who merged it. |
+| `rollout` | The result now, the merge commit and time, whether a person audited it, and every outcome in order. From production: `status` (`pending`, `not-shipped`, `awaiting-deploy`, `in-progress`, `holding`, `complete`, `rolled-back` or `reverted`), the `percent` of traffic last reported, the `plan`, every deploy and rollout stage (`stages`) and the other signals tied to it (`signals`). `onus help production` has the rules. |
+| `doors` | The door log's decisions for the task, and whether its hash chain is intact. `source` says where they came from: absent for the door log this run read, `attached` for the slice the agent attached in Onus Cloud, or `onus-cloud` when only Onus Cloud's calls are known. `calls` sums up Onus Cloud's log of the calls made under the task token (`source: onus-cloud`). |
+| `gaps` | What the record cannot vouch for, and how to fill it. |
+
+Who or what approved it:
+
+| Stage | Final lane | Judge verdict | `approval.by` |
+|---|---|---|---|
+| open | any | any | `pending` |
+| closed | any | any | `none` |
+| merged | `auto-merge` | any | `policy` |
+| merged | `judge` | `approve` | `judge` |
+| merged | `judge` | `escalate`, `reject` or none | `person` |
+| merged | `human` | any | `person` |
+| merged | `blocked` | any | `override` (it merged although Onus blocked it) |
+
+`approval.people` lists the people who approved rows, the approving reviewers, then who merged it (`onus ci closed --merged-by`), each once. When a person approved and none is known, `gaps` says so.
+
+A gap is listed for each of `intent`, `token`, `evidence`, `escalations`, `judge` and `doors` that is empty. In CI no task token reaches the run, so `token` is a gap there unless Onus Cloud passes the door's inspection or the agent's submission comes with the change. An escalations list from Onus Cloud is on record even when it is empty, so it is not a gap. `doors` stays a gap in a hosted run: the door log the agent attaches, and Onus Cloud's calls, narrow it, never close it, since each is on its sender's word.
+
+What a run in CI can know depends on what reaches it:
+
+- **The agent's submission** (`onus ci pr --submission FILE`, the action's `submission` input, or one kept on the records branch at `submissions/<pull request number>.json` or `submissions/<head commit>.json`). It brings the task token's facts (`token.source: agent-submission`) and the escalations it lists, on its word: the file is plain JSON, and the record cannot tell it was verified when it was made. Its token ranks below the door's word, and the escalations it lists are recorded as granted only until Onus Cloud says otherwise; while nothing else confirms them, the `escalations` gap says they are the agent's word. It must be for one of the pull request's commits; one for another commit is left out with a warning, and so is one that cannot be read. Only its token and escalations are taken: the intent, the agent and the evidence are this run's. When the pull request closes, the action rebuilds the record with `onus provenance --agent-submission FILE`, which takes it the same way: for one of the commits in the pull records (or in `--repo` between their base and head), and only its token and escalations.
+- **What the action cannot know.** It cannot verify the token itself: a submission keeps the token's task, rights, expiry and fingerprint, never the token, and no root key reaches CI, so it vouches only for what was verified when the submission was made. Whoever can write to the records branch can put a submission there. The action does not see the door log, the escalations or the calls Onus Cloud keeps; a host that has them passes `--audit`, `--escalations` and `--calls`. Without a submission or Onus Cloud, `token`, `escalations` and `doors` are gaps.
+- **Onus Cloud** passes the escalations with the door's inspection of the token. Its call log (`--calls`) and the door log the agent attached (`--audit`) reach the record only from an Onus Cloud that keeps them and passes them on; an older one refuses a door log on its evidence route.
+
+`digest` is the sha256 of the record's compact JSON with the digest left empty. `--verify` checks it and the schema version, and exits 1 when either does not match. The format is `schemas/provenance.schema.json`; new optional fields may be added under `schema: 1`.
 
 ## In CI
+
+In the human lane, `onus ci pr --reviews <file>` decides whether the change has the review it needs: an approval of the head commit from someone with write access who is not a bot and did not open the pull request, and no outstanding request for changes. It also names the owners of the rows that need a person (onus.yaml, else CODEOWNERS) for the host to ask, each once per pull request.
+
+`lanes.approval` says whose approval counts. With `owner`, the default when the change has owners, only an owner counts: a person named as an owner, or a member of an owning team when the host says who is in it. With `member`, the default when nobody owns what changed, anyone with write access counts. When Onus cannot check an owner (a team whose members it was not given, or an email), or no owner but the author could approve, anyone with write access counts and the review says why. The rule and the owners are read at the base commit (onus.yaml, then CODEOWNERS), so a change can neither loosen the rule for itself nor name its own approver. The rule applies in the human lane only, and it is kept on the pull record, the outcome and the provenance record (`approval.review`).
+
+The action (with `records: true`) and Onus Cloud both pass the reviews, ask the owners to review, and keep their check failing or waiting until a review counts; see `onus help ci`.
 
 The action classifies every pull request with `lanes: true` and shows the lane in its comment. `apply-lane: true` labels the pull request `onus/lane:<lane>` and fails the job for `blocked`; `auto-merge: true` enables GitHub's auto-merge for the `auto-merge` lane. See `onus help ci`. With `records: true`, the action also keeps the outcome records on an `onus/records` branch: outcomes when pull requests close, reverts when the default branch moves, and approvals, audits and incidents from `/onus` comments.

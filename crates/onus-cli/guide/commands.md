@@ -14,6 +14,7 @@ Builds the map of a directory and prints a summary.
 - `--config <file>`: use this onus.yaml instead of `<dir>/onus.yaml`.
 - `--scip <file>`: import a SCIP index of the directory (repeatable). Runs nothing.
 - `--traces <file>`: add the calls in OpenTelemetry traces (OTLP JSON) as `traced` edges (repeatable). See `onus help environments`.
+- `--coverage <file>`: add line coverage of the directory (lcov, Cobertura XML or Istanbul JSON), measured at the same version of its files (repeatable). See `onus help environments`.
 - `--plugins <file>`, `--trusted`, `--allow-unsandboxed`: see "Plugins" below.
 
 ## onus diff <base> <head>
@@ -31,6 +32,7 @@ Reports the changes in meaning between two directories.
 - `--fail-on <what>`: exit with code 2 when `rule-violation` (a new boundary-rule violation) or `secrets` (a committed secret) is found. Repeat the flag or separate values with commas. `none` never fails.
 - `--base-scip <file>`, `--head-scip <file>`: import SCIP indexes of each tree (repeatable).
 - `--traces <file>`: add the calls in OpenTelemetry traces to both trees (repeatable), so they are facts of both and never changes.
+- `--coverage <file>`: line coverage of the head tree (lcov, Cobertura XML or Istanbul JSON), from tests run at the head (repeatable). The report then says which changed lines tests ran; see `onus help reports`.
 - `--plugins <file>`, `--trusted`, `--allow-unsandboxed`: see "Plugins" below.
 
 ## onus report --base <ref> --head <ref>
@@ -41,8 +43,10 @@ The same report for two git refs. Each ref is extracted with `git archive` into 
     onus report --repo ../shop --base origin/main --head feature/sms --format json
 
 - `--repo <dir>`: the repository (default: the current directory).
-- `--format`, `--markdown-out`, `--intent`, `--config`, `--fail-on`, `--traces`, `--plugins`, `--trusted`, `--allow-unsandboxed`: as for `onus diff`. SCIP indexes for `report` come from `scip` plugins, which index each ref in trusted mode.
+- `--format`, `--markdown-out`, `--intent`, `--config`, `--fail-on`, `--traces`, `--coverage`, `--plugins`, `--trusted`, `--allow-unsandboxed`: as for `onus diff`. SCIP indexes for `report` come from `scip` plugins, which index each ref in trusted mode.
+- `--evidence <file>`: a test run from `onus env run` (repeatable). The coverage it recorded is used when its manifest is intact and it ran at the head commit; otherwise a note says why not.
 - `--cache-dir <dir>`: keep the base ref's map in this folder and reuse it on the next report against the same base commit. The report is the same either way; see `onus help ci`.
+- `--head-map-out <file>`: also write the head ref's map (schemas/codebase-map.schema.json) to a file. It is the map the report was computed against, so `onus query --map <file>` answers questions about the head with no second build. It holds the traces and coverage the report was given, so two reports of one commit with different evidence write different maps.
 
 Any ref git understands works: branches, tags, `HEAD~3`, commit hashes. In JSON, `base` and `head` read like `main (abc1234)`.
 
@@ -64,10 +68,10 @@ Writes a starter onus.yaml inferred from workspaces and CODEOWNERS. Sensitivity 
 
 ## onus schema
 
-Writes the JSON Schemas of the map, the report and onus.yaml.
+Writes the JSON Schemas of the map, the report, onus.yaml, the plugins file and protocol, the provenance record (`onus provenance`) and what it reads (escalation decisions, Onus Cloud's calls, a door log slice), production signals and rollout metrics, held-out suites, and the map overview (`onus query overview`).
 
     onus schema --out schemas
-    onus schema                         # print all three
+    onus schema                         # print them all
 
 ## onus mcp
 
@@ -77,16 +81,22 @@ Serves the map of the current worktree to a coding agent as MCP tools, on stdin 
 
 - `--repo <dir>`: the worktree (default: the one containing the current directory).
 - `--no-server`: build the map in this process instead of the repository's shared map server.
+- `--token <token>` and `--key-public <file>`: the task token every call is checked against; `--key <file>`: the root private key, with which the server mints grants itself; `--trusted-repo <dir>`: a checkout whose files the agent cannot edit, from which the policy decides escalations when signed out; `--audit <file>`: the log; `--no-actions`: only the map tools.
+- `--cloud-token`, `--cloud-repo`, `--cloud-ttl`: how the server signs in to Onus Cloud (`onus help cloud`).
 
 ## onus query <question>
 
-The same questions as the MCP tools, from a shell, printed as JSON: `status`, `find <words>`, `symbol <id>`, `dependents <target>`, `dependencies <target>`, `tests-for <target>`, `impact <target> [--change <kind>]`, `invariants [target]`, `owners <target>`, `component <id>`, `file <path>`, `check [--base <ref>]` and `stats`.
+The same questions as the MCP tools, from a shell, printed as JSON: `status`, `find <words>`, `symbol <id>`, `dependents <target>`, `dependencies <target>`, `tests-for <target>`, `impact <target> [--change <kind>]`, `invariants [target]`, `owners <target>`, `component <id>`, `file <path>`, `overview`, `check [--base <ref>]` and `stats`.
 
     onus query find format phone
     onus query dependents UserPreferences --depth 2 --limit 20
+    onus query overview
+    onus query --map map.json dependents money
 
 - `--repo <dir>` and `--no-server`: as for `onus mcp`.
 - `--depth <n>` (1 to 8) and `--limit <n>` (default 50, at most 500) where they apply.
+- `--map <file>`: answer from a map JSON file instead of a worktree: one from `onus map --json` or `onus report --head-map-out`, or a map downloaded from Onus Cloud. `-` reads stdin, so `curl … | onus query --map - dependents money` works in scripts. A map of another schema version is refused. No map server is started, `check` and `stats` need a worktree, and `impact --change add-required-member` lists every file that names the type, since there is no source to read.
+- `overview`: every component with its kind, roots, owners, labels, package, files, lines and first 50 public symbols, the components it uses and that use it (with edge counts), its external services and events; then the links between components, the events, the declared contracts and the rules (schemas/map-overview.schema.json). It is what `onus ui` draws and what Onus Cloud shows for a map it keeps.
 
 ## onus ui
 
@@ -101,41 +111,74 @@ Opens the web interface for the repository: everything below and above, in a bro
 ## Scopes, lanes and environments
 
 - `onus token`, `onus scope`, `onus gateway`, `onus escalate`, `onus escalation`, `onus audit`, `onus run-test`: task tokens, the git gateway, escalation and the audit log. See `onus help scopes`.
-- `onus submit`, `onus classify`, `onus judge`, `onus outcomes`: risk lanes, the judge and outcome records. See `onus help lanes`.
+- `onus submit`, `onus classify`, `onus judge`, `onus outcomes`: risk lanes, the judge and outcome records. `onus outcomes audits` lists the merged changes sampled for a person to audit and the audit log; `onus outcomes audit` records an audit. `onus lanes train` fits the learned lane model to outcome records; it may only raise lanes. See `onus help lanes`.
 - `onus env`, `onus evidence`: environments and the evidence store. See `onus help environments`.
+- `onus signals ingest|traces|areas`: production signals kept with the records, production traces for the map, and each component's history. See `onus help production`.
 
 ## onus ci
 
 What the GitHub Action runs to keep outcome records on a branch (`onus help ci`); usable from any CI system.
 
     onus ci records pull --dir records                       # the onus/records branch into a folder
+    onus ci owners --base "$BASE" --report report.json       # who owns it, as the base commit says
     onus ci pr --base "$BASE" --head "$HEAD" --change acme/shop#7 --branch codex/sms --author mike \
       --body-file body.md --report report.json --records records --out out
     onus ci comment --change acme/shop#7 --body-file comment.md --author lead --association MEMBER --records records
-    onus ci closed --change acme/shop#7 --merged --commit "$SHA" --records records
+    onus ci closed --change acme/shop#7 --merged --commit "$SHA" --merged-by mike --records records
     onus ci push --records records --since "$BEFORE"
+    onus ci rollout --commit "$SHA" --percent 25 --metrics canary.json --records records
+    onus ci rollback --change acme/shop#7 --reason "checkout 500s" --records records
     onus ci records push --dir records --message "acme/shop#7 closed"
 
-- `ci pr` submits, classifies and (with `--judge`) judges the change, appends to `pulls.jsonl`, writes `submission.json`, `classification.json`, `judgment.json` and the comment section `lane.md` to `--out`, and prints `{lane, verdict, agent, record}`. `--evidence <file>` adds test runs.
-- `ci comment` acts on `/onus approve <row>`, `/onus audit ok|miss [note]` and `/onus incident <note> [involved: a, b]` from OWNER, MEMBER or COLLABORATOR, and prints `{command, ok, reply, rerun}`.
-- `ci closed` turns the pull request's latest record into an outcome; `ci push` records reverts.
+- `ci pr` submits, classifies and (with `--judge`) judges the change, appends to `pulls.jsonl`, writes `submission.json`, `classification.json`, `judgment.json`, `provenance.json`, `rollout.json` and the comment section `lane.md` to `--out`, and prints `{lane, verdict, agent, record, review, rollout, risk}` (`record.recentRollbacks` counts its agent setup's recent rollbacks; `rollout` is the plan's strategy, steps, bake time and whether it rolls back automatically; `risk` is the learned model's, or null). `--evidence <file>` adds test runs; `--reviews <file>` gives the pull request's GitHub reviews, for the human lane's review (`onus help ci`); `--model <file>` uses that learned lane model instead of the one at the base commit (it still needs `lanes.learned`); `--escalations <file>` and `--token-inspection <file>` give the escalations and the door's inspection of the task token that Onus Cloud keeps, for the provenance record (`onus help provenance`); `--calls <file>` Onus Cloud's log of the calls made under the task token; `--audit <file>` the task's door log, or the slice of it the agent attached in Onus Cloud, whose hash chain is checked; `--submission <file>` the agent's own submission, whose token and escalations the record keeps when it is for one of the pull request's commits; `--task <id>` the task whose door log entries and calls to keep. They never stop the run: what cannot be read is a warning and a gap in the record. Only a token given instead of its inspection is refused. An escalation with no pull request is joined by `--branch` and the change's commits.
+- `ci owners` prints `{owners}`: the owners `ci pr` asks to review and, with `lanes.approval: owner`, the people whose approval counts, read at the base commit (onus.yaml, then CODEOWNERS), so a host can look up owning teams' members for `--reviews`.
+- `ci comment` acts on `/onus approve <row>`, `/onus audit ok|miss [note]` and `/onus incident <note> [involved: a, b]` from OWNER, MEMBER or COLLABORATOR, and prints `{command, ok, reply, rerun}`. It also answers `/onus caught <note>` (from anyone) and `/onus accuracy ok|wrong <row>|missed <note>` (write access) with what was said, `verdict`, `row`, `note` and `by`. Accuracy is never recorded. `caught` from OWNER, MEMBER or COLLABORATOR is recorded as `caught: true` on the change's outcome, or on its pull record while it is open, and its answer says so with `recorded`. `--report <file>` (the report's JSON) checks `wrong <row>` against the report's rows and turns a row number into its id.
+- `ci closed` turns the pull request's latest record into an outcome, and samples a change approved without a person for an audit (`onus help lanes`). `--merged-by <login>` keeps who merged it on the outcome, as `@login`, for its provenance. `ci push` records reverts.
+- `ci rollout` (`--change` or `--commit`) prints the change's rollout plan (for a change recorded before plans, from `lanes.rollout` in `--repo` or `--config`); with `--percent` (and `--metrics`, the stage's samples) it decides `promote`, `hold`, `rollback` or `complete`, records the stage, records a `rolled-back` outcome on `rollback`, and exits 0 for promote or complete, 2 for rollback and 3 for hold. `ci rollback` records a rollback decided elsewhere; `--planned` marks one done on purpose, which counts against no one. See `onus help production`.
 - `ci records` takes `--remote` (default `origin`) and `--branch` (default `onus/records`).
+
+## onus provenance
+
+One record of why a change was allowed through: the intent, the agent and model, the token it held, the evidence, any escalations, the lane and the judge's steps, who or what approved it, and how it rolled out (`onus help provenance`, schemas/provenance.schema.json).
+
+    onus provenance --change acme/shop#7 --records records --from out/provenance.json --out p.json
+    onus provenance --submission-id 4fa91c
+    onus provenance --verify p.json
+
+- `--change <id>`: the change, as the records name it. Default: the change of `--from`, else the submission's head commit.
+- `--records <dir>` (or `--outcomes <file>`): the pull and outcome records and production signals, for the stage, approver and rollout. `--signals <file>` reads the signals from another file.
+- `--from <file>`: an earlier record of the change; its facts from while the change was open are kept.
+- `--submission <file>` or `--submission-id <id>`, `--classification <file>`, `--judgment <file>`: what was handed in and decided. `--submission-id` reads `.onus/submissions` of `--repo`, with the judgment, audit log, escalations and outcomes beside it.
+- `--token <token>` with `--key-public <file>`: a task token, verified (an error when it does not verify) and never kept; `--audit <file>`, `--escalations <dir>` and `--task <id>`: the door log, escalation requests, and whose door decisions to include. `--audit` also takes the task's slice of the door log that the agent attached in Onus Cloud (schemas/door-log.schema.json); its chain is checked from its first entry.
+- `--calls <file>`: Onus Cloud's log of the calls made under the task token (schemas/cloud-calls.schema.json), summed up beside the door log as `doors.calls`, on Onus Cloud's word.
+- `--agent-submission <file>`: the agent's own submission of a pull request, as `onus ci pr --submission` takes it: only its token and escalations, only when it is for one of the change's commits, and a warning when it cannot be read. The action passes it when the pull request closes.
+- `--escalations <file>`: escalations as Onus Cloud keeps them, with their decisions (schemas/escalation-decisions.schema.json); those for another repository or pull request, and those that neither name the change (its pull request, a commit in `--repo`, the submission or `--from`) nor share its task, are left out. One that cannot be read is left out with a warning and a gap. With `--submission-id`, the kept requests are read too. A path that does not exist is an error. `--token-inspection <file>`: the door's inspection of the task token (`{task, rights, expires}`), for `--task` when it is given. Never a token itself.
+- `--out <file>`: write it instead of printing it. `--verify <file>`: check a record's digest and schema version; exit 1 when they do not match.
 
 ## onus login, onus logout, onus cloud
 
-Onus Cloud from the terminal (`onus help cloud`). `onus login` signs the CLI in as you (approve the code it shows in the browser); in CI, `ONUS_API_KEY` stands in for it.
+Onus Cloud from the terminal (`onus help cloud`). `onus login` signs the CLI in as you (approve the code it shows in the browser); in CI, `ONUS_API_KEY` stands in for it, and a scoped token in `ONUS_CLOUD_TOKEN` stands in for both.
 
     onus login [--org acme] [--no-browser]
     onus cloud status
     onus cloud env create [--repo acme/shop] [--ref pull/42] [--name sms] [--host registry.npmjs.org]
     onus cloud env run sms -- npm test
     onus cloud evidence acme/shop#42 --run <run id>
+    onus cloud evidence acme/shop#42 --door-log --task sms
     onus cloud pulls --attention
+    onus cloud token create --scope pulls:read [--repo acme/shop | --all-repos] [--ttl 2h] [--label sms]
+    onus cloud map dependents UserPreferences [--repo acme/shop] [--commit <sha> | --pull 42]
+    onus cloud escalate --task sms --scope 'write:path:services/billing/**' --evidence … --reason …
+    onus cloud blocked --kind broken-test --evidence failing-test:src/a.test.ts --reason … --task sms
+    onus cloud escalation <id> [--wait 600]
     onus logout
 
 - `cloud env create|run|list|show|log|destroy`: hosted environments; `create` and `run` wait unless `--no-wait`, and `run` exits 1 when the command failed. `--json` prints the API's answer.
 - `cloud pulls`, `cloud pull <owner/name#n>`: governed pull requests, their lanes, analyses and evidence.
-- `cloud evidence <owner/name#n> --run <id>`: a recorded run to a pull request, for the judge.
+- `cloud evidence <owner/name#n> --run <id>`: a recorded run to a pull request, for the judge. `--door-log --task <task>` attaches the task's slice of the door log (`--audit <file>`, default `.onus/audit.jsonl` in the worktree), for the change's provenance, only when the pull request's head in Onus Cloud is the worktree's commit.
+- `cloud token create|list|revoke`: scoped tokens; `create` prints the token alone on stdout.
+- `cloud map <question> | --download <file>`: `onus query`'s questions asked of the map Onus Cloud keeps, answered here.
+- `cloud escalate`, `cloud blocked`, `cloud escalation <id>|list|withdraw`: escalations and blocked reports in Onus Cloud. `--token`, `--key-public` and `--key` are the door's; with `--key` a grant is minted here. Exit 0 when granted or answered, 1 when denied, withdrawn, expired or failed, 3 while waiting.
 - `--org <slug>` on any `cloud` command, or `ONUS_CLOUD_ORG`, picks the organisation; `ONUS_CLOUD_URL` the address.
 
 ## onus help [command | topic]

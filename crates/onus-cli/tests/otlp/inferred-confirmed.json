@@ -1,0 +1,14 @@
+{"resourceSpans": [
+  {"resource": {"attributes": [{"key": "service.name", "value": {"stringValue": "orders"}}]},
+   "scopeSpans": [{"spans": [
+     {"traceId": "t2", "spanId": "a1", "parentSpanId": "", "name": "placeOrder", "attributes": [
+       {"key": "code.filepath", "value": {"stringValue": "/srv/app/services/orders/src/orders.ts"}},
+       {"key": "code.function", "value": {"stringValue": "placeOrder"}}]}
+   ]}]},
+  {"resource": {"attributes": [{"key": "service.name", "value": {"stringValue": "billing"}}]},
+   "scopeSpans": [{"spans": [
+     {"traceId": "t2", "spanId": "b1", "parentSpanId": "a1", "name": "createInvoice", "attributes": [
+       {"key": "code.filepath", "value": {"stringValue": "/srv/app/services/billing/src/payments.ts"}},
+       {"key": "code.function", "value": {"stringValue": "createInvoice"}}]}
+   ]}]}
+]}

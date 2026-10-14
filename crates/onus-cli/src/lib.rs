@@ -1,7 +1,9 @@
 //! The pieces behind the `onus` command, shared by the binary and its tests.
 
+pub mod behavior;
 pub mod cloud;
 pub mod daemon;
+pub mod door;
 pub mod guide;
 pub mod mcp;
 pub mod session;
@@ -31,6 +33,8 @@ pub enum FailOn {
     RuleViolation,
     /// Committed secrets.
     Secrets,
+    /// Tests that passed at the base fail at the head (needs --behavior).
+    Behavior,
     /// Never fail (the default).
     None,
 }
@@ -56,9 +60,13 @@ pub struct DiffOptions {
     /// Called before the base map is built, for a base tree written only
     /// partly (see [`materialize_pair`]).
     pub complete_base: Option<BaseCompleter>,
-    /// OpenTelemetry traces (OTLP JSON) whose calls are added to both maps
-    /// (ADR 0010), so a traced call is a fact of both trees, not a change.
+    /// OpenTelemetry traces (OTLP JSON, or the records' `signals.jsonl`) whose
+    /// calls are added to both maps (ADR 0010), so a traced call is a fact of
+    /// both trees, not a change.
     pub traces: Vec<PathBuf>,
+    /// Coverage of the head tree (ADR 0017): line numbers belong to the
+    /// commit the tests ran at, so it never applies to the base.
+    pub coverage: Vec<onus_map::coverage::CoverageInput>,
 }
 
 /// Plugins and trusted mode (ADR 0006), the same for every tree.
@@ -304,7 +312,9 @@ pub fn checklist(report: &SemanticReport) -> Vec<String> {
                 "{}: remove it and load it from a secret store.",
                 c.title
             )),
-            "rule-violation" => items.push(format!("{}: {}", c.title, c.why_it_matters)),
+            "rule-violation" | "behavior-newly-failing" => {
+                items.push(format!("{}: {}", c.title, c.why_it_matters))
+            }
             s if s.starts_with("contract-") && c.kind == onus_core::ChangeKind::Breaking => {
                 if let Some((_, users)) = c.why_it_matters.split_once("not changed yet: ") {
                     items.push(format!(
@@ -508,9 +518,36 @@ pub fn diff_dirs(base: &Path, head: &Path, opts: &DiffOptions) -> Result<Outcome
         let b = add_traces(&mut base_map, &opts.traces)?;
         let h = add_traces(&mut head_map, &opts.traces)?;
         notes.push(format!(
-            "traces: {} spans; {} traced calls added to the base map, {} to the head map",
-            h.spans, b.edges_added, h.edges_added
+            "traces: {}; {} traced calls added to the base map, {} to the head map{}",
+            match (h.spans, h.calls) {
+                (0, c) if c > 0 => format!("{c} recorded calls"),
+                (s, 0) => format!("{s} spans"),
+                (s, c) => format!("{s} spans, {c} recorded calls"),
+            },
+            b.edges_added,
+            h.edges_added,
+            if h.edges_upgraded > 0 {
+                format!(
+                    "; {} guessed calls confirmed in the head map",
+                    h.edges_upgraded
+                )
+            } else {
+                String::new()
+            }
         ));
+    }
+    if !opts.coverage.is_empty() {
+        let s = add_coverage(&mut head_map, &opts.coverage)?;
+        notes.push(format!("coverage: {}", s.summary()));
+        // Recorded files that are not coverage, left out.
+        notes.extend(
+            head_map
+                .coverage
+                .iter()
+                .flat_map(|c| &c.notes)
+                .filter(|n| !n.starts_with("coverage of `"))
+                .map(|n| format!("coverage: {n}")),
+        );
     }
     let report = onus_diff::diff(&DiffInput {
         base_root: base,
@@ -540,6 +577,89 @@ pub fn add_traces(
     onus_map::traces::add_traced_edges(map, traces).map_err(|e| anyhow::anyhow!(e))
 }
 
+/// Adds coverage to a map (see [`onus_map::coverage`]).
+pub fn add_coverage(
+    map: &mut CodebaseMap,
+    inputs: &[onus_map::coverage::CoverageInput],
+) -> Result<onus_map::coverage::CoverageStats> {
+    onus_map::coverage::add_coverage(map, None, inputs).map_err(|e| anyhow::anyhow!(e))
+}
+
+/// Coverage recorded by environment runs at `head_sha` (ADR 0017): the
+/// `coverage` artifacts of each run's manifest, checked against the store.
+/// Runs without a manifest (`onus run-test`) or without coverage record
+/// none; coverage from another commit, or not in the store, is skipped with
+/// a note. Each input keeps its run's command: an agent picks
+/// the commands it runs, so the lane policy counts only the commands it
+/// names (`lanes.inputs.coverage.commands`).
+pub fn recorded_coverage(
+    repo: &Path,
+    head_sha: &str,
+    runs: &[onus_doors::runner::TestRun],
+) -> Result<(Vec<onus_map::coverage::CoverageInput>, Vec<String>)> {
+    use onus_env::store::{ArtifactKind, Store};
+    let mut inputs = Vec::new();
+    let mut notes = Vec::new();
+    if runs.iter().all(|r| r.manifest.is_none()) {
+        return Ok((inputs, notes));
+    }
+    let short = |s: &str| s.chars().take(8).collect::<String>();
+    let store = Store::for_repo(repo)?;
+    for run in runs {
+        // A run without a manifest (onus run-test) records no coverage.
+        let Some(id) = &run.manifest else {
+            continue;
+        };
+        let (full, manifest) = match store.manifest(id) {
+            Ok(m) => m,
+            Err(e) => {
+                notes.push(format!(
+                    "run {}: {e:#}; its coverage is left out",
+                    short(id)
+                ));
+                continue;
+            }
+        };
+        let recorded = manifest
+            .artifacts
+            .iter()
+            .any(|a| a.kind == ArtifactKind::Coverage);
+        if !recorded {
+            continue;
+        }
+        if manifest.commit != head_sha {
+            notes.push(format!(
+                "run {} ran at {}, not the head commit; its coverage is left out",
+                short(&full),
+                short(&manifest.commit)
+            ));
+            continue;
+        }
+        for a in manifest
+            .artifacts
+            .iter()
+            .filter(|a| a.kind == ArtifactKind::Coverage)
+        {
+            match store.get(&a.sha256) {
+                Ok(bytes) => inputs.push(onus_map::coverage::CoverageInput {
+                    label: a.path.clone(),
+                    bytes,
+                    origin: onus_core::CoverageOrigin::Recorded,
+                    manifest: Some(full.clone()),
+                    command: Some(manifest.command.clone()),
+                    written: None,
+                }),
+                Err(e) => notes.push(format!(
+                    "run {}: {e:#}; `{}` is left out",
+                    short(&full),
+                    a.path
+                )),
+            }
+        }
+    }
+    Ok((inputs, notes))
+}
+
 pub fn read_intent(path: &Path) -> Result<Option<Intent>> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("cannot read intent file {}", path.display()))?;
@@ -554,11 +674,50 @@ pub fn read_intent(path: &Path) -> Result<Option<Intent>> {
     }
 }
 
+/// An index over a map JSON file (`onus map --json`, `onus report
+/// --head-map-out`, or a map downloaded from Onus Cloud); `-` reads stdin.
+/// A map of another schema version is refused.
+pub fn index_from_map_file(path: &Path) -> Result<onus_index::MapIndex> {
+    let bytes = if path == Path::new("-") {
+        let mut buf = Vec::new();
+        std::io::Read::read_to_end(&mut std::io::stdin(), &mut buf)
+            .context("cannot read the map from stdin")?;
+        buf
+    } else {
+        std::fs::read(path).with_context(|| format!("cannot read {}", path.display()))?
+    };
+    index_from_map_json(&bytes).with_context(|| format!("{} is not a usable map", path.display()))
+}
+
+/// An index over a map's JSON; see [`index_from_map_file`].
+pub fn index_from_map_json(bytes: &[u8]) -> Result<onus_index::MapIndex> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).context("not JSON")?;
+    // The version first, so a newer map is named as such rather than failing to parse.
+    let version = value.get("schemaVersion").and_then(|v| v.as_u64());
+    if version != Some(u64::from(onus_core::map::SCHEMA_VERSION)) {
+        let onus = value
+            .pointer("/builtWith/onus")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let n = version.map_or("none".to_string(), |v| v.to_string());
+        bail!(
+            "this map was built by onus {onus} (schema {n}); this onus reads schema {}",
+            onus_core::map::SCHEMA_VERSION
+        );
+    }
+    let map: CodebaseMap = serde_json::from_value(value).context("not a codebase map")?;
+    Ok(onus_index::MapIndex::new(map))
+}
+
 /// Whether any `--fail-on` condition is met.
 pub fn should_fail(report: &SemanticReport, fail_on: &[FailOn]) -> bool {
     fail_on.iter().any(|f| match f {
         FailOn::RuleViolation => report.summary.new_rule_violations > 0,
         FailOn::Secrets => report.summary.secrets > 0,
+        FailOn::Behavior => report
+            .changes
+            .iter()
+            .any(|c| c.subkind == "behavior-newly-failing"),
         FailOn::None => false,
     })
 }

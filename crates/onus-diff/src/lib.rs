@@ -6,10 +6,13 @@
 //! templates; nothing is generated.
 
 mod apis;
+pub mod behavior;
 mod collapse;
 pub mod config_files;
 mod contracts;
+mod coverage;
 mod ctx;
+mod declared;
 mod generated;
 pub mod intent;
 mod internal;
@@ -18,10 +21,13 @@ mod matching;
 mod notable;
 mod packages;
 mod patches;
+mod reach;
 mod relations;
 mod risk;
 mod rules;
 mod secrets_scan;
+#[cfg(test)]
+mod testing;
 mod tests_diff;
 pub mod text;
 
@@ -30,8 +36,8 @@ use std::path::Path;
 
 use onus_core::rank;
 use onus_core::{
-    ChangeKind, CodebaseMap, Confidence, OnusConfig, ReportSummary, SCHEMA_VERSION, SemanticReport,
-    Side, TextStats,
+    ChangeKind, CodebaseMap, Confidence, OnusConfig, ReportSummary, SCHEMA_VERSION, SemanticChange,
+    SemanticReport, Side, TextStats,
 };
 use onus_map::walk;
 
@@ -89,10 +95,16 @@ pub fn diff(input: &DiffInput) -> SemanticReport {
     rows.extend(secrets_scan::rows(&ctx));
     rows.extend(apis::rows(&ctx));
     rows.extend(violations);
+    // Owners before the collapses, so merged rows keep everyone's.
+    fill_owners(&ctx, &mut rows);
     let mut rows = generated::collapse(&ctx, rows);
     let (internal_rows, structure) = internal::rows(&ctx, &rows, &tests);
     rows.extend(internal_rows);
+    // And for the rows those two made.
+    fill_owners(&ctx, &mut rows);
     let mut rows = collapse::widespread(rows);
+    declared::mark(&ctx, &mut rows);
+    reach::fill(&ctx, &mut rows);
 
     // Hints that depend on the whole picture.
     let changed: BTreeSet<&str> = text.files.iter().map(|f| f.path.as_str()).collect();
@@ -125,6 +137,8 @@ pub fn diff(input: &DiffInput) -> SemanticReport {
             r.hints.needs_person = true;
         }
     }
+    // After the locations are sorted, so rows count each line once.
+    let coverage = coverage::attach(&ctx, &mut rows);
     // Unique ids.
     rows.sort_by(|a, b| a.id.cmp(&b.id));
     let mut seen: BTreeMap<String, u32> = BTreeMap::new();
@@ -146,16 +160,7 @@ pub fn diff(input: &DiffInput) -> SemanticReport {
         .filter(|r| r.subkind == "rule-violation")
         .cloned()
         .collect();
-    let summary = ReportSummary {
-        meaning_changes: rows.len() as u32,
-        needs_attention: rows.iter().filter(|r| r.hints.needs_person).count() as u32,
-        secrets: rows
-            .iter()
-            .filter(|r| r.subkind == "secret-committed")
-            .count() as u32,
-        new_rule_violations: rule_violations.len() as u32,
-        intent_mismatches: rows.iter().filter(|r| r.hints.intent_mismatch).count() as u32,
-    };
+    let summary = summarize(&rows);
     let mut map_diagnostics: Vec<_> = input
         .head_map
         .diagnostics
@@ -181,5 +186,35 @@ pub fn diff(input: &DiffInput) -> SemanticReport {
             lines_removed: text.lines_removed(),
         },
         map_diagnostics,
+        coverage,
+        behavior: None,
+    }
+}
+
+/// The report's counts, from its rows.
+pub(crate) fn summarize(rows: &[SemanticChange]) -> ReportSummary {
+    ReportSummary {
+        meaning_changes: rows.len() as u32,
+        needs_attention: rows.iter().filter(|r| r.hints.needs_person).count() as u32,
+        secrets: rows
+            .iter()
+            .filter(|r| r.subkind == "secret-committed")
+            .count() as u32,
+        new_rule_violations: rows
+            .iter()
+            .filter(|r| r.subkind == "rule-violation")
+            .count() as u32,
+        intent_mismatches: rows.iter().filter(|r| r.hints.intent_mismatch).count() as u32,
+    }
+}
+
+/// Adds the owners of each row's component to the row, for routing.
+fn fill_owners(ctx: &ctx::Ctx, rows: &mut [SemanticChange]) {
+    for r in rows {
+        if let Some(c) = &r.component {
+            r.hints.owners.extend(ctx.owners(c));
+            r.hints.owners.sort();
+            r.hints.owners.dedup();
+        }
     }
 }

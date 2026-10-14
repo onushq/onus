@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RolloutMetrics",
+  "description": "What `onus ci rollout --metrics` reads (`schemas/rollout-metrics.schema.json`):\nthe samples of one rollout stage.",
+  "type": "object",
+  "properties": {
+    "metrics": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/MetricSample"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "metrics"
+  ],
+  "$defs": {
+    "MetricSample": {
+      "description": "One measurement, and what it is compared with.",
+      "type": "object",
+      "properties": {
+        "baseline": {
+          "description": "The control or pre-deploy value.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "name": {
+          "description": "`error_rate`, `latency_p95_ms`, `checkout_conversion`, …",
+          "type": "string"
+        },
+        "unit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "value": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "value"
+      ]
+    }
+  }
+}

@@ -1549,6 +1549,7 @@ dependencies = [
  "onus-env",
  "serde",
  "serde_json",
+ "serde_yaml_ng",
  "sha2 0.11.0",
  "tempfile",
 ]
@@ -1599,6 +1600,7 @@ dependencies = [
  "onus-lang-lsp",
  "onus-lang-scip",
  "onus-lang-ts",
+ "regex",
  "schemars",
  "serde",
  "serde_json",

@@ -137,6 +137,7 @@ pub fn collapse(ctx: &Ctx, rows: Vec<SemanticChange>) -> Vec<SemanticChange> {
             files.iter().map(|f| Location::head(*f, 1, 1)).collect(),
         );
         row.id = format!("generated-code-changed:{comp}");
+        row.hints.owners = crate::collapse::union_owners(&members);
         row.hints.blast_radius = members
             .iter()
             .map(|m| m.hints.blast_radius)

@@ -30,6 +30,7 @@ const DIFF_HELP: &str = concat!(
   onus diff old new
   onus diff old new --format json > report.json
   onus diff old new --intent pr-body.md --fail-on rule-violation,secrets
+  onus diff old new --coverage new-coverage.xml
 
 ",
     exit_codes!()
@@ -41,6 +42,9 @@ const REPORT_HELP: &str = concat!(
   onus report --repo ../shop --base origin/main --head feature/sms --format json
   onus report --base \"$BASE_SHA\" --head \"$HEAD_SHA\" --intent pr-body.md --fail-on secrets
   onus report --base \"$BASE_SHA\" --head \"$HEAD_SHA\" --cache-dir ~/.cache/onus
+  onus report --base main --head HEAD --coverage coverage/lcov.info
+  onus report --base main --head HEAD --evidence run.json
+  onus report --base main --head HEAD --behavior
 
 ",
     exit_codes!()
@@ -102,7 +106,8 @@ enum Cmd {
 Examples:
   onus map .
   onus map path/to/repo --json > map.json
-  onus map . --config other/onus.yaml"
+  onus map . --config other/onus.yaml
+  onus map . --coverage coverage/lcov.info --json"
     )]
     Map {
         /// The repository or directory to map.
@@ -116,9 +121,14 @@ Examples:
         /// Import a SCIP index of this directory (repeatable). Runs nothing.
         #[arg(long, value_name = "FILE")]
         scip: Vec<PathBuf>,
-        /// Add the calls in these OpenTelemetry traces (OTLP JSON) to the map (repeatable).
+        /// Add the calls in these OpenTelemetry traces (OTLP JSON, or the records'
+        /// signals.jsonl) to the map (repeatable).
         #[arg(long, value_name = "FILE")]
         traces: Vec<PathBuf>,
+        /// Coverage of this directory (lcov, Cobertura XML or Istanbul JSON) (repeatable).
+        /// Tests must have run at the same version of the files.
+        #[arg(long, value_name = "FILE")]
+        coverage: Vec<PathBuf>,
         #[command(flatten)]
         providers: ProviderArgs,
     },
@@ -156,9 +166,14 @@ Examples:
         /// Import a SCIP index of the head directory (repeatable).
         #[arg(long, value_name = "FILE")]
         head_scip: Vec<PathBuf>,
-        /// Add the calls in these OpenTelemetry traces (OTLP JSON) to both maps (repeatable).
+        /// Add the calls in these OpenTelemetry traces (OTLP JSON, or the records'
+        /// signals.jsonl) to both maps (repeatable).
         #[arg(long, value_name = "FILE")]
         traces: Vec<PathBuf>,
+        /// Coverage of the head directory (lcov, Cobertura XML or Istanbul JSON) (repeatable).
+        /// Head only: tests must have run at the head's version of the files.
+        #[arg(long, value_name = "FILE")]
+        coverage: Vec<PathBuf>,
         #[command(flatten)]
         providers: ProviderArgs,
     },
@@ -167,7 +182,9 @@ Examples:
         long_about = "Report the changes in meaning between two git refs. Each ref is extracted \
                       with `git archive` into a temporary directory that is removed afterwards; \
                       the repository itself is never modified. Only the paths git reports as \
-                      different are compared line by line.",
+                      different are compared line by line. With --behavior, the tests that reach \
+                      the change also run at both refs in environments, and what they show \
+                      becomes rows (onus help environments).",
         after_long_help = REPORT_HELP
     )]
     Report {
@@ -202,14 +219,36 @@ Examples:
         /// Import a SCIP index of the head ref (repeatable). Runs nothing.
         #[arg(long, value_name = "FILE")]
         head_scip: Vec<PathBuf>,
-        /// Add the calls in these OpenTelemetry traces (OTLP JSON) to both maps (repeatable).
+        /// Add the calls in these OpenTelemetry traces (OTLP JSON, or the records'
+        /// signals.jsonl) to both maps (repeatable).
         #[arg(long, value_name = "FILE")]
         traces: Vec<PathBuf>,
+        /// Coverage of the head ref (lcov, Cobertura XML or Istanbul JSON) (repeatable).
+        /// Head only: tests must have run at that commit.
+        #[arg(long, value_name = "FILE")]
+        coverage: Vec<PathBuf>,
+        /// Test runs (from onus env run): the coverage they recorded at the head commit is
+        /// used (repeatable).
+        #[arg(long = "evidence", value_name = "FILE")]
+        evidence: Vec<PathBuf>,
         /// Keep the base ref's map in this folder and reuse it on the next run against the
         /// same base commit. Safe to share between runs: the file name covers everything that
         /// shapes the map.
         #[arg(long, value_name = "DIR")]
         cache_dir: Option<PathBuf>,
+        /// Also write the head ref's map (schemas/codebase-map.schema.json) to this file: the
+        /// map the report was computed against.
+        #[arg(long, value_name = "FILE")]
+        head_map_out: Option<PathBuf>,
+        /// Run the tests that reach the change at the base and at the head, each in an
+        /// environment (environment.behavior in onus.yaml), and add what changed as rows.
+        /// Needs a container engine; a problem never fails the report.
+        #[arg(long)]
+        behavior: bool,
+        /// Seconds for the whole behavior diff, environments included (default:
+        /// environment.behavior.budget, else 600).
+        #[arg(long, value_name = "SECS", requires = "behavior")]
+        behavior_budget: Option<u32>,
         #[command(flatten)]
         providers: ProviderArgs,
     },
@@ -235,7 +274,7 @@ Examples:
         #[arg(long)]
         stdout: bool,
     },
-    /// Write the JSON Schemas of the map, report and config formats.
+    /// Write the JSON Schemas of the map, report, config and provenance formats.
     #[command(after_long_help = "\
 Examples:
   onus schema --out schemas
@@ -273,8 +312,8 @@ Examples:
         /// code and can run containers: only allow hosts on a network you trust.
         #[arg(long, value_name = "HOST", requires = "http")]
         allow_host: Vec<String>,
-        /// A task token (default: $ONUS_TOKEN): answers leave out everything the task may
-        /// not read. Needs --key-public.
+        /// A task token (default: $ONUS_TOKEN): every tool is checked against it, and answers
+        /// leave out everything the task may not read. Needs --key-public.
         #[arg(
             long,
             env = "ONUS_TOKEN",
@@ -290,6 +329,41 @@ Examples:
         /// escalations).
         #[arg(long)]
         no_actions: bool,
+        /// The audit log every call is written to (default: .onus/audit.jsonl in the
+        /// worktree). Put it where the agent cannot write.
+        #[arg(long, value_name = "FILE")]
+        audit: Option<PathBuf>,
+        /// The root private key, held by this door, never shown to the agent: grants
+        /// decided by policy or by a person in Onus Cloud are minted here.
+        #[arg(long, value_name = "FILE", requires = "token")]
+        key: Option<PathBuf>,
+        /// A checkout whose files the agent cannot edit, such as a git worktree of the
+        /// default branch outside the agent's (it shares git's config and hooks with the
+        /// agent's worktree, so keep those out of the agent's reach too): signed out, with --key, the policy decides escalations
+        /// from its map and onus.yaml (tests.command), and grants low-risk ones. Without
+        /// it, a person decides.
+        #[arg(long, value_name = "DIR", requires = "key")]
+        trusted_repo: Option<PathBuf>,
+        /// A scoped Onus Cloud token (default: $ONUS_CLOUD_TOKEN), used as it is for every
+        /// Onus Cloud call; neither the login nor ONUS_API_KEY is read.
+        #[arg(
+            long,
+            env = "ONUS_CLOUD_TOKEN",
+            value_name = "TOKEN",
+            hide_env_values = true
+        )]
+        cloud_token: Option<String>,
+        /// The repository the agent works on in Onus Cloud (default: $ONUS_CLOUD_REPO, else
+        /// the worktree's GitHub remote).
+        #[arg(long, env = "ONUS_CLOUD_REPO", value_name = "OWNER/NAME")]
+        cloud_repo: Option<String>,
+        /// How long the scoped token minted from a login lasts (at most 24h).
+        #[arg(long, default_value = "8h", value_name = "DURATION")]
+        cloud_ttl: String,
+        /// A held-out suite for onus_judge: a directory outside the repository holding
+        /// held-out.yaml. The agent never sees its checks, only how many passed.
+        #[arg(long, env = "ONUS_HELD_OUT", value_name = "DIR")]
+        held_out: Option<PathBuf>,
     },
     /// Ask the codebase map a question; the same answers as the MCP tools.
     #[command(after_long_help = "\
@@ -299,7 +373,10 @@ Examples:
   onus query dependents UserPreferences --depth 2
   onus query tests-for services/billing/src/payments.ts
   onus query impact UserPreferences --change add-required-member
-  onus query check --base main")]
+  onus query overview
+  onus query check --base main
+  onus query --map map.json dependents money
+  curl … | onus query --map - overview")]
     Query {
         #[command(subcommand)]
         question: QueryCmd,
@@ -309,6 +386,15 @@ Examples:
         /// Build the map in this process instead of the shared map server.
         #[arg(long, global = true)]
         no_server: bool,
+        /// Answer from a map JSON file (`onus map --json`, or a map downloaded from Onus
+        /// Cloud) instead of a worktree. `-` reads stdin.
+        #[arg(
+            long,
+            global = true,
+            value_name = "FILE",
+            conflicts_with_all = ["no_server"]
+        )]
+        map: Option<PathBuf>,
     },
     /// Run a repository's map server (started automatically by `onus mcp`).
     #[command(hide = true)]
@@ -370,13 +456,49 @@ Examples:
     /// Which lane a change takes (auto-merge, judge, human, blocked), and why.
     Classify(lanes::LaneArgs),
     /// Verify a submission: re-run evidence, intent, contracts, tests, held-out
-    /// checks, then taste. Exit 0 approve, 2 reject, 3 escalate to a person.
-    Judge(lanes::LaneArgs),
+    /// checks, then taste, stopping at the first failure. Exit 0 approve, 2 reject,
+    /// 3 escalate to a person.
+    #[command(after_long_help = "\
+Examples:
+  onus judge --submission sub.json
+  onus judge --submission sub.json --held-out ~/acme-held-out/shop
+  onus judge --submission sub.json --held-out ~/acme-held-out/shop --show-held-out
+  onus judge --submission sub.json --judge-config strict")]
+    Judge(lanes::JudgeArgs),
+    /// Held-out suites: check one, or see which checks the judge would run for a change.
+    HeldOut {
+        #[command(subcommand)]
+        cmd: lanes::HeldOutCmd,
+    },
     /// Record outcomes of changes and summarize them per agent setup and judge.
     Outcomes {
         #[command(subcommand)]
         cmd: lanes::OutcomesCmd,
     },
+    /// The learned lane model: train it from outcome records. It may only raise lanes.
+    Lanes {
+        #[command(subcommand)]
+        cmd: lanes::LanesCmd,
+    },
+    /// Production signals: incidents, error spikes, rollbacks and traces, kept with the
+    /// records.
+    #[command(after_long_help = "\
+Examples:
+  onus signals ingest --records rec --file pagerduty-export.json
+  onus signals traces --records rec --file otel-export.json --source otel-prod
+  onus signals areas --records rec --days 30")]
+    Signals {
+        #[command(subcommand)]
+        cmd: signals::SignalsCmd,
+    },
+    /// One record of why a change was allowed through: intent, agent, token, evidence,
+    /// escalations, judge, approver, rollout.
+    #[command(after_long_help = "\
+Examples:
+  onus provenance --change acme/shop#7 --records rec --from out/provenance.json
+  onus provenance --submission-id 4fa91c
+  onus provenance --verify provenance.json")]
+    Provenance(provenance::ProvenanceArgs),
     /// Check an audit log's hash chain.
     Audit {
         /// The audit log (JSONL).
@@ -393,14 +515,18 @@ Examples:
     /// Sign the CLI out of Onus Cloud (its token is revoked).
     Logout,
     /// Onus Cloud: hosted environments that record evidence, governed pull requests and
-    /// their lanes. Needs `onus login`, or ONUS_API_KEY in CI.
+    /// their lanes, scoped tokens, escalations and the maps it keeps. Needs `onus login`,
+    /// a scoped token in ONUS_CLOUD_TOKEN, or ONUS_API_KEY in CI.
     #[command(after_long_help = "\
 Examples:
   onus cloud status
   onus cloud env create                       # this folder's repository at its pushed HEAD
   onus cloud env run web-3f2a1c -- npm test
   onus cloud evidence acme/web#42 --run <run id>
-  onus cloud pulls --attention")]
+  onus cloud pulls --attention
+  onus cloud token create --scope env:run --scope evidence:write --ttl 2h
+  onus cloud map dependents UserPreferences
+  onus cloud blocked --kind broken-test --evidence failing-test:src/a.test.ts --reason \"the fixture is in local time\"")]
     Cloud {
         /// The organisation (slug) to act in (default: $ONUS_CLOUD_ORG, else your login's).
         #[arg(long, global = true, value_name = "SLUG")]
@@ -421,7 +547,7 @@ Examples:
 }
 
 #[derive(Debug, Subcommand)]
-enum QueryCmd {
+pub(crate) enum QueryCmd {
     /// What the map holds.
     Status,
     /// Symbols whose names match some words, best first.
@@ -475,6 +601,9 @@ enum QueryCmd {
         #[arg(default_value = "")]
         target: String,
     },
+    /// Every component with its owners, labels, what it uses and what uses it; the links,
+    /// events, contracts and rules (schemas/map-overview.schema.json).
+    Overview,
     /// Changes in meaning between a commit and the worktree as it is now.
     Check {
         /// The commit to compare with.
@@ -508,6 +637,17 @@ impl From<ChangeArg> for onus_index::Change {
 }
 
 impl QueryCmd {
+    /// The question for a map without a worktree (a file, or the one Onus Cloud keeps).
+    pub(crate) fn query(self) -> Result<onus_index::Query> {
+        match self.op() {
+            onus_cli::daemon::Op::Query { query } => Ok(query),
+            onus_cli::daemon::Op::Check { .. } => {
+                bail!("`check` needs a worktree: use onus query")
+            }
+            _ => bail!("`stats` needs a worktree: use onus query"),
+        }
+    }
+
     fn op(self) -> onus_cli::daemon::Op {
         use onus_cli::daemon::Op;
         use onus_index::Query;
@@ -551,6 +691,7 @@ impl QueryCmd {
                 limit,
             }),
             QueryCmd::Invariants { target } => q(Query::Invariants { target }),
+            QueryCmd::Overview => q(Query::Overview),
             QueryCmd::Check { base } => Op::Check { base: Some(base) },
             QueryCmd::Stats => Op::Stats,
         }
@@ -572,13 +713,27 @@ fn backend(root: &std::path::Path, no_server: bool) -> std::sync::Arc<dyn onus_c
 mod agent;
 mod ci;
 mod cloud_cmd;
+mod cloud_doors;
 mod doors;
 mod envs;
 mod lanes;
+mod provenance;
 mod records;
+mod signals;
 mod ui;
 
+/// Stack for the thread that runs a command, and for the MCP server's workers. Windows
+/// gives the main thread 1 MiB, and an MCP call through the door needs more than that.
+const STACK: usize = 16 * 1024 * 1024;
+
 fn main() -> ExitCode {
+    match std::thread::Builder::new().stack_size(STACK).spawn(command) {
+        Ok(thread) => thread.join().unwrap_or(ExitCode::from(EXIT_ERROR as u8)),
+        Err(_) => command(),
+    }
+}
+
+fn command() -> ExitCode {
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(e) => {
@@ -618,6 +773,7 @@ fn run(cli: Cli) -> Result<i32> {
             config,
             scip,
             traces,
+            coverage,
             providers,
         } => {
             if !dir.is_dir() {
@@ -630,10 +786,28 @@ fn run(cli: Cli) -> Result<i32> {
             let mut map = onus_cli::build_with(&dir, cfg, None, &providers.load()?, &scip)?;
             if !traces.is_empty() {
                 let stats = onus_cli::add_traces(&mut map, &traces)?;
+                // Spans read from OTLP, and calls kept in the records.
+                let read = match (stats.spans, stats.calls) {
+                    (0, c) if c > 0 => format!("{c} recorded calls"),
+                    (s, 0) => format!("{s} spans, {} resolved", stats.resolved),
+                    (s, c) => format!("{s} spans, {} resolved, {c} recorded calls", stats.resolved),
+                };
                 eprintln!(
-                    "onus: traces: {} spans, {} resolved, {} traced calls added, {} confirmed",
-                    stats.spans, stats.resolved, stats.edges_added, stats.edges_confirmed
+                    "onus: traces: {read}, {} traced calls added, {} confirmed{}",
+                    stats.edges_added,
+                    stats.edges_confirmed,
+                    if stats.edges_upgraded > 0 {
+                        format!(", {} upgraded", stats.edges_upgraded)
+                    } else {
+                        String::new()
+                    }
                 );
+            }
+            if !coverage.is_empty() {
+                let inputs =
+                    onus_map::coverage::read_inputs(&coverage).map_err(anyhow::Error::msg)?;
+                let stats = onus_cli::add_coverage(&mut map, &inputs)?;
+                eprintln!("onus: coverage: {}", stats.summary());
             }
             if json {
                 println!("{}", serde_json::to_string_pretty(&map)?);
@@ -653,6 +827,7 @@ fn run(cli: Cli) -> Result<i32> {
             base_scip,
             head_scip,
             traces,
+            coverage,
             providers,
         } => {
             let opts = DiffOptions {
@@ -669,6 +844,7 @@ fn run(cli: Cli) -> Result<i32> {
                 changed_paths: None,
                 complete_base: None,
                 traces,
+                coverage: onus_map::coverage::read_inputs(&coverage).map_err(anyhow::Error::msg)?,
             };
             let outcome = onus_cli::diff_dirs(&base, &head, &opts)?;
             for note in &outcome.notes {
@@ -697,7 +873,12 @@ fn run(cli: Cli) -> Result<i32> {
             base_scip,
             head_scip,
             traces,
+            coverage,
+            evidence,
             cache_dir,
+            head_map_out,
+            behavior,
+            behavior_budget,
             providers,
         } => {
             let providers = providers.load()?;
@@ -709,12 +890,27 @@ fn run(cli: Cli) -> Result<i32> {
                 cache_dir.is_some(),
             )?);
             let (b, h) = (&pair.base, &pair.head);
+            let mut coverage =
+                onus_map::coverage::read_inputs(&coverage).map_err(anyhow::Error::msg)?;
+            let runs = evidence
+                .iter()
+                .map(|p| {
+                    serde_json::from_str(&std::fs::read_to_string(p)?).with_context(|| {
+                        format!("{} is not a test run from onus env run", p.display())
+                    })
+                })
+                .collect::<Result<Vec<onus_doors::runner::TestRun>>>()?;
+            let (recorded, notes) = onus_cli::recorded_coverage(&repo, &h.sha, &runs)?;
+            for note in notes {
+                eprintln!("onus: {note}");
+            }
+            coverage.extend(recorded);
             let completer = {
                 let pair = pair.clone();
                 onus_cli::BaseCompleter(std::sync::Arc::new(move || pair.complete_base()))
             };
             let opts = DiffOptions {
-                config,
+                config: config.clone(),
                 intent: intent(intent_path.as_ref())?,
                 base_label: onus_cli::ref_label(&base, &b.sha),
                 head_label: onus_cli::ref_label(&head, &h.sha),
@@ -727,10 +923,37 @@ fn run(cli: Cli) -> Result<i32> {
                 changed_paths: Some(pair.changed.clone()),
                 complete_base: Some(completer),
                 traces,
+                coverage,
             };
-            let outcome = onus_cli::diff_dirs(b.dir.path(), h.dir.path(), &opts)?;
+            let mut outcome = onus_cli::diff_dirs(b.dir.path(), h.dir.path(), &opts)?;
             for note in &outcome.notes {
                 eprintln!("onus: {note}");
+            }
+            if behavior {
+                // The config the diff used: the base tree's, or --config.
+                let loaded = onus_cli::diff_config(b.dir.path(), config.as_deref())?;
+                let block = onus_cli::behavior::run(&onus_cli::behavior::Input {
+                    repo: &repo,
+                    base_sha: &b.sha,
+                    head_sha: &h.sha,
+                    pair: &pair,
+                    config: loaded.as_ref(),
+                    base_map: &outcome.base_map,
+                    head_map: &outcome.head_map,
+                    budget_override: behavior_budget,
+                });
+                onus_diff::behavior::apply(
+                    &mut outcome.report,
+                    block.rows,
+                    block.run,
+                    &outcome.head_map,
+                    loaded.as_ref().map(|l| &l.config),
+                );
+                eprintln!("onus: behavior: {}", block.note);
+            }
+            if let Some(path) = &head_map_out {
+                std::fs::write(path, serde_json::to_string(&outcome.head_map)?)
+                    .with_context(|| format!("cannot write {}", path.display()))?;
             }
             if let Some(path) = &markdown_out {
                 std::fs::write(path, outcome.render(Format::Md))
@@ -769,7 +992,11 @@ fn run(cli: Cli) -> Result<i32> {
         Cmd::Submit(args) => lanes::submit(args),
         Cmd::Classify(args) => lanes::classify_cmd(args),
         Cmd::Judge(args) => lanes::judge_cmd(args),
+        Cmd::HeldOut { cmd } => lanes::held_out_cmd(cmd),
         Cmd::Outcomes { cmd } => lanes::outcomes_cmd(cmd),
+        Cmd::Lanes { cmd } => lanes::lanes_cmd(cmd),
+        Cmd::Provenance(args) => provenance::run(args),
+        Cmd::Signals { cmd } => signals::run(cmd),
         Cmd::Escalation { cmd } => doors::escalation(cmd),
         Cmd::RunTest(args) => doors::run_test(args),
         Cmd::Env { cmd } => envs::env_cmd(cmd),
@@ -788,39 +1015,103 @@ fn run(cli: Cli) -> Result<i32> {
             token,
             key_public,
             no_actions,
+            audit,
+            key,
+            trusted_repo,
+            cloud_token,
+            cloud_repo,
+            cloud_ttl,
+            held_out,
         } => {
             let root = onus_cli::daemon::worktree_root(&repo);
+            let canonical = onus_cli::daemon::canonical(&root).unwrap_or_else(|_| root.clone());
+            // Checked now, so a suite inside the worktree fails at start.
+            lanes::load_held_out(held_out.as_deref(), &canonical)?;
+            if let Some(k) = &key {
+                // Read now, so a wrong path fails at start rather than at a grant.
+                onus_doors::token::RootKey::from_hex(&doors::read_key(k)?)?;
+            }
+            let trusted_repo = match trusted_repo {
+                Some(t) => {
+                    let t = onus_cli::daemon::canonical(&t)
+                        .with_context(|| format!("no checkout at {}", t.display()))?;
+                    if t.starts_with(&canonical) {
+                        bail!(
+                            "--trusted-repo is inside the agent's worktree, which it can edit: give a checkout outside it"
+                        );
+                    }
+                    Some(t)
+                }
+                None => None,
+            };
+            let cloud_ttl = onus_cli::cloud::parse_ttl(&cloud_ttl)?;
+            // One log for the door and for `onus ui`'s audit page.
+            let audit = audit.unwrap_or_else(|| canonical.join(".onus").join("audit.jsonl"));
+            let public = match &key_public {
+                Some(k) => Some(onus_doors::token::public_key(&doors::read_key(k)?)?),
+                None => None,
+            };
+            let door = std::sync::Arc::new(
+                onus_cli::door::Door::new(canonical.clone(), audit.clone(), public, token)?
+                    .with_repository(cloud_repo.clone()),
+            );
+            // Every Onus Cloud call goes through one door: a login is narrowed to a scoped
+            // token for this repository and task; a token or an API key is used as it is.
+            let cloud_door = if no_actions {
+                None
+            } else {
+                let given = cloud_token.clone();
+                onus_cli::cloud::Client::discover_from(
+                    &|k| match k {
+                        "ONUS_CLOUD_TOKEN" => given.clone(),
+                        _ => std::env::var(k).ok(),
+                    },
+                    &onus_cli::cloud::load_credentials,
+                )
+                .ok()
+                .flatten()
+                .map(|client| {
+                    let repository =
+                        cloud_repo.or_else(|| onus_cli::cloud::repository_of(&canonical));
+                    std::sync::Arc::new(onus_cli::cloud::CloudDoor::new(
+                        client,
+                        onus_cli::cloud::Narrow {
+                            repositories: Some(repository.into_iter().collect()),
+                            scopes: onus_cli::cloud::AGENT_SCOPES
+                                .iter()
+                                .map(|s| s.to_string())
+                                .collect(),
+                            ttl_seconds: cloud_ttl,
+                            label: Some(door.task().unwrap_or_else(|| "onus mcp".into())),
+                        },
+                    ))
+                })
+            };
+            // The Onus Cloud tools, when this process is signed in (and may act).
+            let cloud = cloud_door.is_some();
             let actions: Option<std::sync::Arc<dyn onus_cli::mcp::Actions>> = if no_actions {
                 None
             } else {
                 Some(std::sync::Arc::new(agent::AgentActions {
                     state: ui::State::new(
-                        onus_cli::daemon::canonical(&root).unwrap_or_else(|_| root.clone()),
+                        canonical,
                         String::new(),
                         0,
                         ui::Places {
+                            audit: Some(audit),
                             public_key: key_public.clone(),
+                            held_out,
                             ..Default::default()
                         },
                     ),
-                    token: token.clone(),
+                    door: door.clone(),
+                    key,
+                    trusted: trusted_repo,
+                    cloud: cloud_door,
                 }))
             };
-            let read_scope = match (token, key_public) {
-                (Some(t), Some(k)) => {
-                    let key = std::fs::read_to_string(&k)
-                        .with_context(|| format!("cannot read {}", k.display()))?;
-                    let verified =
-                        onus_doors::token::verify(&t, &onus_doors::token::public_key(&key)?)?;
-                    Some(std::sync::Arc::new(onus_cli::mcp::ReadScope::new(verified)))
-                }
-                _ => None,
-            };
-            // The Onus Cloud tools, when this process is signed in (and may act).
-            let cloud =
-                actions.is_some() && matches!(onus_cli::cloud::Client::discover(), Ok(Some(_)));
             let tools = onus_cli::mcp::Tools {
-                read_scope,
+                door: Some(door),
                 actions,
                 cloud,
             };
@@ -839,8 +1130,27 @@ fn run(cli: Cli) -> Result<i32> {
         }
         Cmd::Query {
             question,
+            map: Some(file),
+            ..
+        } => {
+            let onus_cli::daemon::Op::Query { query } = question.op() else {
+                bail!("`check` and `stats` need a worktree; leave out --map");
+            };
+            let index = onus_cli::index_from_map_file(&file)?;
+            let result = index.answer(&query).map_err(anyhow::Error::msg)?;
+            let map = index.map();
+            let body = serde_json::json!({
+                "result": result,
+                "map": { "commit": map.commit, "onus": map.built_with.onus, "source": "file" },
+            });
+            println!("{}", serde_json::to_string_pretty(&body)?);
+            Ok(0)
+        }
+        Cmd::Query {
+            question,
             repo,
             no_server,
+            map: None,
         } => {
             let root = onus_cli::daemon::worktree_root(&repo);
             let req = onus_cli::daemon::Request {
@@ -868,7 +1178,8 @@ fn run(cli: Cli) -> Result<i32> {
             }
         }
         Cmd::Schema { out } => {
-            let schemas = onus_core::schema::all_schemas();
+            let mut schemas = onus_core::schema::all_schemas();
+            schemas.push(onus_index::overview_schema());
             match out {
                 Some(dir) => {
                     std::fs::create_dir_all(&dir)?;
@@ -972,6 +1283,21 @@ fn map_summary(map: &onus_core::CodebaseMap) -> String {
             e.category,
             e.egress.join(", ")
         );
+    }
+    if let Some(c) = &map.coverage {
+        let (ran, lines) = c.files.iter().fold((0, 0), |(r, l), f| {
+            let (covered, executable) = f.lines();
+            (r + covered.len(), l + executable.len())
+        });
+        let _ = writeln!(
+            out,
+            "  coverage: {} files, {ran} of {lines} lines ran, {} test links",
+            c.files.len(),
+            c.links.len()
+        );
+        for n in &c.notes {
+            let _ = writeln!(out, "  note: {n}");
+        }
     }
     for d in &map.diagnostics {
         let _ = writeln!(

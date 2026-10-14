@@ -14,7 +14,7 @@ expression: md
 <details><summary>Evidence per row (files and lines)</summary>
 
 1. **`billing` reaches into `notifications` internals (`renderTemplate`)**
-   - kind `breaking` / `rule-violation` · confidence `static` · labels payments · 1 dependent file · rules of the game
+   - kind `breaking` / `rule-violation` · confidence `static` · labels payments · 1 dependent file · untested · rules of the game
    - `services/billing/src/receipts.ts` lines 2, 8
 
 </details>

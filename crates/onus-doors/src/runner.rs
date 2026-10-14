@@ -4,10 +4,13 @@
 //! no network, no capabilities and bounded resources. The commit's files are
 //! copied into the container, never mounted from the host. An optional setup
 //! step (installing dependencies) runs first, in its own container, with
-//! network; the test itself never has it.
+//! network; the test itself never has it. A run may be given a time limit,
+//! after which its container is removed.
 
+use std::io::{Read, Write};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -51,6 +54,14 @@ pub fn engine() -> Result<String> {
     bail!("no container engine (docker or podman) is running; the test runner needs one")
 }
 
+/// How a run with a time limit ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ran {
+    Done(TestRun),
+    /// The limit passed first; the container was removed.
+    TimedOut,
+}
+
 /// Runs `command` (a shell command line) at `reference` of `repo` in
 /// `image`. `setup`, when given, runs first with network.
 pub fn run(
@@ -60,93 +71,190 @@ pub fn run(
     setup: Option<&str>,
     command: &str,
 ) -> Result<TestRun> {
+    run_with(repo, reference, image, setup, command, None)
+}
+
+/// [`run`], with `extra` (a directory) copied into the test container at
+/// `/held-out`. It is never copied into the setup container, which has network.
+pub fn run_with(
+    repo: &Path,
+    reference: &str,
+    image: &str,
+    setup: Option<&str>,
+    command: &str,
+    extra: Option<&Path>,
+) -> Result<TestRun> {
+    match run_inner(repo, reference, image, setup, command, extra, None)? {
+        Ran::Done(run) => Ok(run),
+        Ran::TimedOut => bail!("the run timed out"),
+    }
+}
+
+/// [`run`], stopped when `limit` passes first. The limit covers every step
+/// in the engine: pulling the image, copying the tree in, the setup and the
+/// command.
+pub fn run_within(
+    repo: &Path,
+    reference: &str,
+    image: &str,
+    setup: Option<&str>,
+    command: &str,
+    limit: Option<Duration>,
+) -> Result<Ran> {
+    run_inner(repo, reference, image, setup, command, None, limit)
+}
+
+fn run_inner(
+    repo: &Path,
+    reference: &str,
+    image: &str,
+    setup: Option<&str>,
+    command: &str,
+    extra: Option<&Path>,
+    limit: Option<Duration>,
+) -> Result<Ran> {
+    let deadline = limit.map(|l| Instant::now() + l);
     let engine = engine()?;
     let (commit, work) = checkout(repo, reference)?;
+    // Containers and the setup's image are named, so a step stopped part way
+    // leaves nothing behind once they are removed by name.
+    static RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let unique = format!("{}-{}-{n}", &commit[..12], std::process::id());
+    let name = format!("onus-run-{unique}");
+    let tag = format!("onus-run:{unique}");
+    let remove = |args: &[&str]| {
+        let _ = Command::new(&engine).args(args).output();
+    };
+    // The engine may still finish a step whose client was stopped (a large
+    // commit, say), so after a timeout what it would leave is removed again
+    // a moment later.
+    let sweep = |what: &[&[&str]]| {
+        for wait in [0, 1, 2] {
+            std::thread::sleep(Duration::from_secs(wait));
+            for args in what {
+                remove(args);
+            }
+        }
+    };
+    // `None` when the deadline passed first.
+    let engine_run = |args: &[&str], input: Option<Vec<u8>>| -> Result<Option<Output>> {
+        let mut c = Command::new(&engine);
+        c.args(args);
+        output_until(&mut c, input, deadline).with_context(|| format!("cannot run {engine}"))
+    };
     // The tree is copied in rather than mounted, so it reaches engines that
     // run in a VM (colima, podman machine) or on another host.
-    let create = |image: &str, network: bool, script: &str| -> Result<String> {
-        let mut c = Command::new(&engine);
-        c.args(["create", "-w", "/work"])
-            .args(["--cap-drop", "ALL", "--security-opt", "no-new-privileges"])
-            .args(["--memory", "4g", "--cpus", "2", "--pids-limit", "1024"]);
+    let create = |id: &str, image: &str, network: bool, script: &str| -> Result<Option<()>> {
+        let mut args = vec!["create", "--name", id, "-w", "/work"];
+        args.extend(["--cap-drop", "ALL", "--security-opt", "no-new-privileges"]);
+        args.extend(["--memory", "4g", "--cpus", "2", "--pids-limit", "1024"]);
         if !network {
-            c.args(["--network", "none"]);
+            args.extend(["--network", "none"]);
         }
-        let out = c
-            .args(["--entrypoint", "sh", image, "-c", script])
-            .output()
-            .context("cannot create a container")?;
+        args.extend(["--entrypoint", "sh", image, "-c", script]);
+        let Some(out) = engine_run(&args, None)? else {
+            return Ok(None);
+        };
         if !out.status.success() {
             bail!(
                 "cannot create a container: {}",
                 String::from_utf8_lossy(&out.stderr).trim()
             );
         }
-        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        Ok(Some(()))
     };
-    let remove = |args: &[&str]| {
-        let _ = Command::new(&engine).args(args).output();
-    };
-    let start = |id: &str| -> Result<std::process::Output> {
-        Command::new(&engine)
-            .args(["start", "-a", id])
-            .output()
-            .context("cannot start the container")
-    };
-    let tree = || -> Result<RootTar> {
+    // The tree (unless the image has it) and `extra` at /held-out, in one
+    // archive; nothing when there is neither.
+    let copy = |id: &str, with_tree: bool, extra: Option<&Path>| -> Result<Option<()>> {
+        if !with_tree && extra.is_none() {
+            return Ok(Some(()));
+        }
         let mut tar = RootTar::new();
-        tar.tree(work.path(), "work")?;
-        Ok(tar)
+        if with_tree {
+            tar.tree(work.path(), "work")?;
+        }
+        if let Some(dir) = extra {
+            tar.tree_without_git(dir, "held-out")?;
+        }
+        copy_until(&engine, id, tar, deadline)
+    };
+    // Creates the container, copies the tree in unless `image` has it, and
+    // runs it to the end. Stopping `start -a` leaves the container running;
+    // removing it stops what runs in it.
+    let in_container = |id: &str,
+                        image: &str,
+                        network: bool,
+                        script: &str,
+                        with_tree: bool,
+                        extra: Option<&Path>|
+     -> Result<Option<Output>> {
+        if create(id, image, network, script)?.is_none() {
+            return Ok(None);
+        }
+        if copy(id, with_tree, extra)?.is_none() {
+            return Ok(None);
+        }
+        engine_run(&["start", "-a", id], None)
     };
     // Setup runs with network in its own container, kept as an image the
     // test starts from.
     let mut test_image = image.to_string();
     let mut temp_image = None;
     if let Some(setup) = setup {
-        let id = create(image, true, setup)?;
-        let done = copy_in(&engine, &id, tree()?).and_then(|()| start(&id));
-        let tag = format!("onus-run:{}-{}", &commit[..12], std::process::id());
+        let id = format!("{name}-setup");
+        // Never `extra`: the setup has network.
+        let done = in_container(&id, image, true, setup, true, None);
         let committed = match done {
-            Ok(out) if out.status.success() => Command::new(&engine)
-                .args(["commit", &id, &tag])
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false),
-            Ok(out) => {
+            Ok(Some(out)) if out.status.success() => {
+                engine_run(&["commit", &id, &tag], None).map(|o| o.map(|o| o.status.success()))
+            }
+            Ok(Some(out)) => {
                 remove(&["rm", "-f", &id]);
                 let mut text = String::from_utf8_lossy(&out.stdout).to_string();
                 text.push_str(&String::from_utf8_lossy(&out.stderr));
                 bail!("the setup step failed: {}", tail(&text, 20));
             }
-            Err(e) => {
-                remove(&["rm", "-f", &id]);
-                return Err(e);
-            }
+            other => other.map(|_| None),
         };
         remove(&["rm", "-f", &id]);
-        if !committed {
-            bail!("cannot keep the setup step's result");
+        match committed {
+            Ok(Some(true)) => {}
+            Ok(Some(false)) => bail!("cannot keep the setup step's result"),
+            Ok(None) => {
+                sweep(&[&["rm", "-f", &id], &["rmi", "-f", &tag]]);
+                return Ok(Ran::TimedOut);
+            }
+            Err(e) => {
+                remove(&["rmi", "-f", &tag]);
+                return Err(e);
+            }
         }
         test_image = tag.clone();
         temp_image = Some(tag);
     }
-    let result = (|| -> Result<std::process::Output> {
-        let id = create(&test_image, false, command)?;
-        let out = if temp_image.is_none() {
-            copy_in(&engine, &id, tree()?).and_then(|()| start(&id))
-        } else {
-            start(&id)
-        };
-        remove(&["rm", "-f", &id]);
-        out
-    })();
+    let result = in_container(
+        &name,
+        &test_image,
+        false,
+        command,
+        temp_image.is_none(),
+        extra,
+    );
+    remove(&["rm", "-f", &name]);
     if let Some(tag) = &temp_image {
         remove(&["rmi", "-f", tag]);
     }
-    let out = result?;
+    let Some(out) = result? else {
+        match &temp_image {
+            Some(tag) => sweep(&[&["rm", "-f", &name], &["rmi", "-f", tag]]),
+            None => sweep(&[&["rm", "-f", &name]]),
+        }
+        return Ok(Ran::TimedOut);
+    };
     let mut text = String::from_utf8_lossy(&out.stdout).to_string();
     text.push_str(&String::from_utf8_lossy(&out.stderr));
-    Ok(TestRun {
+    Ok(Ran::Done(TestRun {
         commit,
         image: image.to_string(),
         setup: setup.map(str::to_string),
@@ -154,7 +262,66 @@ pub fn run(
         exit_code: out.status.code().unwrap_or(-1),
         output_tail: tail(&text, 40),
         manifest: None,
-    })
+    }))
+}
+
+/// Runs `c` to the end with `input` on its stdin, and collects its output;
+/// `None`, with the process killed, when `deadline` passes first.
+pub fn output_until(
+    c: &mut Command,
+    input: Option<Vec<u8>>,
+    deadline: Option<Instant>,
+) -> std::io::Result<Option<Output>> {
+    let mut child = c
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    // Fed and drained on their own threads, so a full pipe never blocks
+    // the wait.
+    let feed = child.stdin.take().map(|mut pipe| {
+        let bytes = input.unwrap_or_default();
+        std::thread::spawn(move || {
+            let _ = pipe.write_all(&bytes);
+        })
+    });
+    let drain = |pipe: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(mut p) = pipe {
+                let _ = p.read_to_end(&mut bytes);
+            }
+            bytes
+        })
+    };
+    let stdout = drain(child.stdout.take().map(|p| Box::new(p) as _));
+    let stderr = drain(child.stderr.take().map(|p| Box::new(p) as _));
+    let status = match deadline {
+        None => child.wait()?,
+        Some(deadline) => loop {
+            if let Some(status) = child.try_wait()? {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Ok(None);
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        },
+    };
+    if let Some(feed) = feed {
+        let _ = feed.join();
+    }
+    Ok(Some(Output {
+        status,
+        stdout: stdout.join().unwrap_or_default(),
+        stderr: stderr.join().unwrap_or_default(),
+    }))
 }
 
 /// A tar archive whose entries belong to root: copied into a container
@@ -193,12 +360,27 @@ impl RootTar {
     /// relative to `dir`, sorted.
     pub fn tree(&mut self, dir: &Path, prefix: &str) -> Result<Vec<String>> {
         let mut files = Vec::new();
-        self.walk(dir, prefix, "", &mut files)?;
+        self.walk(dir, prefix, "", false, &mut files)?;
         files.sort();
         Ok(files)
     }
 
-    fn walk(&mut self, dir: &Path, prefix: &str, rel: &str, files: &mut Vec<String>) -> Result<()> {
+    /// [`RootTar::tree`], leaving out `.git` directories.
+    pub fn tree_without_git(&mut self, dir: &Path, prefix: &str) -> Result<Vec<String>> {
+        let mut files = Vec::new();
+        self.walk(dir, prefix, "", true, &mut files)?;
+        files.sort();
+        Ok(files)
+    }
+
+    fn walk(
+        &mut self,
+        dir: &Path,
+        prefix: &str,
+        rel: &str,
+        skip_git: bool,
+        files: &mut Vec<String>,
+    ) -> Result<()> {
         let mut h = Self::header(&std::fs::symlink_metadata(dir)?)?;
         let at = if rel.is_empty() {
             prefix.to_string()
@@ -217,7 +399,9 @@ impl RootTar {
             };
             let meta = std::fs::symlink_metadata(e.path())?;
             if meta.is_dir() {
-                self.walk(&e.path(), prefix, &path, files)?;
+                if !(skip_git && e.file_name() == ".git") {
+                    self.walk(&e.path(), prefix, &path, skip_git, files)?;
+                }
                 continue;
             }
             let mut h = Self::header(&meta)?;
@@ -248,27 +432,31 @@ impl RootTar {
 
 /// Extracts the archive at the container's root.
 pub fn copy_in(engine: &str, container: &str, tar: RootTar) -> Result<()> {
+    copy_until(engine, container, tar, None).map(|_| ())
+}
+
+/// [`copy_in`]; `None` when `deadline` passes first.
+fn copy_until(
+    engine: &str,
+    container: &str,
+    tar: RootTar,
+    deadline: Option<Instant>,
+) -> Result<Option<()>> {
     let bytes = tar.0.into_inner()?;
-    let mut child = Command::new(engine)
-        .args(["cp", "-", &format!("{container}:/")])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .with_context(|| format!("cannot run {engine}"))?;
-    {
-        use std::io::Write;
-        let mut stdin = child.stdin.take().context("no stdin")?;
-        stdin.write_all(&bytes)?;
-    }
-    let out = child.wait_with_output()?;
+    let mut c = Command::new(engine);
+    c.args(["cp", "-", &format!("{container}:/")]);
+    let Some(out) = output_until(&mut c, Some(bytes), deadline)
+        .with_context(|| format!("cannot run {engine}"))?
+    else {
+        return Ok(None);
+    };
     if !out.status.success() {
         bail!(
             "{engine} cp failed: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
-    Ok(())
+    Ok(Some(()))
 }
 
 /// The commit `reference` names, and its tree unpacked into a temporary

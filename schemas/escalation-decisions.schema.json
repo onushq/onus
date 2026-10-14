@@ -1,0 +1,242 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "EscalationDecisions",
+  "description": "Escalations as Onus Cloud keeps them, with their decisions: the input of `onus provenance --escalations FILE` and `onus ci pr --escalations FILE`. Also read: the API's `{\"escalations\": [...]}`, a stored row's `status` (for `state`) and `input: {scopes, reason}`, and a view's nested `decision: {by: {id, name}, at, answer}`.",
+  "type": "array",
+  "items": {
+    "$ref": "#/$defs/EscalationDecision"
+  },
+  "$defs": {
+    "CloudState": {
+      "description": "Where an escalation is in Onus Cloud.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "granted",
+            "denied",
+            "withdrawn",
+            "expired",
+            "failed"
+          ]
+        },
+        {
+          "description": "Being checked.",
+          "type": "string",
+          "const": "assessing"
+        },
+        {
+          "description": "Waiting for a person.",
+          "type": "string",
+          "const": "waiting"
+        },
+        {
+          "description": "A blocked report a person answered.",
+          "type": "string",
+          "const": "resolved"
+        }
+      ]
+    },
+    "EscalationDecision": {
+      "description": "One escalation as Onus Cloud keeps it, with its decision: the input of\n`onus provenance --escalations FILE` and `onus ci pr --escalations FILE`,\nwhich take a JSON array of these.",
+      "type": "object",
+      "properties": {
+        "answer": {
+          "description": "Why it was decided so: a denial's reason, or the answer to a blocked\nreport. The record keeps it as `reason`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "bestGrade": {
+          "description": "The strongest evidence grade (1 is strongest).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        },
+        "clientRequestId": {
+          "description": "The door's own request id (`.onus/escalations/<id>.json`), which a\nsubmission lists once it is granted.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "commit": {
+          "description": "The commit Onus Cloud resolved `ref` to.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "decidedAt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Moment"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "decidedBy": {
+          "description": "`system:policy` for an automatic grant, else the person (`user:<id>`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "decidedByName": {
+          "description": "The person's name, shown instead of `decidedBy`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expiresAt": {
+          "description": "When a waiting escalation expires: a stored row past it is\n`expired`, as Onus Cloud shows it.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Moment"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "id": {
+          "description": "Onus Cloud's id for it.",
+          "type": "string"
+        },
+        "kind": {
+          "description": "`permission`, `broken-test`, `contradictory-spec` or `impossible-task`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pull": {
+          "description": "The pull request number; one for another pull request is left out.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "reason": {
+          "description": "Why the agent asked. Read, but not kept: the record's `reason` is\nthe decider's, from `answer`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ref": {
+          "description": "What the door filed it at: the commit it had pushed, a branch, or\n`refs/pull/<n>/head`. With no pull request, it ties the escalation\nto the change whose commit, branch or pull request it names.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "repository": {
+          "description": "The repository (`owner/repo`); one for another repository is left out.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requestId": {
+          "description": "The request id `onus escalation assess` gave it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scopes": {
+          "description": "The rights asked for.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "state": {
+          "$ref": "#/$defs/CloudState"
+        },
+        "task": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "token": {
+          "description": "The door's inspection of the task token it filed under; never the\ntoken.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TokenInspection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "state"
+      ]
+    },
+    "Moment": {
+      "description": "A time: Unix seconds, or an RFC 3339 date in UTC\n(`2026-10-12T10:00:00Z`, `Z` or `+00:00`).",
+      "anyOf": [
+        {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}(:\\d{2}(\\.\\d+)?)?(Z|\\+00:00)$"
+        }
+      ]
+    },
+    "TokenInspection": {
+      "description": "What a door says its task token holds: never the token itself. The door\nsends one with each escalation it files in Onus Cloud, and `onus token\ninspect` prints one.",
+      "type": "object",
+      "properties": {
+        "attenuations": {
+          "description": "Attenuations, as Datalog.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "expires": {
+          "description": "Unix seconds. 0, as `onus token inspect` prints it, is none, and so\nis a negative or fractional number.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "rights": {
+          "description": "The token's rights (`write:path:…`).",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "task": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "task"
+      ]
+    }
+  }
+}

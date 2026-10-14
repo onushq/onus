@@ -1,0 +1,135 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DoorLogSlice",
+  "description": "A task's slice of its door log (audit.jsonl): the run of entries from\nthe task's first to its last, whatever lies between, so its hash chain\ncan be checked where it is read. `onus cloud evidence --door-log` and\n`onus_cloud_attach_evidence` attach one to a pull request, and `onus ci\npr --audit` and `onus provenance --audit` read it. Each hash is over the\nentry's JSON as the door wrote it: keep the slice as it was sent (its\ntext), since a number written again another way (1.0 as 1, an integer\npast 2^53) no longer verifies.",
+  "type": "object",
+  "properties": {
+    "at": {
+      "description": "When it was cut (Unix seconds).",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "entries": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/DoorLogEntry"
+      }
+    },
+    "head": {
+      "description": "The worktree's commit when it was cut.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "inspection": {
+      "description": "The door's inspection of the token it held for the task, when the\ndoor that cut the slice holds one (`onus mcp --token`); never the\ntoken. Outside the chain.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TokenInspection"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "task": {
+      "description": "The task whose slice it is.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "task",
+    "at",
+    "entries"
+  ],
+  "$defs": {
+    "DoorLogEntry": {
+      "description": "One entry of a door log, as the log holds it.",
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "actor": {
+          "type": "string"
+        },
+        "at": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "decision": {
+          "type": "string"
+        },
+        "details": true,
+        "hash": {
+          "description": "sha256 of the entry's JSON with `hash` empty.",
+          "type": "string"
+        },
+        "prev": {
+          "description": "The hash of the entry before it.",
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "seq": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "subject": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "seq",
+        "at",
+        "actor",
+        "action",
+        "subject",
+        "decision",
+        "reason",
+        "prev",
+        "hash"
+      ]
+    },
+    "TokenInspection": {
+      "description": "What a door says its task token holds: never the token itself. The door\nsends one with each escalation it files in Onus Cloud, and `onus token\ninspect` prints one.",
+      "type": "object",
+      "properties": {
+        "attenuations": {
+          "description": "Attenuations, as Datalog.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "expires": {
+          "description": "Unix seconds. 0, as `onus token inspect` prints it, is none, and so\nis a negative or fractional number.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "rights": {
+          "description": "The token's rights (`write:path:…`).",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "task": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "task"
+      ]
+    }
+  }
+}

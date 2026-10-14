@@ -5,10 +5,15 @@ name: Onus
 # records on the onus/records branch: pull requests are classified with
 # their agent's track record, outcomes are recorded when they close, reverts
 # when main moves, and /onus comments record approvals, audits and incidents.
+# A pull request in the human lane fails its check until someone with write
+# access who did not open it approves its head (an owner, once this
+# repository names owners); a review runs the check again.
 
 on:
   pull_request:
     types: [opened, synchronize, reopened, edited, ready_for_review, closed]
+  pull_request_review:
+    types: [submitted, dismissed]
   issue_comment:
     types: [created]
   push:
@@ -17,7 +22,7 @@ on:
 permissions:
   contents: write # the onus/records branch
   pull-requests: write # the comment
-  actions: write # re-running the check after /onus approve
+  actions: write # re-running the check after an approval or /onus approve
 
 jobs:
   report:

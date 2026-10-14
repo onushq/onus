@@ -1,6 +1,7 @@
 //! Phase 3 commands: task tokens, scope suggestions, the git gateway and the
 //! audit log (ADR 0008).
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -368,25 +369,25 @@ impl From<KindArg> for onus_doors::escalation::EscalationKind {
 pub struct EscalateArgs {
     /// The task asking.
     #[arg(long)]
-    task: String,
+    pub(crate) task: String,
     #[arg(long, value_enum, default_value = "permission")]
-    kind: KindArg,
+    pub(crate) kind: KindArg,
     /// A right asked for, such as write:path:services/billing/src/** (repeatable).
     #[arg(long = "scope", value_name = "RIGHT")]
-    scopes: Vec<String>,
+    pub(crate) scopes: Vec<String>,
     /// Evidence, strongest first: failing-test:<file>, trace:<file>, map-path:<path>,
     /// draft-diff:<file>, rationale:<text> (repeatable).
     #[arg(long = "evidence", value_name = "KIND:REF")]
-    evidence: Vec<String>,
+    pub(crate) evidence: Vec<String>,
     /// Why the task needs it.
     #[arg(long)]
-    reason: String,
+    pub(crate) reason: String,
     /// The repository whose map gives the blast radius and labels.
     #[arg(long, default_value = ".", value_name = "DIR")]
-    repo: PathBuf,
+    pub(crate) repo: PathBuf,
     /// Write the request here instead of printing it.
     #[arg(long, value_name = "FILE")]
-    out: Option<PathBuf>,
+    pub(crate) out: Option<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -423,6 +424,34 @@ pub enum EscalationCmd {
         #[arg(long, value_name = "FILE")]
         audit: Option<PathBuf>,
     },
+    /// Apply the policy to a request without minting anything: reproduce failing
+    /// tests at --reproduce-at (with onus.yaml's tests.command and declared
+    /// environment of --repo, a trusted checkout), then say whether policy would
+    /// grant it. Exit 0: it would; 3: a person decides. Nothing is audited.
+    Assess {
+        /// The request (JSON from `onus escalate`).
+        request: PathBuf,
+        /// Reproduce failing-test evidence at this commit of --repo.
+        #[arg(long, value_name = "REF")]
+        reproduce_at: Option<String>,
+        /// The trusted checkout whose onus.yaml gives the test command and environment.
+        #[arg(long, default_value = ".", value_name = "DIR")]
+        repo: PathBuf,
+        /// The container image. Default: onus.yaml's environment image (or the
+        /// devcontainer's), else node:22.
+        #[arg(long)]
+        image: Option<String>,
+        /// A setup command run first, with network. Default: onus.yaml's environment setup.
+        #[arg(long)]
+        setup: Option<String>,
+        /// The test command; `{test}` becomes the failing test's file. Default:
+        /// onus.yaml's tests.command; without one, failing tests are not reproduced.
+        #[arg(long)]
+        test_command: Option<String>,
+        /// The most dependent files an automatic grant may reach.
+        #[arg(long, default_value_t = 20)]
+        max_blast_radius: u32,
+    },
     /// Grant a request as a person: prints the new token.
     Grant {
         request: PathBuf,
@@ -433,6 +462,13 @@ pub enum EscalationCmd {
         /// Who decided.
         #[arg(long)]
         by: String,
+        /// The request that was decided: a file that holds another one is refused.
+        #[arg(long, value_name = "ID")]
+        id: Option<String>,
+        /// A scope that was granted, as Onus Cloud shows it (repeat for each): the
+        /// request must ask for exactly these, or nothing is minted.
+        #[arg(long = "scope", value_name = "RIGHT")]
+        scopes: Vec<String>,
         #[arg(long, value_name = "FILE")]
         audit: Option<PathBuf>,
     },
@@ -495,6 +531,27 @@ pub fn new_request(
     ))
 }
 
+/// `req` again, with its blast radius, sensitive labels and owners from the map and
+/// onus.yaml of `repo`, a trusted checkout: what the agent asked for, with facts the
+/// agent's own worktree cannot weaken.
+pub fn request_at(
+    repo: &Path,
+    req: &onus_doors::escalation::Request,
+) -> Result<onus_doors::escalation::Request> {
+    let (config, labels) = sensitive_labels(repo)?;
+    let map = onus_cli::build(repo, config, None)?;
+    Ok(onus_doors::escalation::Request::new(
+        &req.task,
+        req.kind,
+        req.scopes.clone(),
+        req.evidence.clone(),
+        &req.reason,
+        Some(&map),
+        &labels,
+        req.at,
+    ))
+}
+
 pub fn escalate(args: EscalateArgs) -> Result<i32> {
     let req = new_request(
         &args.repo,
@@ -519,6 +576,104 @@ pub fn escalate(args: EscalateArgs) -> Result<i32> {
         None => println!("{json}"),
     }
     Ok(0)
+}
+
+/// Checks an escalation id: letters, digits, `-`, `_` and `.`, so it names
+/// a file in the escalations folder and nowhere else.
+pub fn check_request_id(id: &str) -> Result<()> {
+    if id.is_empty()
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
+    {
+        bail!("`{id}` is not a request id");
+    }
+    Ok(())
+}
+
+/// Verifies the escalation ids a submission lists: each request exists, is
+/// unchanged since it was filed, is for `task` (when the submission has a
+/// token) and was granted with a root-signed token that holds exactly what
+/// it asked for. Requests are in `dir`; decisions on those not granted are
+/// read from the audit log beside it. Returns the ids, each once.
+pub fn verify_escalations(
+    dir: &Path,
+    ids: &[String],
+    public_key: &Path,
+    task: Option<&str>,
+) -> Result<Vec<String>> {
+    let audit = dir.parent().map(|d| d.join("audit.jsonl"));
+    verify_escalations_with(dir, audit.as_deref(), ids, public_key, task)
+}
+
+/// [`verify_escalations`] with the audit log that holds the decisions.
+pub fn verify_escalations_with(
+    dir: &Path,
+    audit: Option<&Path>,
+    ids: &[String],
+    public_key: &Path,
+    task: Option<&str>,
+) -> Result<Vec<String>> {
+    let root = token::public_key(&read_key(public_key)?)?;
+    let mut out: Vec<String> = Vec::new();
+    for id in ids {
+        if out.contains(id) {
+            continue;
+        }
+        let refuse = |what: String| -> anyhow::Error {
+            anyhow::anyhow!(
+                "{what}; check it with onus_escalation (or onus ui), and submit without it until it is granted"
+            )
+        };
+        if check_request_id(id).is_err() {
+            return Err(refuse(format!("`{id}` is not an escalation id")));
+        }
+        let path = dir.join(format!("{id}.json"));
+        if !path.exists() {
+            return Err(refuse(format!(
+                "there is no escalation `{id}` in {}",
+                dir.display()
+            )));
+        }
+        let req = load_request(&path).map_err(|e| refuse(format!("escalation `{id}`: {e:#}")))?;
+        if let Some(t) = task
+            && req.task != t
+        {
+            return Err(refuse(format!(
+                "escalation `{id}` belongs to task `{}`, not `{t}`",
+                req.task
+            )));
+        }
+        let Ok(granted) = std::fs::read_to_string(path.with_extension("token")) else {
+            let decision = audit
+                .and_then(|log| AuditLog::new(log).verify().ok())
+                .and_then(|entries| {
+                    entries.into_iter().rev().find(|e| {
+                        e.subject == req.id
+                            && matches!(e.action.as_str(), "escalate" | "grant" | "deny" | "answer")
+                    })
+                });
+            let state = match decision {
+                Some(e) if e.action == "deny" => format!("was denied: {}", e.reason),
+                Some(e) if e.decision == "needs-person" => "is waiting for a person".into(),
+                Some(e) if e.decision == "sent-to-onus-cloud" => {
+                    "is waiting for a person in Onus Cloud".into()
+                }
+                Some(e) if e.action == "answer" => {
+                    format!("was answered, not granted: {}", e.reason)
+                }
+                Some(e) if e.decision == "granted" => {
+                    "was granted, but its token is not kept beside the request".into()
+                }
+                _ => "is still open".into(),
+            };
+            return Err(refuse(format!("escalation `{id}` {state}")));
+        };
+        onus_doors::escalation::verify_granted(&req, granted.trim(), &root)
+            .map_err(|why| refuse(format!("escalation `{id}` cannot be used: {why}")))?;
+        out.push(id.clone());
+    }
+    Ok(out)
 }
 
 pub fn load_request(path: &Path) -> Result<onus_doors::escalation::Request> {
@@ -563,27 +718,187 @@ pub struct Reproduce {
     pub test_command: String,
 }
 
+/// How long reproducing a request's failing tests may take in all, image
+/// pulls and setup included. A test still running then is stopped, and one
+/// not started is not run; both count as not reproduced.
+pub const REPRODUCE_LIMIT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// Applies the policy to a request without minting anything: reproduces its
+/// failing tests first (when `reproduce` is given), then decides. Whether a
+/// test reproduced is only ever what this run saw, never what the request
+/// says. A failing test is run only when its reference is a plain path to a
+/// test file that exists at the commit, with a test command that names it
+/// (`{test}`), and only within [`REPRODUCE_LIMIT`]; otherwise it counts as not
+/// reproduced, and a person decides with the reasons saying why.
+pub fn assess_request(
+    req: onus_doors::escalation::Request,
+    reproduce: Option<&Reproduce>,
+    max_blast_radius: u32,
+) -> Result<(
+    onus_doors::escalation::Request,
+    onus_doors::escalation::Decision,
+)> {
+    assess_within(req, reproduce, max_blast_radius, REPRODUCE_LIMIT)
+}
+
+/// [`assess_request`], with its failing tests stopped once `limit` has
+/// passed.
+fn assess_within(
+    mut req: onus_doors::escalation::Request,
+    reproduce: Option<&Reproduce>,
+    max_blast_radius: u32,
+    limit: std::time::Duration,
+) -> Result<(
+    onus_doors::escalation::Request,
+    onus_doors::escalation::Decision,
+)> {
+    use onus_doors::escalation::{Decision, Policy, decide};
+    if req.content_id() != req.id {
+        bail!(
+            "request {} was changed after it was filed; file it again with onus escalate",
+            req.id
+        );
+    }
+    // What the file says a run saw is not believed, on any evidence.
+    for e in &mut req.evidence {
+        e.reproduced = None;
+        e.run = None;
+    }
+    let deadline = std::time::Instant::now() + limit;
+    let mut refused = Vec::new();
+    if let Some(r) = reproduce
+        && req.evidence.iter().any(|e| e.grade == 1)
+    {
+        if r.at.starts_with('-') {
+            bail!("`{}` is not a commit", r.at);
+        }
+        let config = onus_map::config::load_from_tree(&r.repo)?;
+        let tests = onus_map::build::test_globs(config.as_ref().map(|c| &c.config));
+        // Without `{test}` the command runs every test, so any failure would
+        // count as this one's.
+        let names_test = r.test_command.contains("{test}");
+        if !names_test {
+            refused.push(format!(
+                "the test command `{}` has no {{test}}, so it would not run the failing test alone: failing tests are not reproduced",
+                r.test_command
+            ));
+        }
+        for e in req.evidence.iter_mut().filter(|e| e.grade == 1) {
+            if !names_test {
+                e.reproduced = Some(false);
+                continue;
+            }
+            if let Some(why) = refuse_test(&r.repo, &r.at, &e.reference, |p| tests.is_match(p)) {
+                e.reproduced = Some(false);
+                refused.push(why);
+                continue;
+            }
+            let command = r.test_command.replace("{test}", &e.reference);
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                e.reproduced = Some(false);
+                refused.push(format!(
+                    "`{}` was not run: the {} the failing tests may take had passed",
+                    e.reference,
+                    minutes(limit)
+                ));
+                continue;
+            }
+            match onus_doors::runner::run_within(
+                &r.repo,
+                &r.at,
+                &r.image,
+                r.setup.as_deref(),
+                &command,
+                Some(left),
+            )? {
+                onus_doors::runner::Ran::Done(run) => {
+                    e.reproduced = Some(run.failed());
+                    e.run = Some(run);
+                }
+                onus_doors::runner::Ran::TimedOut => {
+                    e.reproduced = Some(false);
+                    refused.push(format!(
+                        "`{}` did not finish within the {} the failing tests may take, so it was stopped",
+                        e.reference,
+                        minutes(limit)
+                    ));
+                }
+            }
+        }
+    }
+    let decision = decide(&req, &Policy { max_blast_radius });
+    if refused.is_empty() {
+        return Ok((req, decision));
+    }
+    // Evidence that could not be run sends the request to a person, even
+    // when another failing test reproduced.
+    let mut reasons = match decision {
+        Decision::NeedsPerson { reasons } => reasons,
+        Decision::Granted { .. } => vec![],
+    };
+    reasons.extend(refused);
+    Ok((req, Decision::NeedsPerson { reasons }))
+}
+
+/// `limit` in words: whole minutes, else seconds.
+fn minutes(limit: std::time::Duration) -> String {
+    let secs = limit.as_secs();
+    if secs >= 60 && secs.is_multiple_of(60) {
+        format!("{} minutes", secs / 60)
+    } else {
+        format!("{secs} seconds")
+    }
+}
+
+/// Why failing-test evidence `reference` is not run at `at` of `repo`: it
+/// is not a plain repository path, is not a file there, or is not a test
+/// file. `None` when it may be run.
+fn refuse_test(
+    repo: &Path,
+    at: &str,
+    reference: &str,
+    is_test: impl Fn(&str) -> bool,
+) -> Option<String> {
+    // It goes into the test command as is, so it must not read as an option.
+    let plain = !reference.is_empty()
+        && !reference.starts_with(['/', '-'])
+        && !reference.split('/').any(|part| part == "..")
+        && reference
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._/@+-".contains(c));
+    if !plain {
+        return Some(format!("`{reference}` is not a path"));
+    }
+    // A file, not a directory that happens to match the test globs.
+    let exists = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["cat-file", "-t", &format!("{at}:{reference}")])
+        .stderr(std::process::Stdio::null())
+        .output()
+        .is_ok_and(|o| o.status.success() && o.stdout.trim_ascii() == b"blob");
+    if !exists {
+        return Some(format!("`{reference}` does not exist at `{at}`"));
+    }
+    if !is_test(reference) {
+        return Some(format!("`{reference}` is not a test file"));
+    }
+    None
+}
+
 /// Decides a request by policy, reproducing failing tests first; a grant
 /// carries the new token.
 pub fn decide_request(
-    mut req: onus_doors::escalation::Request,
+    req: onus_doors::escalation::Request,
     original: &token::Verified,
     key: &Path,
     reproduce: Option<&Reproduce>,
     max_blast_radius: u32,
     audit: Option<&Path>,
 ) -> Result<serde_json::Value> {
-    use onus_doors::escalation::{Decision, Policy, decide, grant};
-    if let Some(r) = reproduce {
-        for e in req.evidence.iter_mut().filter(|e| e.grade == 1) {
-            let command = r.test_command.replace("{test}", &e.reference);
-            let run =
-                onus_doors::runner::run(&r.repo, &r.at, &r.image, r.setup.as_deref(), &command)?;
-            e.reproduced = Some(run.failed());
-            e.run = Some(run);
-        }
-    }
-    let decision = decide(&req, &Policy { max_blast_radius });
+    use onus_doors::escalation::{Decision, grant};
+    let (req, decision) = assess_request(req, reproduce, max_blast_radius)?;
     let (label, reasons, minted) = match &decision {
         Decision::Granted { reasons } => {
             let root = RootKey::from_hex(&read_key(key)?)?;
@@ -616,6 +931,131 @@ pub fn decide_request(
         out["token"] = serde_json::json!(t);
     }
     Ok(out)
+}
+
+/// What `onus escalation assess` prints: the request (with its reproduced
+/// evidence), whether policy would grant it, and why. The test command,
+/// image and setup default to onus.yaml of `repo`, a trusted checkout, so the
+/// agent that filed the request cannot choose what reproduces it.
+pub fn assess(
+    req: onus_doors::escalation::Request,
+    repo: &Path,
+    reproduce_at: Option<String>,
+    image: Option<String>,
+    setup: Option<String>,
+    test_command: Option<String>,
+    max_blast_radius: u32,
+) -> Result<serde_json::Value> {
+    use onus_doors::escalation::Decision;
+    let has_test = req.evidence.iter().any(|e| e.grade == 1);
+    let (reproduce, why_not_run) =
+        trusted_reproduce(repo, reproduce_at, image, setup, test_command, has_test)?;
+    let (req, decision) = assess_request(req, reproduce.as_ref(), max_blast_radius)?;
+    let (label, mut reasons) = match decision {
+        Decision::Granted { reasons } => ("granted", reasons),
+        Decision::NeedsPerson { reasons } => ("needs-person", reasons),
+    };
+    reasons.extend(why_not_run);
+    Ok(serde_json::json!({
+        "request": req,
+        "decision": label,
+        "reasons": reasons,
+        "evidence": req.evidence,
+    }))
+}
+
+/// How failing tests are reproduced at `at` of `repo`, a trusted checkout: with the
+/// test command, image and setup given, else onus.yaml's `tests.command` and declared
+/// environment. `None` with the reason when they are not reproduced.
+pub fn trusted_reproduce(
+    repo: &Path,
+    at: Option<String>,
+    image: Option<String>,
+    setup: Option<String>,
+    test_command: Option<String>,
+    has_test: bool,
+) -> Result<(Option<Reproduce>, Option<String>)> {
+    let config = onus_map::config::load_from_tree(repo)?.map(|c| c.config);
+    let test_command = test_command
+        .or_else(|| config.as_ref().and_then(|c| c.tests.command.clone()))
+        .filter(|c| !c.trim().is_empty());
+    let mut why_not_run = None;
+    let reproduce = match (&at, &test_command) {
+        (Some(at), Some(command)) if has_test => {
+            let environment = config.as_ref().and_then(|c| c.environment.as_ref());
+            let declared = match onus_env::spec::resolve(repo, environment) {
+                Ok(spec) => Some(spec),
+                // Nothing declared: the default image.
+                Err(_) if environment.is_none() && !has_devcontainer(repo) => None,
+                // Declared but unusable: running elsewhere would prove nothing.
+                Err(e) if image.is_none() => {
+                    why_not_run = Some(format!(
+                        "the environment cannot be resolved ({e:#}): failing tests are not reproduced"
+                    ));
+                    None
+                }
+                Err(_) => None,
+            };
+            why_not_run.is_none().then(|| Reproduce {
+                repo: repo.to_path_buf(),
+                at: at.clone(),
+                image: image
+                    .or_else(|| declared.as_ref().map(|d| d.image.clone()))
+                    .unwrap_or_else(|| "node:22".into()),
+                setup: setup.or_else(|| declared.and_then(|d| d.setup)),
+                test_command: command.clone(),
+            })
+        }
+        _ => None,
+    };
+    if test_command.is_none() {
+        why_not_run = Some(
+            "no test command is configured (onus.yaml tests.command): failing tests are not reproduced"
+                .into(),
+        );
+    }
+    Ok((reproduce, why_not_run))
+}
+
+/// Whether `repo` has a devcontainer, which declares an environment as
+/// onus.yaml's `environment:` does.
+fn has_devcontainer(repo: &Path) -> bool {
+    [".devcontainer/devcontainer.json", ".devcontainer.json"]
+        .iter()
+        .any(|p| repo.join(p).is_file())
+}
+
+/// A request is used only as it was filed: under its own id, unchanged since.
+pub fn check_intact(id: &str, req: &onus_doors::escalation::Request) -> Result<()> {
+    if req.id != id || req.content_id() != req.id {
+        bail!(
+            "escalation {id} was changed after it was filed, so it is not what was decided: nothing is minted from it. File it again with onus_escalate"
+        );
+    }
+    Ok(())
+}
+
+/// A grant made elsewhere (in Onus Cloud) must be of exactly the scopes the request
+/// asks for.
+pub fn same_scopes<'a>(
+    req: &onus_doors::escalation::Request,
+    granted: impl IntoIterator<Item = &'a str>,
+) -> Result<()> {
+    let normal = |s: &str| {
+        s.parse::<Right>()
+            .map_or_else(|_| s.to_string(), |r| r.to_string())
+    };
+    let asked: BTreeSet<String> = req.scopes.iter().map(|r| r.to_string()).collect();
+    let granted: BTreeSet<String> = granted.into_iter().map(normal).collect();
+    if granted != asked {
+        bail!(
+            "[{}] was granted, and request {} asks for [{}]: nothing is minted",
+            granted.into_iter().collect::<Vec<_>>().join(", "),
+            req.id,
+            asked.into_iter().collect::<Vec<_>>().join(", ")
+        );
+    }
+    Ok(())
 }
 
 /// Grants a request as a person: the new token.
@@ -699,14 +1139,44 @@ pub fn escalation(cmd: EscalationCmd) -> Result<i32> {
             println!("{}", serde_json::to_string_pretty(&out)?);
             Ok(if out["decision"] == "granted" { 0 } else { 3 })
         }
+        EscalationCmd::Assess {
+            request,
+            reproduce_at,
+            repo,
+            image,
+            setup,
+            test_command,
+            max_blast_radius,
+        } => {
+            let req = load_request(&request)?;
+            let out = assess(
+                req,
+                &repo,
+                reproduce_at,
+                image,
+                setup,
+                test_command,
+                max_blast_radius,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&out)?);
+            Ok(if out["decision"] == "granted" { 0 } else { 3 })
+        }
         EscalationCmd::Grant {
             request,
             token,
             key,
             by,
+            id,
+            scopes,
             audit,
         } => {
             let req = load_request(&request)?;
+            if let Some(id) = &id {
+                check_intact(id, &req)?;
+            }
+            if !scopes.is_empty() {
+                same_scopes(&req, scopes.iter().map(String::as_str))?;
+            }
             let original = token.verify()?;
             let minted = grant_request(&req, &original, &key, &by, audit.as_deref())?;
             keep_token(&request, &minted)?;
@@ -756,4 +1226,452 @@ pub fn run_test(args: RunTestArgs) -> Result<i32> {
     )?;
     println!("{}", serde_json::to_string_pretty(&run)?);
     Ok(if run.failed() { 1 } else { 0 })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use onus_doors::escalation::{EscalationKind, Evidence, Request};
+    use onus_doors::token::Grant;
+
+    struct Setup {
+        _dir: tempfile::TempDir,
+        escalations: PathBuf,
+        audit: PathBuf,
+        public: PathBuf,
+        key: PathBuf,
+        token: token::Verified,
+    }
+
+    fn setup() -> Setup {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = dir.path().join("keys");
+        let public = keygen(&keys).unwrap();
+        let key = keys.join("root.key");
+        let root = RootKey::from_hex(&read_key(&key).unwrap()).unwrap();
+        let raw = token::mint(
+            &root,
+            &Grant {
+                task: "sms".into(),
+                rights: rights(&["write:path:services/notifications/**".into()]).unwrap(),
+                expires: now() + 3600,
+                agent: None,
+            },
+        )
+        .unwrap();
+        let token = token::verify(&raw, &root.public()).unwrap();
+        let escalations = dir.path().join(".onus/escalations");
+        std::fs::create_dir_all(&escalations).unwrap();
+        Setup {
+            audit: dir.path().join(".onus/audit.jsonl"),
+            escalations,
+            public,
+            key,
+            token,
+            _dir: dir,
+        }
+    }
+
+    fn file(s: &Setup, task: &str, scope: &str) -> Request {
+        let req = Request::new(
+            task,
+            EscalationKind::Permission,
+            vec![scope.parse().unwrap()],
+            vec![Evidence::parse("rationale:needed").unwrap()],
+            "needed",
+            None,
+            &[],
+            now(),
+        );
+        std::fs::write(
+            s.escalations.join(format!("{}.json", req.id)),
+            serde_json::to_string_pretty(&req).unwrap(),
+        )
+        .unwrap();
+        req
+    }
+
+    fn verify(s: &Setup, id: &str) -> Result<Vec<String>> {
+        verify_escalations(&s.escalations, &[id.to_string()], &s.public, Some("sms"))
+    }
+
+    fn needs_person(d: &onus_doors::escalation::Decision) -> Vec<String> {
+        match d {
+            onus_doors::escalation::Decision::NeedsPerson { reasons } => reasons.clone(),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn assessing_a_rationale_sends_it_to_a_person() {
+        let req = Request::new(
+            "sms",
+            EscalationKind::Permission,
+            vec!["write:path:services/orders/**".parse().unwrap()],
+            vec![Evidence::parse("rationale:needed").unwrap()],
+            "needed",
+            None,
+            &[],
+            now(),
+        );
+        let (_, decision) = assess_request(req, None, 20).unwrap();
+        let reasons = needs_person(&decision);
+        assert!(reasons.iter().any(|r| r.contains("grade 5")), "{reasons:?}");
+    }
+
+    #[test]
+    fn failing_tests_that_are_not_test_files_at_the_commit_are_not_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src/a.ts"), "export const a = 1;\n").unwrap();
+        std::fs::write(repo.join("src/a.test.ts"), "throw new Error();\n").unwrap();
+        let git = |args: &[&str]| {
+            assert!(
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(repo)
+                    .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+                    .args(["-c", "commit.gpgsign=false"])
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        };
+        std::fs::create_dir_all(repo.join("src/b.test.d")).unwrap();
+        std::fs::write(repo.join("src/b.test.d/x.ts"), "export {};\n").unwrap();
+        git(&["init", "-q", "-b", "main"]);
+        git(&["add", "src/a.ts", "src/b.test.d"]);
+        git(&["commit", "-q", "-m", "a"]);
+        // Never run: a container engine is not needed to refuse these.
+        let reproduce = Reproduce {
+            repo: repo.to_path_buf(),
+            at: "HEAD".into(),
+            image: "node:22".into(),
+            setup: None,
+            test_command: "npx vitest run {test}".into(),
+        };
+        let assess = |reference: &str| {
+            let req = Request::new(
+                "sms",
+                EscalationKind::Permission,
+                vec!["write:path:src/**".parse().unwrap()],
+                vec![Evidence::parse(&format!("failing-test:{reference}")).unwrap()],
+                "needed",
+                None,
+                &[],
+                now(),
+            );
+            let (req, decision) = assess_request(req, Some(&reproduce), 20).unwrap();
+            assert_eq!(req.evidence[0].reproduced, Some(false));
+            assert!(req.evidence[0].run.is_none());
+            needs_person(&decision)
+        };
+        let reasons = assess("a.test.ts; exit 1");
+        assert!(
+            reasons.contains(&"`a.test.ts; exit 1` is not a path".to_string()),
+            "{reasons:?}"
+        );
+        for path in [
+            "../a.test.ts",
+            "/etc/passwd",
+            "src/../src/a.test.ts",
+            "--reporter=x.test.ts",
+        ] {
+            let reasons = assess(path);
+            assert!(
+                reasons.contains(&format!("`{path}` is not a path")),
+                "{reasons:?}"
+            );
+        }
+        // In the worktree, but not committed.
+        let reasons = assess("src/a.test.ts");
+        assert!(
+            reasons.contains(&"`src/a.test.ts` does not exist at `HEAD`".to_string()),
+            "{reasons:?}"
+        );
+        // A directory is not a test file, whatever its name.
+        let reasons = assess("src/b.test.d");
+        assert!(
+            reasons.contains(&"`src/b.test.d` does not exist at `HEAD`".to_string()),
+            "{reasons:?}"
+        );
+        let reasons = assess("src/a.ts");
+        assert!(
+            reasons.contains(&"`src/a.ts` is not a test file".to_string()),
+            "{reasons:?}"
+        );
+        // A command that does not name the test would run every test.
+        let whole = Reproduce {
+            test_command: "npm test".into(),
+            ..reproduce.clone()
+        };
+        let req = Request::new(
+            "sms",
+            EscalationKind::Permission,
+            vec!["write:path:src/**".parse().unwrap()],
+            vec![Evidence::parse("failing-test:src/b.test.d/x.ts").unwrap()],
+            "needed",
+            None,
+            &[],
+            now(),
+        );
+        let (req, decision) = assess_request(req, Some(&whole), 20).unwrap();
+        assert_eq!(req.evidence[0].reproduced, Some(false));
+        assert!(req.evidence[0].run.is_none());
+        let reasons = needs_person(&decision);
+        assert!(
+            reasons
+                .iter()
+                .any(|r| r.contains("`npm test` has no {test}")),
+            "{reasons:?}"
+        );
+        // A commit that reads as an option is refused.
+        let reproduce = Reproduce {
+            at: "--output=x".into(),
+            ..reproduce
+        };
+        let req = Request::new(
+            "sms",
+            EscalationKind::Permission,
+            vec!["write:path:src/**".parse().unwrap()],
+            vec![Evidence::parse("failing-test:src/a.test.ts").unwrap()],
+            "needed",
+            None,
+            &[],
+            now(),
+        );
+        let err = assess_request(req, Some(&reproduce), 20).unwrap_err();
+        assert!(err.to_string().contains("is not a commit"), "{err}");
+    }
+
+    #[test]
+    fn what_a_request_says_about_reproduction_is_not_believed() {
+        let mut evidence = Evidence::parse("failing-test:src/a.test.ts").unwrap();
+        evidence.reproduced = Some(true);
+        let req = Request::new(
+            "sms",
+            EscalationKind::Permission,
+            vec!["write:path:src/**".parse().unwrap()],
+            vec![evidence],
+            "needed",
+            None,
+            &[],
+            now(),
+        );
+        let (assessed, decision) = assess_request(req.clone(), None, 20).unwrap();
+        assert_eq!(assessed.evidence[0].reproduced, None);
+        let reasons = needs_person(&decision);
+        assert!(
+            reasons.iter().any(|r| r.contains("was not reproduced")),
+            "{reasons:?}"
+        );
+
+        // An assessed request keeps its id, so it can be assessed again.
+        let mut again = assessed;
+        again.evidence[0].reproduced = Some(true);
+        assert_eq!(again.content_id(), again.id);
+        let (again, _) = assess_request(again, None, 20).unwrap();
+        assert_eq!(again.evidence[0].reproduced, None);
+
+        // Nor on evidence of any other grade.
+        let mut trace = Evidence::parse("trace:logs/run.txt").unwrap();
+        trace.reproduced = Some(true);
+        let traced = Request::new(
+            "sms",
+            EscalationKind::Permission,
+            vec!["write:path:src/**".parse().unwrap()],
+            vec![trace],
+            "needed",
+            None,
+            &[],
+            now(),
+        );
+        let (traced, _) = assess_request(traced, None, 20).unwrap();
+        assert_eq!(traced.evidence[0].reproduced, None);
+
+        // Changed after it was filed: refused.
+        let mut changed = req;
+        changed.scopes.push("write:path:lib/**".parse().unwrap());
+        let err = assess_request(changed, None, 20).unwrap_err();
+        assert!(
+            err.to_string().contains("was changed after it was filed"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn failing_tests_that_run_too_long_are_stopped_and_not_reproduced() {
+        let Ok(engine) = onus_doors::runner::engine() else {
+            return;
+        };
+        // Pulled first, so the limit is spent in the test, not the pull.
+        let pulled = std::process::Command::new(&engine)
+            .args(["pull", "-q", "node:22-alpine"])
+            .output()
+            .is_ok_and(|o| o.status.success());
+        if !pulled {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        std::fs::write(repo.join("slow.test.sh"), "sleep 600\n").unwrap();
+        std::fs::write(repo.join("later.test.sh"), "exit 1\n").unwrap();
+        std::fs::write(repo.join("fails.test.sh"), "exit 1\n").unwrap();
+        for args in [
+            &["init", "-q", "-b", "main"][..],
+            &["add", "-A"],
+            &["commit", "-q", "-m", "a"],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(repo)
+                    .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+                    .args(["-c", "commit.gpgsign=false"])
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let reproduce = Reproduce {
+            repo: repo.to_path_buf(),
+            at: "HEAD".into(),
+            image: "node:22-alpine".into(),
+            setup: None,
+            test_command: "sh {test}".into(),
+        };
+        let req = Request::new(
+            "sms",
+            EscalationKind::Permission,
+            vec!["write:path:src/**".parse().unwrap()],
+            vec![
+                Evidence::parse("failing-test:slow.test.sh").unwrap(),
+                Evidence::parse("failing-test:later.test.sh").unwrap(),
+            ],
+            "needed",
+            None,
+            &[],
+            now(),
+        );
+        let limit = std::time::Duration::from_secs(5);
+        // Within the limit, a failing test is run to the end, so the slow
+        // one below is stopped in the test itself.
+        let control = Request::new(
+            "sms",
+            EscalationKind::Permission,
+            vec!["write:path:src/**".parse().unwrap()],
+            vec![Evidence::parse("failing-test:fails.test.sh").unwrap()],
+            "needed",
+            None,
+            &[],
+            now(),
+        );
+        let (control, _) = assess_within(control, Some(&reproduce), 20, limit).unwrap();
+        assert_eq!(control.evidence[0].reproduced, Some(true));
+
+        // The limit is for all of a request's tests, so the second one is
+        // not run once the first has used it up.
+        let started = std::time::Instant::now();
+        let (req, decision) = assess_within(req, Some(&reproduce), 20, limit).unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(60));
+        for e in &req.evidence {
+            assert_eq!(e.reproduced, Some(false), "{}", e.reference);
+            assert!(e.run.is_none(), "{}", e.reference);
+        }
+        let reasons = needs_person(&decision);
+        for reason in [
+            "`slow.test.sh` did not finish within the 5 seconds the failing tests may take, so it was stopped",
+            "`later.test.sh` was not run: the 5 seconds the failing tests may take had passed",
+        ] {
+            assert!(reasons.contains(&reason.to_string()), "{reasons:?}");
+        }
+    }
+
+    #[test]
+    fn only_granted_escalations_of_the_task_verify() {
+        let s = setup();
+        let audit = Some(s.audit.as_path());
+
+        // Granted by a person: it verifies, once however often it is listed.
+        let granted = file(&s, "sms", "write:path:services/orders/src/**");
+        let t = grant_request(&granted, &s.token, &s.key, "@lead", audit).unwrap();
+        keep_token(&s.escalations.join(format!("{}.json", granted.id)), &t).unwrap();
+        let ids = vec![granted.id.clone(), granted.id.clone()];
+        assert_eq!(
+            verify_escalations(&s.escalations, &ids, &s.public, Some("sms")).unwrap(),
+            std::slice::from_ref(&granted.id)
+        );
+        // Without a token, the task is not compared.
+        assert!(verify_escalations(&s.escalations, &ids, &s.public, None).is_ok());
+
+        // Waiting for a person (the policy said so), and still open.
+        let pending = file(&s, "sms", "write:path:services/billing/**");
+        decide_request(pending.clone(), &s.token, &s.key, None, 20, audit).unwrap();
+        let err = verify(&s, &pending.id).unwrap_err().to_string();
+        assert!(err.contains("is waiting for a person"), "{err}");
+        assert!(
+            err.contains("submit without it until it is granted"),
+            "{err}"
+        );
+        let open = file(&s, "sms", "write:path:services/users/**");
+        assert!(
+            verify(&s, &open.id)
+                .unwrap_err()
+                .to_string()
+                .contains("is still open")
+        );
+
+        // Denied, with the reason.
+        let denied = file(&s, "sms", "write:path:services/auth/**");
+        deny_request(&denied, "@lead", "auth is out of scope", audit).unwrap();
+        let err = verify(&s, &denied.id).unwrap_err().to_string();
+        assert!(err.contains("was denied: auth is out of scope"), "{err}");
+
+        // Another task's request.
+        let other = file(&s, "other", "write:path:services/orders/src/**");
+        let err = verify(&s, &other.id).unwrap_err().to_string();
+        assert!(err.contains("belongs to task `other`, not `sms`"), "{err}");
+
+        // A request the task filed itself, with its own token copied beside
+        // it: root-signed, but nobody granted it.
+        let forged = file(&s, "sms", "write:path:services/notifications/src/**");
+        let root = RootKey::from_hex(&read_key(&s.key).unwrap()).unwrap();
+        let own = token::mint(
+            &root,
+            &Grant {
+                task: "sms".into(),
+                rights: s.token.rights.clone(),
+                expires: s.token.expires,
+                agent: None,
+            },
+        )
+        .unwrap();
+        keep_token(&s.escalations.join(format!("{}.json", forged.id)), &own).unwrap();
+        let err = verify(&s, &forged.id).unwrap_err().to_string();
+        assert!(err.contains("was not minted to grant it"), "{err}");
+
+        // A request edited after the grant.
+        let path = s.escalations.join(format!("{}.json", granted.id));
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, text.replace("services/orders/src/**", "**")).unwrap();
+        let err = verify(&s, &granted.id).unwrap_err().to_string();
+        assert!(err.contains("was changed after it was filed"), "{err}");
+
+        // Ids that name nothing, or outside the folder.
+        assert!(
+            verify(&s, "deadbeef0000")
+                .unwrap_err()
+                .to_string()
+                .contains("no escalation")
+        );
+        assert!(
+            verify(&s, "../x")
+                .unwrap_err()
+                .to_string()
+                .contains("not an escalation id")
+        );
+    }
 }
