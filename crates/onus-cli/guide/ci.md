@@ -18,7 +18,7 @@ The Onus action downloads the release binary for the runner, checks its SHA-256,
           - uses: actions/checkout@v7
             with:
               fetch-depth: 0
-          - uses: onushq/onus/action@v0.10.0
+          - uses: onushq/onus/action@v0.11.0
             id: onus
             with:
               fail-on: rule-violation,secrets
@@ -88,7 +88,7 @@ With `records: true`, the action keeps the track record lanes depend on without 
           - uses: actions/checkout@v7
             with:
               fetch-depth: 0
-          - uses: onushq/onus/action@v0.10.0
+          - uses: onushq/onus/action@v0.11.0
             with:
               records: true
 
@@ -119,7 +119,7 @@ A deploy workflow reports each stage of a rollout, and Onus decides from the cha
         steps:
           - uses: actions/checkout@v7
           - run: ./scripts/canary-metrics.sh > "$RUNNER_TEMP/canary.json"
-          - uses: onushq/onus/action@v0.10.0
+          - uses: onushq/onus/action@v0.11.0
             with:
               records: true
               rollout-percent: ${{ github.event.deployment.payload.percent }}
@@ -207,7 +207,7 @@ With coverage of the head commit, the report says how many changed lines tests r
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
       - run: npm ci && npx vitest run --coverage --coverage.reporter=lcov
-      - uses: onushq/onus/action@v0.10.0
+      - uses: onushq/onus/action@v0.11.0
         with:
           coverage: coverage/lcov.info
 
@@ -246,7 +246,7 @@ Anyone's `/onus caught` counts toward the catch rate. One from someone with writ
         if: github.event.issue.pull_request && startsWith(github.event.comment.body, '/onus caught')
         runs-on: ubuntu-latest
         steps:
-          - uses: onushq/onus/action@v0.10.0
+          - uses: onushq/onus/action@v0.11.0
 
 ### Accuracy checks
 
