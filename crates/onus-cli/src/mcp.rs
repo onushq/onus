@@ -1391,6 +1391,8 @@ pub fn serve_http(
     };
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
+        // An MCP call through the door needs more than Windows' 1 MiB default.
+        .thread_stack_size(16 * 1024 * 1024)
         .enable_all()
         .build()?;
     runtime.block_on(async move {
@@ -1425,6 +1427,8 @@ pub fn serve_http(
 pub fn serve_stdio(root: PathBuf, backend: Arc<dyn Backend>, tools: Tools) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
+        // An MCP call through the door needs more than Windows' 1 MiB default.
+        .thread_stack_size(16 * 1024 * 1024)
         .enable_all()
         .build()?;
     runtime.block_on(async move {

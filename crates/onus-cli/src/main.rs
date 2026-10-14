@@ -722,7 +722,18 @@ mod records;
 mod signals;
 mod ui;
 
+/// Stack for the thread that runs a command, and for the MCP server's workers. Windows
+/// gives the main thread 1 MiB, and an MCP call through the door needs more than that.
+const STACK: usize = 16 * 1024 * 1024;
+
 fn main() -> ExitCode {
+    match std::thread::Builder::new().stack_size(STACK).spawn(command) {
+        Ok(thread) => thread.join().unwrap_or(ExitCode::from(EXIT_ERROR as u8)),
+        Err(_) => command(),
+    }
+}
+
+fn command() -> ExitCode {
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(e) => {
