@@ -39,6 +39,7 @@ Inputs, all optional:
 - `lanes`: `true` to classify the change into a risk lane with the policy in onus.yaml and the hard floors, and show it in the comment (`onus help lanes`). Output `lane`.
 - `apply-lane`: `true` (with `lanes`) to label the pull request `onus/lane:<lane>` and fail the job for the `blocked` lane. Needs `issues: write`.
 - `wait-for-review`: `true` (the default, with `records`) fails the job while the change is in the human lane and no review counts yet. Output `review`: `waiting` or `approved`. See "Reviews in the human lane" below.
+- `submission`: (with `records`) the agent's own submission of the change, for its provenance. When empty, one kept on the records branch is used. See "The agent's submission" below.
 - `auto-merge`: `true` (with `lanes`) to enable GitHub's auto-merge (squash) for the `auto-merge` lane. Required checks still apply. Needs `contents: write`.
 - `plugins`: a plugins file's contents (YAML), written outside the repository and passed with `--plugins`. For Svelte components: `plugins: [{ name: svelte, kind: language, command: [onus-plugin-svelte], files: ["**/*.svelte"] }]` (the plugin ships in every release archive).
 - `working-directory`: the repository, if not the workspace root.
@@ -176,6 +177,12 @@ Each outcome is kept against an agent setup. Onus reads it from what git and Git
 3. The bot that opened the pull request, such as `copilot-swe-agent` or `devin-ai-integration[bot]`; any other bot under its own name.
 4. A `Co-authored-by` trailer naming an agent.
 5. Otherwise the person who opened it, as `person/<login>`.
+
+### The agent's submission
+
+An agent that hands in its change with `onus submit` (or `onus_submit`) under a task token has a submission: the token's task, rights, expiry and fingerprint, verified when it was made, and the escalations granted to it. Give it to the action so the change's provenance keeps them: the `submission` input (a path written by an earlier step), or a file on the records branch at `submissions/<pull request number>.json` or `submissions/<head commit>.json`. `onus ci records pull` copies those into `submissions/` of the records folder, and a push keeps whatever else is on the branch. The action passes it to `onus ci pr --submission` and to `onus provenance --agent-submission` when the pull request closes.
+
+Only the token and the escalations are taken from it, and only when it is for one of the pull request's commits. The record marks the token `agent-submission`, ranked below the door's word, and the `escalations` gap says the escalations it lists are the agent's word: the file is plain JSON, and anyone who can write to the records branch can put one there; one that cannot be read is a warning, never a failed job. The action cannot verify the token itself (a submission never keeps it, and no root key reaches CI), and it sees no door log and none of what Onus Cloud keeps (escalations, calls, the door log an agent attached there). Those stay gaps in the provenance record unless a host passes them (`onus help provenance`).
 
 ### Reading the records
 

@@ -420,7 +420,12 @@ pub struct CloudEvidenceParams {
     #[serde(default)]
     pub repository: Option<String>,
     /// The run's id, from `onus_cloud_env_run`.
-    pub run: String,
+    #[serde(default)]
+    pub run: Option<String>,
+    /// Attach your task's slice of the door log too (or instead), so the change's
+    /// provenance keeps every call you made. The server cuts it from its own log.
+    #[serde(default, rename = "doorLog")]
+    pub door_log: bool,
 }
 
 impl std::fmt::Debug for OnusMcp {
@@ -1115,7 +1120,7 @@ impl OnusMcp {
 
     #[tool(
         name = "onus_cloud_attach_evidence",
-        description = "Attach a run recorded in a hosted environment (onus_cloud_env_run) to a pull request as evidence. Onus Cloud analyses the pull request again when the run is for its head commit, and the judge checks the run against the recording. It approves nothing by itself."
+        description = "Attach a run recorded in a hosted environment (onus_cloud_env_run) to a pull request as evidence. Onus Cloud analyses the pull request again when the run is for its head commit, and the judge checks the run against the recording. With doorLog, it also attaches your task's slice of the door log, which the server cuts from its own log, so the change's provenance keeps every call you made; attach it when your work is pushed, to the pull request whose head is your commit. It approves nothing by itself."
     )]
     async fn cloud_attach_evidence(
         &self,
@@ -1123,7 +1128,7 @@ impl OnusMcp {
     ) -> Result<CallToolResult, ErrorData> {
         self.act(
             "cloud.attachEvidence",
-            serde_json::json!({ "repository": p.repository, "number": p.number, "run": p.run }),
+            serde_json::json!({ "repository": p.repository, "number": p.number, "run": p.run, "doorLog": p.door_log }),
         )
         .await
     }

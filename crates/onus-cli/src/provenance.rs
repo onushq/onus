@@ -6,11 +6,11 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use clap::Args;
 use onus_core::provenance::{
-    IntentSource, ProvenanceRecord, SCHEMA, Token, TokenInspection, TokenSource,
+    CloudCall, IntentSource, ProvenanceRecord, SCHEMA, Token, TokenInspection, TokenSource,
 };
 use onus_lanes::classify::Classification;
 use onus_lanes::judge::Judgment;
-use onus_lanes::provenance::{self, CloudEscalations, Inputs};
+use onus_lanes::provenance::{self, CloudCallsRead, CloudEscalations, DoorLog, Inputs};
 use onus_lanes::submission::Submission;
 use onus_lanes::{outcomes, pulls, signals};
 
@@ -38,6 +38,12 @@ pub struct ProvenanceArgs {
     /// A submission (from onus submit).
     #[arg(long, value_name = "FILE")]
     submission: Option<PathBuf>,
+    /// The agent's own submission of a pull request, beside the records (as onus ci pr
+    /// --submission takes it): only its token and the escalations it lists are kept, and
+    /// only when it is for one of the change's commits. One that cannot be read is a
+    /// warning.
+    #[arg(long, value_name = "FILE")]
+    agent_submission: Option<PathBuf>,
     /// A submission kept by onus ui / onus mcp in <repo>/.onus/submissions; also reads its
     /// judgment and the repository's .onus audit log, escalations and outcomes unless given.
     #[arg(long, value_name = "ID", conflicts_with = "submission")]
@@ -58,9 +64,14 @@ pub struct ProvenanceArgs {
     /// keeps it or `onus token inspect` prints it); never the token.
     #[arg(long, value_name = "FILE")]
     token_inspection: Option<PathBuf>,
-    /// The door log (audit.jsonl); its hash chain is checked.
+    /// The door log (audit.jsonl), or the task's slice of it the agent attached in Onus
+    /// Cloud (schemas/door-log.schema.json); its hash chain is checked.
     #[arg(long, value_name = "FILE")]
     audit: Option<PathBuf>,
+    /// Onus Cloud's log of the calls made under the task token
+    /// (schemas/cloud-calls.schema.json), summed up beside the door log.
+    #[arg(long, value_name = "FILE")]
+    calls: Option<PathBuf>,
     /// Escalations: a folder of requests (.onus/escalations), or a JSON file of the
     /// decisions Onus Cloud keeps (schemas/escalation-decisions.schema.json).
     #[arg(long, value_name = "PATH")]
@@ -159,6 +170,107 @@ pub(crate) fn decisions_at(path: &Path) -> Result<CloudEscalations> {
         );
     }
     Ok(read)
+}
+
+/// Onus Cloud's log of a task token's calls, from a file. Each call that
+/// cannot be read is warned about, and left out.
+pub(crate) fn calls_at(path: &Path) -> Result<CloudCallsRead> {
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
+    let read = provenance::parse_calls(&text).with_context(|| {
+        format!(
+            "{} is not the calls Onus Cloud logged (schemas/cloud-calls.schema.json)",
+            path.display()
+        )
+    })?;
+    for note in &read.unread {
+        eprintln!(
+            "warning: {}: {note}; it is left out, and the counts may be short",
+            path.display()
+        );
+    }
+    Ok(read)
+}
+
+/// Onus Cloud's calls, from a file, never stopping the run: a file that
+/// cannot be read is warned about and named in the `doors` gap. Gives the
+/// calls read and the notes for the gap.
+pub(crate) fn calls_or_gap(path: &Path) -> (Option<Vec<CloudCall>>, Vec<String>) {
+    match calls_at(path) {
+        Ok(c) => (Some(c.list), c.unread),
+        Err(e) => {
+            eprintln!("warning: {e:#}; Onus Cloud's calls are left out");
+            (None, vec![format!("{e:#}")])
+        }
+    }
+}
+
+/// A door log, or a slice of one, from a file, never stopping the run: one
+/// that cannot be read is warned about and named in the `doors` gap. Gives
+/// the log and why it does not verify, or could not be read.
+pub(crate) fn door_log_or_gap(path: &Path) -> (Option<DoorLog>, Option<String>) {
+    match door_log_at(path) {
+        Ok(l) => {
+            let why = l.why.clone();
+            (Some(l), why)
+        }
+        Err(e) => {
+            eprintln!("warning: {e:#}; the door log is a gap");
+            (None, Some(format!("{e:#}")))
+        }
+    }
+}
+
+/// The agent's own submission, from a file: one that cannot be read is
+/// warned about and left out, never an error.
+pub(crate) fn agents_submission_at(path: &Path) -> Option<Submission> {
+    match std::fs::read_to_string(path)
+        .map_err(anyhow::Error::from)
+        .and_then(|t| Ok(serde_json::from_str::<Submission>(&t)?))
+    {
+        Ok(s) => Some(s),
+        Err(e) => {
+            eprintln!(
+                "warning: {} is not a submission ({e}); it is left out",
+                path.display()
+            );
+            None
+        }
+    }
+}
+
+/// Keeps the agent's submission only when it is for one of the change's
+/// commits ([`provenance::agents_submission_fits`]); warns otherwise.
+pub(crate) fn agents_submission_for(
+    s: Option<Submission>,
+    change: &str,
+    head: &str,
+    commits: &[String],
+    pulls: &[pulls::PullRecord],
+) -> Option<Submission> {
+    s.filter(|s| {
+        let ours = provenance::agents_submission_fits(s, change, head, commits, pulls);
+        if !ours {
+            eprintln!(
+                "warning: the agent's submission is for commit {}, which is not one of this pull request's; it is left out",
+                s.head
+            );
+        }
+        ours
+    })
+}
+
+/// A door log, or a task's slice of one, from a file. One that does not
+/// verify is read all the same, and warned about.
+pub(crate) fn door_log_at(path: &Path) -> Result<DoorLog> {
+    let log = provenance::read_door_log(path)?;
+    if let Some(why) = &log.why {
+        eprintln!(
+            "warning: {} does not verify ({why}); its entries are recorded as not intact",
+            path.display()
+        );
+    }
+    Ok(log)
 }
 
 /// The door's inspection of a task token, from a file.
@@ -293,9 +405,15 @@ pub fn run(args: ProvenanceArgs) -> Result<i32> {
             .map(|k| k.audit.clone())
             .filter(|p| p.exists())
     });
-    let audit = match &audit_file {
-        Some(f) => Some(provenance::read_audit(f)?),
-        None => None,
+    // Like onus ci pr, a door log or calls that cannot be read are a gap,
+    // so a host refreshing a record never loses what came after the close.
+    let (door_log, audit_why) = match audit_file.as_deref().map(door_log_or_gap) {
+        Some((l, why)) => (l, why),
+        None => (None, None),
+    };
+    let (calls, calls_unread) = match args.calls.as_deref().map(calls_or_gap) {
+        Some((c, unread)) => (c, unread),
+        None => (None, Vec::new()),
     };
     // A folder of requests, or Onus Cloud's decisions in a file, read with
     // the requests kept beside a submission. The kept folder may not exist
@@ -309,10 +427,19 @@ pub fn run(args: ProvenanceArgs) -> Result<i32> {
         Some(file) => (kept_requests()?, Some(decisions_at(file)?)),
         None => (kept_requests()?, None),
     };
+    let agents = args
+        .agent_submission
+        .as_deref()
+        .and_then(agents_submission_at);
     // Onus Cloud's escalations that name no pull request are joined by the
-    // commits they were filed at.
-    let commits = match &decisions {
-        Some(_) => {
+    // commits they were filed at, and the agent's submission and door log
+    // must be for one.
+    let slice_head = door_log
+        .as_ref()
+        .and_then(|l| l.slice.as_ref().and(l.head.as_ref()));
+    let commits = match (&decisions, &agents) {
+        (None, None) if slice_head.is_none() => Vec::new(),
+        _ => {
             let pull = pulls::latest(&pulls, &change);
             let (base, head) = pull
                 .map(|p| (p.base.clone(), p.head.clone()))
@@ -328,8 +455,12 @@ pub fn run(args: ProvenanceArgs) -> Result<i32> {
                 .unwrap_or_default();
             change_commits(&args.repo, &base, &head)
         }
-        None => Vec::new(),
     };
+    let head = pulls::latest(&pulls, &change)
+        .map(|p| p.head.clone())
+        .or_else(|| from.as_ref().map(|f| f.commits.head.clone()))
+        .unwrap_or_default();
+    let agents = agents_submission_for(agents, &change, &head, &commits, &pulls);
     let inspection = args
         .token_inspection
         .as_deref()
@@ -343,6 +474,7 @@ pub fn run(args: ProvenanceArgs) -> Result<i32> {
     let record = provenance::build(Inputs {
         from,
         submission: submission.as_ref(),
+        agents: agents.as_ref(),
         intent_source: IntentSource::Submission,
         classification: classification.as_ref(),
         judgment: judgment.as_ref(),
@@ -351,7 +483,13 @@ pub fn run(args: ProvenanceArgs) -> Result<i32> {
         outcomes: &outcomes,
         signals: &signals,
         token,
-        audit,
+        audit: door_log.as_ref().map(|l| (l.entries.clone(), l.intact)),
+        audit_slice: door_log.as_ref().and_then(|l| l.slice.as_deref()),
+        audit_head: door_log.as_ref().and_then(|l| l.head.as_deref()),
+        audit_why: audit_why.as_deref(),
+        calls: calls.as_deref(),
+        calls_unread: &calls_unread,
+        attached_inspection: door_log.as_ref().and_then(|l| l.inspection.clone()),
         requests: &requests,
         decisions: decisions.as_ref().map(|d| d.list.as_slice()),
         unread: decisions.as_ref().map_or(&[], |d| d.unread.as_slice()),

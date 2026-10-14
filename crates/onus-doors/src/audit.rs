@@ -183,6 +183,57 @@ impl AuditLog {
     }
 }
 
+/// Checks the chain over a run of entries cut from a log, such as a task's
+/// slice: sequence numbers count up by one, each entry names the hash of
+/// the one before, and each hash matches. The first entry's `prev` is taken
+/// as given, unless it is entry 1, whose `prev` must be the start of a log.
+/// What came before the run, and after it, is not checked.
+pub fn verify_run(entries: &[Entry]) -> Result<()> {
+    let Some(first) = entries.first() else {
+        bail!("there are no entries");
+    };
+    if first.seq == 1 && first.prev != GENESIS {
+        bail!("entry 1 does not start a log");
+    }
+    for (i, e) in entries.iter().enumerate() {
+        if let Some(before) = i.checked_sub(1).map(|b| &entries[b]) {
+            if e.seq != before.seq + 1 {
+                bail!("entry {} follows entry {}", e.seq, before.seq);
+            }
+            if e.prev != before.hash {
+                bail!(
+                    "entry {}: the chain is broken (an entry before it was changed or removed)",
+                    e.seq
+                );
+            }
+        }
+        if digest(e) != e.hash {
+            bail!("entry {} was changed after it was written", e.seq);
+        }
+    }
+    Ok(())
+}
+
+/// Whether an entry is about `task`: the task's own calls, its token's
+/// `mint`, and decisions others made for it (a grant names the task).
+pub fn concerns(e: &Entry, task: &str) -> bool {
+    e.actor == task
+        || (e.action == "mint" && e.subject == task)
+        || e.details["task"].as_str() == Some(task)
+}
+
+/// A task's slice of a log: the run of entries from the first that
+/// concerns it to the last, with whatever lies between, so the chain can be
+/// checked over it. Empty when no entry concerns the task.
+pub fn slice<'e>(entries: &'e [Entry], task: &str) -> &'e [Entry] {
+    let first = entries.iter().position(|e| concerns(e, task));
+    let last = entries.iter().rposition(|e| concerns(e, task));
+    match (first, last) {
+        (Some(a), Some(b)) => &entries[a..=b],
+        _ => &[],
+    }
+}
+
 /// A digest of a call's arguments: sha256 of their JSON with object keys
 /// sorted, so the same arguments in another order give the same digest.
 pub fn args_digest(v: &serde_json::Value) -> String {
@@ -362,6 +413,72 @@ mod tests {
                 .last()
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn a_tasks_slice_is_checked_on_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = AuditLog::new(dir.path().join("audit.jsonl"));
+        let add = |actor: &str, action: &str, subject: &str, details: serde_json::Value| {
+            log.append(
+                Record {
+                    actor: actor.into(),
+                    action: action.into(),
+                    subject: subject.into(),
+                    decision: "allowed".into(),
+                    reason: String::new(),
+                    details,
+                },
+                100,
+            )
+            .unwrap();
+        };
+        add("local", "mcp:onus_find", "x", serde_json::Value::Null);
+        add("operator", "mint", "sms", serde_json::Value::Null);
+        add("sms", "mcp:onus_find", "y", serde_json::Value::Null);
+        add("other", "mcp:onus_find", "z", serde_json::Value::Null);
+        add(
+            "@lead",
+            "grant",
+            "abc123",
+            serde_json::json!({ "task": "sms" }),
+        );
+        add("other", "mcp:onus_find", "w", serde_json::Value::Null);
+        let all = log.verify().unwrap();
+        let s = slice(&all, "sms");
+        let seqs: Vec<u64> = s.iter().map(|e| e.seq).collect();
+        assert_eq!(seqs, [2, 3, 4, 5]);
+        verify_run(s).unwrap();
+        verify_run(&all).unwrap();
+        assert!(slice(&all, "nobody").is_empty());
+        assert!(verify_run(&[]).is_err());
+
+        // An edited entry, a removed one, and a slice out of order fail.
+        let mut edited = s.to_vec();
+        edited[1].subject = "elsewhere".into();
+        assert!(
+            verify_run(&edited)
+                .unwrap_err()
+                .to_string()
+                .contains("changed")
+        );
+        let gap = [s[0].clone(), s[2].clone()];
+        assert!(
+            verify_run(&gap)
+                .unwrap_err()
+                .to_string()
+                .contains("follows")
+        );
+        // Entry 1 must start a log.
+        let mut first = all[0].clone();
+        first.prev = "f".repeat(64);
+        first.hash = digest(&first);
+        assert!(
+            verify_run(&[first])
+                .unwrap_err()
+                .to_string()
+                .contains("start")
         );
     }
 

@@ -251,7 +251,7 @@ impl AgentActions {
             _ => true,
         };
         match (name, repository) {
-            ("cloud.map", Some(r)) if unnamed("repository", &input) => {
+            ("cloud.map" | "cloud.attachEvidence", Some(r)) if unnamed("repository", &input) => {
                 input["repository"] = json!(r);
             }
             ("cloud.tokenMint", Some(r))
@@ -385,6 +385,25 @@ impl onus_cli::mcp::Actions for AgentActions {
             }
             "envs.list" => self.listed("onus_envs", call(&self.state, name, input)?),
             "cloud.envs" => self.listed("onus_cloud_envs", self.cloud_act(name, input)?),
+            "cloud.attachEvidence" if input["doorLog"] == true => {
+                // The task's slice, cut here from the server's own log: the
+                // agent names none, so it cannot hand in another.
+                let task = self.task().context(
+                    "a door log is attached for a task, and this server holds no task token (onus mcp --token)",
+                )?;
+                let mut input = input;
+                let mut slice = onus_cli::door::door_log_slice(
+                    self.door.log_path(),
+                    &task,
+                    cloud::commit_of(&self.state.root, "HEAD"),
+                )?;
+                // What the token this door holds is, never the token.
+                if let Some(i) = self.door.inspection() {
+                    slice["inspection"] = i;
+                }
+                input["doorLog"] = slice;
+                self.cloud_act(name, input)
+            }
             "agent.evidence" => self.evidence(),
             "agent.escalate" => self.escalate(input),
             "agent.blocked" => self.blocked(input),

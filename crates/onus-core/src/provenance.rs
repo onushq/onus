@@ -174,6 +174,12 @@ pub enum TokenSource {
     Token,
     /// Verified when the submission was made.
     Submission,
+    /// The agent's own submission, handed in beside the run (`onus ci pr
+    /// --submission`, `onus provenance --agent-submission`), such as one
+    /// kept on the records branch. On its word: this run cannot tell it was
+    /// verified when it was made, and whoever can write where it was kept
+    /// could have written it. Ranked below `audit` and `inspection`.
+    AgentSubmission,
     /// The door log's `mint` entry for the task, widened by its grants.
     Audit,
     /// The door's inspection of the token (`--token-inspection`, or the one
@@ -181,6 +187,11 @@ pub enum TokenSource {
     /// granted to the task. What the door said it held: this run did not
     /// verify it.
     Inspection,
+    /// The door log the agent attached to its work in Onus Cloud: the
+    /// door's inspection sent with it, or its `mint` entry, widened by its
+    /// grants. Taken only when its chain verifies, and ranked below the
+    /// rest: whoever attached it chose what it holds.
+    Attached,
 }
 
 /// What a door says its task token holds: never the token itself. The door
@@ -595,10 +606,191 @@ pub struct RolloutEvent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Doors {
-    /// The audit log's hash chain verified.
+    /// The door log's hash chain verified: the whole log, or an attached
+    /// slice from its first entry. False when only Onus Cloud's calls are
+    /// known (`source: onus-cloud`): they have no chain to check.
     pub intact: bool,
+    /// The task's door decisions, from the door log.
     #[serde(default)]
     pub entries: Vec<DoorEntry>,
+    /// Where `entries` came from. Absent: the door log this run read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<DoorSource>,
+    /// Onus Cloud's log of the calls made under the task token, summed up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calls: Option<CloudCalls>,
+}
+
+/// Where door decisions came from, when not the door log (audit.jsonl)
+/// this run read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum DoorSource {
+    /// The task's slice of the door log, attached to its work in Onus Cloud
+    /// (`onus cloud evidence --door-log`); its chain is checked here.
+    Attached,
+    /// Onus Cloud's own log of the calls made under the task token. Onus
+    /// Cloud's word: it has no hash chain.
+    OnusCloud,
+}
+
+/// Onus Cloud's log of the calls made under a task token, summed up.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudCalls {
+    /// Always `onus-cloud`, so these are never taken for the door log.
+    pub source: CallsSource,
+    pub total: u32,
+    pub allowed: u32,
+    pub denied: u32,
+    /// Calls the API could not answer.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub failed: u32,
+    /// Calls that name no task, counted as the change's on Onus Cloud's
+    /// word.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub untasked: u32,
+    /// Unix seconds of the first and the last call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_at: Option<u64>,
+    /// The ids of the tokens the calls were made with; never a token.
+    #[serde(default)]
+    pub tokens: Vec<String>,
+    /// The calls by route and scope, with how each was decided.
+    #[serde(default)]
+    pub routes: Vec<RouteCalls>,
+    /// Every call Onus Cloud refused, in time order (at most 100).
+    #[serde(default)]
+    pub denials: Vec<CallDenial>,
+}
+
+/// Where Onus Cloud's calls came from: only ever Onus Cloud.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum CallsSource {
+    /// Onus Cloud's own log of the calls made under the task token, on its
+    /// word: it has no hash chain.
+    OnusCloud,
+}
+
+/// The calls to one route, under one scope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RouteCalls {
+    pub method: String,
+    /// `/v1/orgs/:org/environments/:env/runs`.
+    pub route: String,
+    /// What the route needs of a scoped token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    pub allowed: u32,
+    pub denied: u32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub failed: u32,
+}
+
+/// A call Onus Cloud refused.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CallDenial {
+    /// Unix seconds.
+    pub at: u64,
+    pub method: String,
+    pub route: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    /// The denial, as Onus Cloud sent it back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_id: Option<String>,
+}
+
+/// One call Onus Cloud logged under a task token: the input of `onus
+/// provenance --calls FILE` and `onus ci pr --calls FILE`, which take a
+/// JSON array of these.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudCall {
+    /// When it was made (`createdAt` is read too).
+    #[serde(alias = "createdAt")]
+    pub at: Moment,
+    pub method: String,
+    pub route: String,
+    /// What the route needs of a scoped token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    pub decision: CallDecision,
+    /// The token's id (`credentialId` is read too); never the token.
+    #[serde(
+        default,
+        alias = "credentialId",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub token_id: Option<String>,
+    /// The task the token was minted for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
+    /// The denial, as it was sent back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// How Onus Cloud decided a call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum CallDecision {
+    Allowed,
+    Denied,
+    /// The API could not answer it.
+    Failed,
+}
+
+/// A task's slice of its door log (audit.jsonl): the run of entries from
+/// the task's first to its last, whatever lies between, so its hash chain
+/// can be checked where it is read. `onus cloud evidence --door-log` and
+/// `onus_cloud_attach_evidence` attach one to a pull request, and `onus ci
+/// pr --audit` and `onus provenance --audit` read it. Each hash is over the
+/// entry's JSON as the door wrote it: keep the slice as it was sent (its
+/// text), since a number written again another way (1.0 as 1, an integer
+/// past 2^53) no longer verifies.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DoorLogSlice {
+    /// The task whose slice it is.
+    pub task: String,
+    /// When it was cut (Unix seconds).
+    pub at: u64,
+    /// The worktree's commit when it was cut.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<String>,
+    /// The door's inspection of the token it held for the task, when the
+    /// door that cut the slice holds one (`onus mcp --token`); never the
+    /// token. Outside the chain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inspection: Option<TokenInspection>,
+    pub entries: Vec<DoorLogEntry>,
+}
+
+/// One entry of a door log, as the log holds it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DoorLogEntry {
+    pub seq: u64,
+    pub at: u64,
+    pub actor: String,
+    pub action: String,
+    pub subject: String,
+    pub decision: String,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub details: serde_json::Value,
+    /// The hash of the entry before it.
+    pub prev: String,
+    /// sha256 of the entry's JSON with `hash` empty.
+    pub hash: String,
 }
 
 /// One door decision, as the audit log holds it.

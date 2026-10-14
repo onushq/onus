@@ -36,6 +36,8 @@ struct World {
     escalations: BTreeMap<String, Value>,
     /// Map JSON by commit.
     maps: BTreeMap<String, Vec<u8>>,
+    /// Pull requests of acme/shop by number: their head commit.
+    pulls: BTreeMap<u64, String>,
 }
 
 /// A fake Onus Cloud API on 127.0.0.1, one thread, a connection per request.
@@ -69,6 +71,12 @@ impl Fake {
             .into_iter()
             .filter(|s| s.method == method && s.path.starts_with(prefix))
             .collect()
+    }
+
+    /// A pull request of acme/shop, at a head commit.
+    fn pull(&self, number: u64, head: &str) {
+        let mut w = self.world.lock().unwrap();
+        w.pulls.insert(number, head.to_string());
     }
 
     /// Changes what Onus Cloud says about an escalation.
@@ -276,6 +284,21 @@ fn answer(world: &Mutex<World>, req: &Seen) -> (u16, Vec<(String, String)>, Vec<
                 None => (404, vec![], b"{\"message\":\"no escalation\"}".to_vec()),
             }
         }
+        ("GET", p) if p.starts_with("/v1/orgs/acme/repos/acme%2Fshop/pulls/") => {
+            let n = p.rsplit('/').next().and_then(|n| n.parse::<u64>().ok());
+            match n.and_then(|n| w.pulls.get(&n).map(|h| (n, h))) {
+                Some((n, head)) => ok(json!({ "pull": { "number": n, "headSha": head } })),
+                None => (404, vec![], b"{\"message\":\"no pull request\"}".to_vec()),
+            }
+        }
+        // Evidence: a recorded run, or a task's door log.
+        ("POST", "/v1/orgs/acme/repos/acme%2Fshop/pulls/7/evidence") => (
+            201,
+            vec![],
+            json!({ "evidence": { "id": "ev-1" }, "recorded": false, "reanalysing": true })
+                .to_string()
+                .into_bytes(),
+        ),
         ("GET", "/v1/orgs/acme/repos/acme%2Fshop/map") => {
             let commit = query.strip_prefix("commit=").unwrap_or_default();
             match w.maps.get(commit) {
@@ -1493,5 +1516,178 @@ fn the_command_line_files_reports_and_collects_answers() {
         log.lines()
             .any(|l| l.contains(&id) && l.contains("\"decision\":\"withdrawn\"")),
         "{log}"
+    );
+}
+
+#[test]
+fn an_agents_door_log_travels_with_its_work() {
+    let fake = Fake::start();
+    let shop = shop();
+    let l = login(&fake);
+    let keys = Keys::new("sms-alerts", "services/notifications/**");
+    let mut m = mcp(
+        &shop.root,
+        &["--token", &keys.token, "--key-public", &keys.public()],
+        &l.env(),
+    );
+    // Some work through the door, then the door log attached to the pull
+    // request. The server cuts the slice from its own log.
+    let (failed, _) = m.tool("onus_status", json!({}));
+    assert!(!failed);
+    let (failed, out) = m.tool("onus_cloud_attach_evidence", json!({ "number": 7 }));
+    assert!(failed, "nothing to attach: {out}");
+    assert!(out.as_str().unwrap().contains("doorLog"), "{out}");
+    // Only to the pull request whose head is this work's commit: not to one
+    // Onus Cloud does not know, nor to another change's.
+    let (failed, out) = m.tool(
+        "onus_cloud_attach_evidence",
+        json!({ "number": 7, "doorLog": true }),
+    );
+    assert!(failed, "{out}");
+    assert!(
+        out.as_str()
+            .unwrap()
+            .contains("cannot check that acme/shop#7 is this work's"),
+        "{out}"
+    );
+    fake.pull(8, &"a".repeat(40));
+    let (failed, out) = m.tool(
+        "onus_cloud_attach_evidence",
+        json!({ "number": 8, "doorLog": true }),
+    );
+    assert!(failed, "{out}");
+    assert!(
+        out.as_str()
+            .unwrap()
+            .contains("goes only with its own pull request"),
+        "{out}"
+    );
+    assert!(
+        fake.requests("POST", "/v1/orgs/acme/repos/acme%2Fshop/pulls/")
+            .is_empty(),
+        "a refused door log attaches nothing"
+    );
+    fake.pull(7, &shop.head);
+    let (failed, out) = m.tool(
+        "onus_cloud_attach_evidence",
+        json!({ "number": 7, "doorLog": true }),
+    );
+    assert!(!failed, "{out}");
+    assert_eq!(out["doorLog"]["task"], "sms-alerts", "{out}");
+    let posted = fake.requests("POST", "/v1/orgs/acme/repos/acme%2Fshop/pulls/7/evidence");
+    assert_eq!(posted.len(), 1, "a door log alone: no run is posted");
+    let body = &posted[0].body;
+    assert_eq!(body["doorLog"]["task"], "sms-alerts");
+    assert_eq!(body["doorLog"]["head"], shop.head.as_str());
+    let entries = body["doorLog"]["entries"].as_array().unwrap();
+    let actions: Vec<&str> = entries
+        .iter()
+        .map(|e| e["action"].as_str().unwrap())
+        .collect();
+    assert!(actions.contains(&"mcp:onus_status"), "{actions:?}");
+    // The attach call itself is in it, allowed by the door.
+    assert_eq!(
+        actions.last(),
+        Some(&"mcp:onus_cloud_attach_evidence"),
+        "{actions:?}"
+    );
+    assert!(!posted[0].raw.contains(&keys.token));
+    // What the token this door holds is goes with it, never the token.
+    let inspection = &body["doorLog"]["inspection"];
+    assert_eq!(inspection["task"], "sms-alerts", "{body}");
+    assert_eq!(
+        inspection["rights"][0],
+        "write:path:services/notifications/**"
+    );
+    let log = std::fs::read_to_string(shop.root.join(".onus/audit.jsonl")).unwrap();
+    assert!(
+        log.contains("\"doorLog\":"),
+        "the ledger counts what was attached"
+    );
+
+    // What Onus Cloud keeps is what onus ci pr and onus provenance read.
+    let kept = shop.root.join("../door-log.json");
+    std::fs::write(&kept, &posted[0].raw).unwrap();
+    let kept = kept.display().to_string();
+    let (code, text, err) = onus(
+        &shop.root,
+        &[],
+        &["provenance", "--change", "acme/shop#7", "--audit", &kept],
+    );
+    assert_eq!(code, 0, "{err}");
+    let p: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(p["doors"]["source"], "attached", "{p}");
+    assert_eq!(p["doors"]["intact"], true, "{p}");
+    // No mint is in this log, and the agent never escalated: the token
+    // comes from the door's inspection sent with the slice.
+    assert_eq!(p["token"]["source"], "attached", "{p}");
+    assert_eq!(p["token"]["task"], "sms-alerts");
+    assert_eq!(p["token"]["rights"], inspection["rights"]);
+    assert!(!text.contains(&keys.token));
+    assert!(
+        p["doors"]["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|e| e["actor"] == "sms-alerts")
+    );
+    // The token is no gap; the door log only says it is the agent's word.
+    let gaps = p["gaps"].as_array().unwrap();
+    assert!(!gaps.iter().any(|g| g["field"] == "token"), "{p}");
+    let doors: Vec<&str> = gaps
+        .iter()
+        .filter(|g| g["field"] == "doors")
+        .map(|g| g["reason"].as_str().unwrap())
+        .collect();
+    assert!(
+        doors.len() == 1 && doors[0].contains("the slice the agent attached, on its word"),
+        "{p}"
+    );
+
+    // From the command line, for a task named there.
+    let (code, _, err) = onus(
+        &shop.root,
+        &l.env(),
+        &["cloud", "evidence", "acme/shop#7", "--door-log"],
+    );
+    assert_ne!(code, 0);
+    assert!(err.contains("--task"), "{err}");
+    let (code, _, err) = onus(
+        &shop.root,
+        &l.env(),
+        &[
+            "cloud",
+            "evidence",
+            "acme/shop#7",
+            "--door-log",
+            "--task",
+            "nobody",
+        ],
+    );
+    assert_eq!(code, 1);
+    assert!(err.contains("holds nothing about task nobody"), "{err}");
+    let (code, _, err) = onus(
+        &shop.root,
+        &l.env(),
+        &[
+            "cloud",
+            "evidence",
+            "acme/shop#7",
+            "--door-log",
+            "--task",
+            "sms-alerts",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(err.contains("task sms-alerts's door log"), "{err}");
+    let posted = fake.requests("POST", "/v1/orgs/acme/repos/acme%2Fshop/pulls/7/evidence");
+    assert_eq!(posted.len(), 2);
+    assert!(
+        posted[1].body["doorLog"]["entries"]
+            .as_array()
+            .unwrap()
+            .len()
+            > entries.len(),
+        "the slice grew with the attach call's own entries"
     );
 }

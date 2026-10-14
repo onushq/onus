@@ -65,13 +65,25 @@ pub enum CloudCmd {
         json: bool,
     },
     /// Attach a run recorded in a hosted environment to a pull request, as evidence the
-    /// judge checks against the recording.
+    /// judge checks against the recording; or the task's slice of the door log, for the
+    /// change's provenance.
     Evidence {
         /// owner/name#12, or #12 for this folder's repository.
         pull: String,
         /// The run's id (from `onus cloud env run`).
-        #[arg(long, value_name = "ID")]
-        run: String,
+        #[arg(long, value_name = "ID", required_unless_present = "door_log")]
+        run: Option<String>,
+        /// Attach the task's slice of the door log: its entries from the task's first to
+        /// its last, so Onus Cloud's analysis can check the chain and keep it in the
+        /// change's provenance.
+        #[arg(long, requires = "task")]
+        door_log: bool,
+        /// The task whose door log to attach.
+        #[arg(long)]
+        task: Option<String>,
+        /// The door log (default: .onus/audit.jsonl in this worktree).
+        #[arg(long, value_name = "FILE", requires = "door_log")]
+        audit: Option<PathBuf>,
     },
     /// Scoped tokens: one organisation, some repositories, some scopes, a fixed end. Give
     /// one to an agent or a script as ONUS_CLOUD_TOKEN; it opens only those doors.
@@ -583,15 +595,35 @@ pub fn run(org: Option<String>, cmd: CloudCmd) -> Result<i32> {
             }
             Ok(0)
         }
-        CloudCmd::Evidence { pull, run } => {
-            let out = cloud::act(
-                &client,
-                &here,
-                "cloud.attachEvidence",
-                attach_input(&pull, &run),
-            )?;
+        CloudCmd::Evidence {
+            pull,
+            run,
+            door_log,
+            task,
+            audit,
+        } => {
+            let mut input = attach_input(&pull, run.as_deref());
+            if let (true, Some(task)) = (door_log, &task) {
+                let root = onus_cli::daemon::worktree_root(&here);
+                let log = audit.unwrap_or_else(|| crate::ui::places(&root).audit);
+                let head = cloud::commit_of(&root, "HEAD");
+                input["doorLog"] = onus_cli::door::door_log_slice(&log, task, head)?;
+            }
+            let out = cloud::act(&client, &here, "cloud.attachEvidence", input)?;
+            let mut what = Vec::new();
+            if let Some(run) = &run {
+                what.push(format!("run {run}"));
+            }
+            if door_log {
+                what.push(format!(
+                    "task {}'s door log ({} entries)",
+                    task.unwrap_or_default(),
+                    out["doorLog"]["entries"]
+                ));
+            }
             eprintln!(
-                "onus: attached run {run} to {pull}{}",
+                "onus: attached {} to {pull}{}",
+                what.join(" and "),
                 if out["reanalysing"] == true {
                     "; analysing it again"
                 } else {
@@ -1047,7 +1079,7 @@ fn report(out: &Value, json: bool) -> Result<i32> {
 }
 
 /// The pull request as the agent action takes it: repository and number.
-fn attach_input(pull: &str, run: &str) -> Value {
+fn attach_input(pull: &str, run: Option<&str>) -> Value {
     match pull.rsplit_once('#') {
         Some((r, n)) if !r.is_empty() => {
             json!({ "repository": r, "number": n.parse::<u64>().ok(), "run": run })

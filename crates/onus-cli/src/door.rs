@@ -168,6 +168,37 @@ pub fn ledger(log: &AuditLog, task: &str, tool: &str, field: &str) -> Result<BTr
         .collect())
 }
 
+/// A task's slice of its door log, to travel with its work
+/// (`schemas/door-log.schema.json`): the run of entries from the task's
+/// first to its last, whatever lies between, so the chain can be checked
+/// where it is read. `head` is the worktree's commit. An error when no
+/// entry is about the task.
+pub fn door_log_slice(log: &Path, task: &str, head: Option<String>) -> Result<Value> {
+    if !log.exists() {
+        bail!(
+            "there is no door log at {}: nothing was done through a door yet",
+            log.display()
+        );
+    }
+    let read = onus_lanes::provenance::read_door_log(log)?;
+    let entries = onus_doors::audit::slice(&read.entries, task);
+    if entries.is_empty() {
+        bail!(
+            "the door log {} holds nothing about task {task}",
+            log.display()
+        );
+    }
+    let mut slice = json!({
+        "task": task,
+        "at": onus_doors::gateway::now(),
+        "entries": entries,
+    });
+    if let Some(h) = head {
+        slice["head"] = json!(h);
+    }
+    Ok(slice)
+}
+
 /// The facts of a worktree on this machine.
 #[derive(Debug, Clone)]
 pub struct LocalFacts {
@@ -562,13 +593,20 @@ pub fn authorize(
         }
         "onus_cloud_pulls" | "onus_cloud_pull" => same_repository(args, facts),
         "onus_cloud_attach_evidence" => {
-            let run = str_arg(args, "run").unwrap_or_default();
-            let made = facts
-                .ledger(task, "onus_cloud_env_run", "runId")
-                .map_err(unknown)?;
-            if !made.contains(run) {
+            // The door log attached is the task's own slice, cut by the server.
+            if let Some(run) = str_arg(args, "run") {
+                let made = facts
+                    .ledger(task, "onus_cloud_env_run", "runId")
+                    .map_err(unknown)?;
+                if !made.contains(run) {
+                    return Err(Denial::new(
+                        format!("run `{run}` was not made by task `{task}`."),
+                        "Attach runs you made with onus_cloud_env_run.",
+                    ));
+                }
+            } else if args["doorLog"] != json!(true) {
                 return Err(Denial::new(
-                    format!("run `{run}` was not made by task `{task}`."),
+                    "name a run to attach, or attach your door log (doorLog: true).",
                     "Attach runs you made with onus_cloud_env_run.",
                 ));
             }
@@ -653,6 +691,7 @@ pub fn result_fields(tool: &str, args: &Value, subject: &str, answer: &Value) ->
         "onus_cloud_attach_evidence" => json!({
             "pull": subject,
             "run": args["run"],
+            "doorLog": answer["doorLog"]["entries"],
         }),
         _ => json!({}),
     }
@@ -794,6 +833,23 @@ impl Door {
 
     pub fn task(&self) -> Option<String> {
         self.with_held(|h| h.map(|h| h.verified.task.clone()))
+    }
+
+    /// What the held token holds (`{task, rights, attenuations, expires}`,
+    /// as `onus token inspect` prints it), never the token: sent with the
+    /// task's door log so its provenance knows the token.
+    pub fn inspection(&self) -> Option<Value> {
+        self.with_held(|h| {
+            h.map(|h| {
+                let v = &h.verified;
+                json!({
+                    "task": v.task,
+                    "rights": v.rights.iter().map(|r| r.to_string()).collect::<Vec<_>>(),
+                    "attenuations": v.attenuations,
+                    "expires": v.expires,
+                })
+            })
+        })
     }
 
     /// The token as given, for submissions and environments.
@@ -1315,6 +1371,28 @@ mod tests {
                 json!({ "number": 3, "run": "r-2" })
             )
             .contains("run `r-2` was not made by task `sms`")
+        );
+        // The task's own door log, cut by the server; but something to attach.
+        assert!(
+            check(
+                "onus_cloud_attach_evidence",
+                json!({ "number": 3, "doorLog": true })
+            )
+            .is_ok()
+        );
+        assert!(
+            denied(
+                "onus_cloud_attach_evidence",
+                json!({ "number": 3, "doorLog": false })
+            )
+            .contains("name a run to attach")
+        );
+        assert!(
+            denied(
+                "onus_cloud_attach_evidence",
+                json!({ "number": 3, "run": "r-2", "doorLog": true })
+            )
+            .contains("run `r-2`")
         );
         // A broken log is a denial, never a pass.
         let broken = Fake {

@@ -51,7 +51,7 @@ Handing work in (leave these out with `onus mcp --no-actions`):
 Onus Cloud (listed only when the CLI is signed in with `onus login`, `ONUS_CLOUD_TOKEN` or `ONUS_API_KEY`; see `onus help cloud`):
 
 - `onus_cloud_env_create`, `onus_cloud_env_run`, `onus_cloud_envs`, `onus_cloud_env_destroy`: environments built and run on Onus Cloud's machines from a pushed commit, each run recorded by Onus Cloud.
-- `onus_cloud_attach_evidence`: a recorded run to a pull request, for the judge.
+- `onus_cloud_attach_evidence`: a recorded run to a pull request, for the judge; with `doorLog: true`, the task's slice of the door log too, cut by the server from its own log, for the change's provenance.
 - `onus_cloud_status`, `onus_cloud_pulls`, `onus_cloud_pull`: who the CLI is and what its plan allows; governed pull requests, their lanes and evidence.
 - `onus_cloud_map`: the map tools' questions (`{"query": "dependents", "target": …}`) asked of the map Onus Cloud keeps at a commit or a pull request's head, answered here and filtered to the token's read scope.
 - `onus_cloud_token`: a narrower Onus Cloud token for a sub-agent: only the scopes and repositories named, never more than the server's, ending within 24 hours.

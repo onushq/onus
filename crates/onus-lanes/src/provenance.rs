@@ -1,9 +1,11 @@
 //! Builds a change's provenance record (`onus_core::provenance`) from the
 //! facts Onus keeps about it: the submission, classification and judgment
 //! from while it was open, the pull and outcome records, the token, the door
-//! log and escalation requests, and the escalations Onus Cloud decided with
-//! the door's inspection of the token. Every field is computed here, the
-//! approver included, so a host only stores and shows the result.
+//! log (or the task's slice of it, attached to the work) and escalation
+//! requests, the escalations Onus Cloud decided with the door's inspection
+//! of the token, and Onus Cloud's log of the calls made under the token.
+//! Every field is computed here, the approver included, so a host only
+//! stores and shows the result.
 //!
 //! Facts from while the change was open (intent, report, token, evidence,
 //! escalations, lane reasons, judge, doors) come from the fresh inputs when
@@ -18,14 +20,14 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use onus_core::Lane;
 use onus_core::provenance::{
-    Agent, Approval, ApprovedBy, CloudState, Commits, DoorEntry, Doors, Escalation,
-    EscalationDecision, Evidence, Gap, Intent, IntentSource, Judge, JudgeStep, LaneFacts,
-    LaneReason, Moment, PlanFacts, ProvenanceRecord, ReportFacts, Rollout, RolloutEvent,
-    RolloutStatus, RowApproval, SCHEMA, SignalRef, Stage, StageEvent, Token, TokenInspection,
-    TokenSource, TrackRecord,
+    Agent, Approval, ApprovedBy, CallDecision, CallDenial, CallsSource, CloudCall, CloudCalls,
+    CloudState, Commits, DoorEntry, DoorSource, Doors, Escalation, EscalationDecision, Evidence,
+    Gap, Intent, IntentSource, Judge, JudgeStep, LaneFacts, LaneReason, Moment, PlanFacts,
+    ProvenanceRecord, ReportFacts, Rollout, RolloutEvent, RolloutStatus, RouteCalls, RowApproval,
+    SCHEMA, SignalRef, Stage, StageEvent, Token, TokenInspection, TokenSource, TrackRecord,
 };
 use onus_core::signal::{ProductionSignal, SignalKind};
-use onus_doors::audit::{AuditLog, Entry};
+use onus_doors::audit::Entry;
 use onus_doors::escalation::Request;
 use sha2::{Digest, Sha256};
 
@@ -45,6 +47,11 @@ pub struct Inputs<'a> {
     /// An earlier record of this change.
     pub from: Option<ProvenanceRecord>,
     pub submission: Option<&'a Submission>,
+    /// The agent's own submission of a pull request, handed in beside the
+    /// run's: only its token and the escalations it lists are taken. The
+    /// caller checks it is for one of the change's commits
+    /// ([`agents_submission_fits`]).
+    pub agents: Option<&'a Submission>,
     /// Where the submission's intent came from.
     pub intent_source: IntentSource,
     /// How the agent was recognised (`pulls::detect_agent_source`).
@@ -61,6 +68,25 @@ pub struct Inputs<'a> {
     pub token: Option<Token>,
     /// The door log's entries, and whether its hash chain verified.
     pub audit: Option<(Vec<Entry>, bool)>,
+    /// When `audit` is a task's slice attached to its work in Onus Cloud:
+    /// the task it names ([`DoorSource::Attached`]).
+    pub audit_slice: Option<&'a str>,
+    /// The commit the slice was cut at ([`DoorLog::head`]). A slice cut at
+    /// a commit that is not one of the change's gives neither the task nor
+    /// the token, and the `doors` gap says so.
+    pub audit_head: Option<&'a str>,
+    /// Why the door log does not verify, or could not be read: the doors
+    /// gap says so.
+    pub audit_why: Option<&'a str>,
+    /// Onus Cloud's log of the calls made under the task token. Given and
+    /// empty, no call was made there.
+    pub calls: Option<&'a [CloudCall]>,
+    /// What of Onus Cloud's calls could not be read, one note each.
+    pub calls_unread: &'a [String],
+    /// The door's inspection of the token sent with an attached slice
+    /// ([`DoorLog::inspection`]): [`TokenSource::Attached`] when the slice
+    /// verifies.
+    pub attached_inspection: Option<TokenInspection>,
     pub requests: &'a [Request],
     /// Escalations as Onus Cloud keeps them, with their decisions. Given and
     /// empty, Onus Cloud has none for the change.
@@ -90,6 +116,7 @@ impl<'a> Inputs<'a> {
             now,
             from: None,
             submission: None,
+            agents: None,
             intent_source: IntentSource::Submission,
             agent_source: None,
             classification: None,
@@ -100,6 +127,12 @@ impl<'a> Inputs<'a> {
             signals: &[],
             token: None,
             audit: None,
+            audit_slice: None,
+            audit_head: None,
+            audit_why: None,
+            calls: None,
+            calls_unread: &[],
+            attached_inspection: None,
             requests: &[],
             decisions: None,
             unread: &[],
@@ -142,19 +175,338 @@ pub fn fingerprint(token: &str) -> String {
     sha256_hex(token.trim().as_bytes())[..16].to_string()
 }
 
+/// Whether the agent's own submission is for one of the change's commits:
+/// its head, one of `commits` (base excluded), or a head the pull records
+/// classified for it. Only then are its token and escalations the change's.
+pub fn agents_submission_fits(
+    s: &Submission,
+    change: &str,
+    head: &str,
+    commits: &[String],
+    pulls: &[PullRecord],
+) -> bool {
+    is_change_commit(&s.head, change, head, commits, pulls)
+}
+
+/// Whether `at` is one of the change's commits: its head, one of
+/// `commits`, or the head of one of its pull records.
+fn is_change_commit(
+    at: &str,
+    change: &str,
+    head: &str,
+    commits: &[String],
+    pulls: &[PullRecord],
+) -> bool {
+    !at.is_empty()
+        && (at.eq_ignore_ascii_case(head)
+            || commits.iter().any(|c| c.eq_ignore_ascii_case(at))
+            || pulls
+                .iter()
+                .any(|p| p.change == change && p.head.eq_ignore_ascii_case(at)))
+}
+
 /// Reads a door log. A log whose hash chain does not verify is still read,
 /// line by line, and reported as not intact.
 pub fn read_audit(path: &Path) -> Result<(Vec<Entry>, bool)> {
-    if let Ok(entries) = AuditLog::new(path).verify() {
-        return Ok((entries, true));
-    }
+    let log = read_door_log(path)?;
+    Ok((log.entries, log.intact))
+}
+
+/// A door log as it was read: the whole log (audit.jsonl), or a task's
+/// slice attached to its work in Onus Cloud.
+#[derive(Debug, Clone, Default)]
+pub struct DoorLog {
+    pub entries: Vec<Entry>,
+    /// Its hash chain verified: from entry 1 for a log, from its first
+    /// entry for a slice.
+    pub intact: bool,
+    /// The task a slice names; none for a whole log.
+    pub slice: Option<String>,
+    /// The commit a slice was cut at, when it says.
+    pub head: Option<String>,
+    /// Why it does not verify.
+    pub why: Option<String>,
+    /// The door's inspection of the token it held, sent with a slice for
+    /// the slice's task; never the token.
+    pub inspection: Option<TokenInspection>,
+}
+
+/// Reads a door log from a file: [`parse_door_log`].
+pub fn read_door_log(path: &Path) -> Result<DoorLog> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("cannot read the audit log {}", path.display()))?;
-    let entries = text
-        .lines()
-        .filter_map(|l| serde_json::from_str(l).ok())
+    parse_door_log(&text).with_context(|| format!("{} is not a door log", path.display()))
+}
+
+/// Reads a door log: the lines of an audit log, or a task's slice
+/// (`schemas/door-log.schema.json`, also inside `{"doorLog": …}` as it
+/// was attached). Entries that cannot be read are left out, and the log is
+/// then not intact. A whole log's chain is checked from entry 1; a slice's
+/// from its first entry, which is all a slice can show.
+pub fn parse_door_log(text: &str) -> Result<DoorLog> {
+    let entry = |v: &serde_json::Value| serde_json::from_value::<Entry>(v.clone()).ok();
+    let mut inspection = None;
+    let mut head = None;
+    let (entries, slice, unread) = match serde_json::from_str::<serde_json::Value>(text.trim()) {
+        // One line of a log is an object too: a slice holds `entries`.
+        Ok(mut v) if v.get("doorLog").is_some() || v.get("entries").is_some() => {
+            if let Some(inner) = v.get_mut("doorLog").filter(|d| d.is_object()) {
+                v = inner.take();
+            }
+            let Some(task) = v["task"].as_str().filter(|t| !t.trim().is_empty()) else {
+                bail!("a door log slice names its task");
+            };
+            let Some(items) = v["entries"].as_array() else {
+                bail!("a door log slice holds its entries");
+            };
+            // The inspection of the slice's task, never a token: one that
+            // cannot be read, or is another task's, is left out.
+            match &v["inspection"] {
+                serde_json::Value::Null => {}
+                serde_json::Value::String(_) => {
+                    return Err(HoldsToken("the slice's inspection is a token".into()).into());
+                }
+                i => {
+                    inspection = serde_json::from_value::<TokenInspection>(i.clone())
+                        .ok()
+                        .filter(|i| i.task == task);
+                }
+            }
+            head = v["head"]
+                .as_str()
+                .filter(|h| !h.trim().is_empty())
+                .map(str::to_string);
+            let read: Vec<Entry> = items.iter().filter_map(entry).collect();
+            let unread = items.len() - read.len();
+            (read, Some(task.to_string()), unread)
+        }
+        _ => {
+            let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+            let read: Vec<Entry> = lines
+                .iter()
+                .filter_map(|l| serde_json::from_str(l).ok())
+                .collect();
+            let unread = lines.len() - read.len();
+            if !lines.is_empty() && read.is_empty() {
+                bail!("not an audit log: no line is an entry");
+            }
+            (read, None, unread)
+        }
+    };
+    let why = if unread > 0 {
+        Some(format!("{unread} entries cannot be read"))
+    } else if entries.is_empty() {
+        slice
+            .as_ref()
+            .map(|_| "the slice holds no entries".to_string())
+    } else if slice.is_none() && entries[0].seq != 1 {
+        Some(format!(
+            "it starts at entry {}: entries before it were removed",
+            entries[0].seq
+        ))
+    } else {
+        onus_doors::audit::verify_run(&entries)
+            .err()
+            .map(|e| e.to_string())
+    };
+    Ok(DoorLog {
+        intact: why.is_none(),
+        entries,
+        slice,
+        head,
+        why,
+        inspection,
+    })
+}
+
+/// Onus Cloud's log of a task token's calls, as far as it could be read.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CloudCallsRead {
+    pub list: Vec<CloudCall>,
+    /// One note for each call that could not be read, naming it.
+    pub unread: Vec<String>,
+}
+
+/// The fields of a call that are read. The API's rows carry more (`path`,
+/// `userAgent`, `credentialName`, …), some of it set by whoever made the
+/// call; those are never read, kept or checked.
+const CALL_FIELDS: [&str; 11] = [
+    "id",
+    "at",
+    "createdAt",
+    "method",
+    "route",
+    "scope",
+    "decision",
+    "tokenId",
+    "credentialId",
+    "task",
+    "reason",
+];
+
+/// Reads Onus Cloud's log of the calls made under a task token: a JSON
+/// array (`schemas/cloud-calls.schema.json`), or the API's `{"calls":
+/// [...]}`. Only [`CALL_FIELDS`] are read. A call that cannot be read is
+/// left out with a note, and so is one with a `token`, or a field that looks
+/// like one: the note names the field, never the value. A file that is not
+/// such a list is an error.
+pub fn parse_calls(text: &str) -> Result<CloudCallsRead> {
+    let mut v: serde_json::Value = serde_json::from_str(text)
+        .context("not JSON: give a JSON array of the calls Onus Cloud logged")?;
+    if let Some(list) = v.get_mut("calls") {
+        v = list.take();
+    }
+    let Some(items) = v.as_array_mut() else {
+        bail!("not a JSON array of calls");
+    };
+    let mut read = CloudCallsRead::default();
+    for (n, e) in items.iter_mut().enumerate() {
+        let token = e.get("token").is_some_and(|t| !t.is_null());
+        if let Some(o) = e.as_object_mut() {
+            o.retain(|k, _| CALL_FIELDS.contains(&k.as_str()));
+        }
+        let held = CALL_FIELDS
+            .into_iter()
+            .find(|k| e.get(k).is_some_and(holds_token));
+        // Named by its place: its id may be what holds the token.
+        if let Some(k) = held.or(token.then_some("token")) {
+            read.unread.push(format!(
+                "call #{}: `{k}` holds what looks like a token",
+                n + 1
+            ));
+            continue;
+        }
+        let e = &*e;
+        let name = name_of(e, n);
+        let base = serde_json::json!({
+            "at": 1, "method": "GET", "route": "/", "decision": "allowed",
+        });
+        match serde_json::from_value::<CloudCall>(e.clone()) {
+            Ok(c) if seconds(&c.at).is_none() => read.unread.push(format!(
+                "call {name}: `at` is neither Unix seconds nor an RFC 3339 date in UTC"
+            )),
+            Ok(c) => read.list.push(c),
+            Err(err) => read.unread.push(format!(
+                "call {name}: {}",
+                why_unread::<CloudCall>(e, base, &err)
+            )),
+        }
+    }
+    Ok(read)
+}
+
+/// Whether any text in `v` looks like a token: Onus Cloud's
+/// (`onus_tok_<base62>`, `onus_cli_<base62>`, an `onus_<env>_<base62>` API
+/// key), a PASETO, or a run of base64url (no `/`, `+` or `=`) as long as a
+/// Biscuit. Ids, routes, paths, scopes, tool names and a token's shown
+/// prefix are none of these.
+fn holds_token(v: &serde_json::Value) -> bool {
+    let word = |w: &str| {
+        let w = w.trim_matches(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-')));
+        let parts: Vec<&str> = w.split('_').collect();
+        parts.len() >= 3
+            && parts[0] == "onus"
+            && parts
+                .last()
+                .is_some_and(|k| k.len() >= 20 && k.chars().all(|c| c.is_ascii_alphanumeric()))
+            || w.starts_with("v4.public.")
+            || w.starts_with("v4.local.")
+            || w.len() >= 100
+                && w.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+    };
+    match v {
+        serde_json::Value::String(t) => t.split_whitespace().any(word),
+        serde_json::Value::Array(a) => a.iter().any(holds_token),
+        serde_json::Value::Object(o) => o.values().any(holds_token),
+        _ => false,
+    }
+}
+
+/// The most refusals a record lists; the counts hold them all.
+const DENIALS: usize = 100;
+
+/// Onus Cloud's calls, summed up by route and scope, with the refusals.
+fn calls_summary(calls: &[&CloudCall]) -> CloudCalls {
+    let mut sorted: Vec<(&CloudCall, u64)> = calls
+        .iter()
+        .map(|c| (*c, seconds(&c.at).unwrap_or(0)))
         .collect();
-    Ok((entries, false))
+    sorted.sort_by_key(|(_, at)| *at);
+    let mut out = CloudCalls {
+        source: CallsSource::OnusCloud,
+        total: 0,
+        allowed: 0,
+        denied: 0,
+        failed: 0,
+        untasked: 0,
+        first_at: sorted.first().map(|(_, at)| *at),
+        last_at: sorted.last().map(|(_, at)| *at),
+        tokens: Vec::new(),
+        routes: Vec::new(),
+        denials: Vec::new(),
+    };
+    for (c, at) in sorted {
+        out.total += 1;
+        if c.task.is_none() {
+            out.untasked += 1;
+        }
+        let at_route = match out
+            .routes
+            .iter()
+            .position(|r| r.method == c.method && r.route == c.route && r.scope == c.scope)
+        {
+            Some(n) => n,
+            None => {
+                out.routes.push(RouteCalls {
+                    method: c.method.clone(),
+                    route: c.route.clone(),
+                    scope: c.scope.clone(),
+                    allowed: 0,
+                    denied: 0,
+                    failed: 0,
+                });
+                out.routes.len() - 1
+            }
+        };
+        let route = &mut out.routes[at_route];
+        match c.decision {
+            CallDecision::Allowed => {
+                out.allowed += 1;
+                route.allowed += 1;
+            }
+            CallDecision::Denied => {
+                out.denied += 1;
+                route.denied += 1;
+                if out.denials.len() < DENIALS {
+                    out.denials.push(CallDenial {
+                        at,
+                        method: c.method.clone(),
+                        route: c.route.clone(),
+                        scope: c.scope.clone(),
+                        reason: c
+                            .reason
+                            .as_deref()
+                            .filter(|r| !r.is_empty())
+                            .map(|r| r.chars().take(500).collect()),
+                        token_id: c.token_id.clone(),
+                    });
+                }
+            }
+            CallDecision::Failed => {
+                out.failed += 1;
+                route.failed += 1;
+            }
+        }
+        if let Some(t) = &c.token_id
+            && !out.tokens.contains(t)
+        {
+            out.tokens.push(t.clone());
+        }
+    }
+    out.routes
+        .sort_by(|a, b| (&a.route, &a.method, &a.scope).cmp(&(&b.route, &b.method, &b.scope)));
+    out
 }
 
 /// The token as the door log saw it: the `mint` entry of `task`, widened by
@@ -208,7 +560,9 @@ fn escalation(id: &str, requests: &[Request], entries: &[Entry], listed: bool) -
     let decided = decision_of(entries, id);
     let decision = match decided {
         Some(e) => e.decision.clone(),
-        // A submission lists only escalations verified as granted.
+        // A submission lists only escalations verified as granted when it
+        // was made. The agent's own, handed in beside the run, is on its
+        // word: the escalations gap says so.
         None if listed => "granted".into(),
         None => "open".into(),
     };
@@ -451,9 +805,17 @@ fn is_final(decision: &str) -> bool {
 /// stands against one Onus Cloud has not made yet, and Onus Cloud's fills
 /// what it left out. When both are final and differ, Onus Cloud's is
 /// recorded, since it decided, and the disagreement is returned as a note.
-/// A stored row still waiting past its expiry at `now` has expired, as
-/// Onus Cloud shows it.
-fn decide_from_cloud(e: &mut Escalation, d: &EscalationDecision, now: u64) -> Option<String> {
+/// A decision that is only the agent's word (`on_word`: the door log it
+/// attached, or its own submission) stands against nothing: Onus Cloud's is
+/// recorded whatever its state, with a note when they differ. A stored row
+/// still waiting past its expiry at `now` has expired, as Onus Cloud shows
+/// it.
+fn decide_from_cloud(
+    e: &mut Escalation,
+    d: &EscalationDecision,
+    now: u64,
+    on_word: bool,
+) -> Option<String> {
     let expired = d
         .expires_at
         .as_ref()
@@ -484,7 +846,20 @@ fn decide_from_cloud(e: &mut Escalation, d: &EscalationDecision, now: u64) -> Op
     // The decider's reason, as the door log keeps it; never the agent's.
     let reason = d.answer.clone().filter(|r| !r.is_empty());
     let mut note = None;
-    if is_final(&e.decision) && is_final(decision) && e.decision != decision {
+    if on_word && e.decision != decision {
+        note = Some(format!(
+            "escalation {} is {decision} in Onus Cloud but {} on the agent's word (the door log it attached, or its own submission); Onus Cloud's decision is recorded",
+            e.id, e.decision
+        ));
+        e.decision = decision.to_string();
+        e.by = by;
+        e.at = at;
+        e.reason = reason;
+    } else if on_word {
+        e.by = by.or(e.by.take());
+        e.at = at.or(e.at);
+        e.reason = reason.or(e.reason.take());
+    } else if is_final(&e.decision) && is_final(decision) && e.decision != decision {
         note = Some(format!(
             "escalation {} is {decision} in Onus Cloud but was {} by the submission or the door log; Onus Cloud's decision is recorded",
             e.id, e.decision
@@ -617,6 +992,12 @@ fn status_of(
 pub fn build(i: Inputs) -> ProvenanceRecord {
     let from = i.from.as_ref();
     let sub = i.submission;
+    // The token and escalations come from the agent's own submission when
+    // one was handed in beside the run's.
+    let held = i.agents.or(sub);
+    // A door log that verifies, and whether it is a slice attached to the
+    // work rather than one this run read.
+    let intact = i.audit.as_ref().is_some_and(|(_, ok)| *ok);
     let pull = pulls::latest(i.pulls, i.change);
     let lines: Vec<&Outcome> = i.outcomes.iter().filter(|o| o.change == i.change).collect();
 
@@ -633,6 +1014,20 @@ pub fn build(i: Inputs) -> ProvenanceRecord {
             .unwrap_or_default(),
         merge: None,
     };
+    // A slice cut at a commit that is not one of the change's may be
+    // another change's: it says nothing of this one's task, token or
+    // escalations. Nor does one that does not say where it was cut (the
+    // commit, or "" for none). Unchecked when the change's commits are not
+    // known.
+    let commits_known = !commits.head.is_empty() || !i.commits.is_empty();
+    let foreign_slice: Option<&str> = i.audit_slice.filter(|_| commits_known).and_then(|_| match i
+        .audit_head
+    {
+        Some(h) if is_change_commit(h, i.change, &commits.head, i.commits, i.pulls) => None,
+        Some(h) => Some(h),
+        None => Some(""),
+    });
+    let slice_task = i.audit_slice.filter(|_| intact && foreign_slice.is_none());
 
     // Facts from while the change was open.
     let intent = match sub {
@@ -697,7 +1092,7 @@ pub fn build(i: Inputs) -> ProvenanceRecord {
     // the submission lists it, the earlier record kept it, or it was filed
     // at one of the change's commits or on its branch. A commit elsewhere
     // outweighs the branch's name, which may be used again.
-    let listed: Vec<&str> = sub
+    let listed: Vec<&str> = held
         .map(|s| s.escalations.iter().map(String::as_str).collect())
         .unwrap_or_default();
     let kept: &[Escalation] = from.map_or(&[], |f| &f.escalations);
@@ -730,13 +1125,20 @@ pub fn build(i: Inputs) -> ProvenanceRecord {
     // The task: given, or the token's, the submission's, the inspection's or
     // the earlier record's, else the one task the escalations naming this
     // change name. One that does not name the change never says its task.
+    // The agent's own submission ranks below the door's word.
+    let scope_task =
+        |s: Option<&Submission>| s.and_then(|s| s.scope.as_ref()).map(|s| s.task.clone());
     let task: Option<String> = i
         .task
         .map(str::to_string)
         .or_else(|| i.token.as_ref().map(|t| t.task.clone()))
-        .or_else(|| sub.and_then(|s| s.scope.as_ref()).map(|s| s.task.clone()))
+        .or_else(|| scope_task(sub.filter(|_| i.agents.is_none())))
         .or_else(|| i.inspection.as_ref().map(|t| t.task.clone()))
+        .or_else(|| scope_task(i.agents))
         .or_else(|| from.and_then(|f| f.token.as_ref()).map(|t| t.task.clone()))
+        // The task whose door log was attached to this change's work, when
+        // its chain verifies.
+        .or_else(|| slice_task.map(str::to_string))
         .or_else(|| {
             let tasks: BTreeSet<&str> = decisions
                 .iter()
@@ -758,24 +1160,63 @@ pub fn build(i: Inputs) -> ProvenanceRecord {
         .collect();
     let decisions = decisions.as_slice();
     let entries: &[Entry] = i.audit.as_ref().map_or(&[], |(e, _)| e);
+    // Only a door log that verifies says what the token held.
+    let local_entries: &[Entry] = if intact && i.audit_slice.is_none() {
+        entries
+    } else {
+        &[]
+    };
+    // A slice that verifies, was cut at one of the change's commits, and is
+    // of the change's task: the only one whose decisions are read.
+    let slice_ok = slice_task.is_some_and(|s| task.as_deref().is_none_or(|t| t == s));
+    // Where escalations are decided: the door log this run read, or an
+    // attached slice that is the change's. A slice is the agent's word.
+    let decided: &[Entry] = if i.audit_slice.is_none() || slice_ok {
+        entries
+    } else {
+        &[]
+    };
+    let attached = || -> Option<Token> {
+        let t = slice_task.filter(|t| task.as_deref().is_none_or(|task| task == *t))?;
+        let mut token = match i.attached_inspection.clone().filter(|x| x.task == t) {
+            Some(x) => token_from_inspection(x, decisions),
+            None => token_from_audit(entries, t)?,
+        };
+        token.source = TokenSource::Attached;
+        Some(token)
+    };
+    let held_token = held.and_then(|s| s.scope.as_ref()).map(|s| Token {
+        task: s.task.clone(),
+        rights: s.rights.clone(),
+        attenuations: s.attenuations.clone(),
+        expires: s.expires,
+        fingerprint: s.fingerprint.clone(),
+        source: match i.agents {
+            Some(_) => TokenSource::AgentSubmission,
+            None => TokenSource::Submission,
+        },
+    });
+    // The agent's own submission is on its word: it ranks below the door's.
+    let (own_token, agents_token) = match i.agents {
+        Some(_) => (None, held_token),
+        None => (held_token, None),
+    };
     let token = i
         .token
         .clone()
+        .or(own_token)
         .or_else(|| {
-            sub.and_then(|s| s.scope.as_ref()).map(|s| Token {
-                task: s.task.clone(),
-                rights: s.rights.clone(),
-                attenuations: s.attenuations.clone(),
-                expires: s.expires,
-                fingerprint: s.fingerprint.clone(),
-                source: TokenSource::Submission,
-            })
+            task.as_deref()
+                .and_then(|t| token_from_audit(local_entries, t))
         })
-        .or_else(|| task.as_deref().and_then(|t| token_from_audit(entries, t)))
         // A token verified earlier outranks the door's word on a refresh.
         .or_else(|| {
-            from.and_then(|f| f.token.clone())
-                .filter(|t| t.source != TokenSource::Inspection)
+            from.and_then(|f| f.token.clone()).filter(|t| {
+                !matches!(
+                    t.source,
+                    TokenSource::Inspection | TokenSource::AgentSubmission | TokenSource::Attached
+                )
+            })
         })
         .or_else(|| {
             // The door's inspection: given, else the one Onus Cloud kept with
@@ -792,6 +1233,9 @@ pub fn build(i: Inputs) -> ProvenanceRecord {
                 })
                 .map(|t| token_from_inspection(t, decisions))
         })
+        .or(agents_token)
+        // What the door log attached to the work says, on its word.
+        .or_else(attached)
         .or_else(|| from.and_then(|f| f.token.clone()));
     let evidence = match sub {
         Some(s) => s
@@ -808,7 +1252,7 @@ pub fn build(i: Inputs) -> ProvenanceRecord {
             .collect(),
         None => from.map(|f| f.evidence.clone()).unwrap_or_default(),
     };
-    let local_escalations = sub.is_some() || !i.requests.is_empty() || i.audit.is_some();
+    let local_escalations = held.is_some() || !i.requests.is_empty() || i.audit.is_some();
     let fresh_escalations = local_escalations || i.decisions.is_some();
     let mut disagreements: Vec<String> = Vec::new();
     let escalations: Vec<Escalation> = if fresh_escalations {
@@ -823,19 +1267,30 @@ pub fn build(i: Inputs) -> ProvenanceRecord {
                 ids.push(id);
             }
         }
+        // Whether a decision is only the agent's word: the door log it
+        // attached, or the escalations its own submission lists.
+        let on_word = |id: &str| match decision_of(decided, id) {
+            Some(_) => i.audit_slice.is_some(),
+            None => i.agents.is_some() && listed.contains(&id),
+        };
         // With only Onus Cloud's list fresh, it updates the escalations kept
         // earlier, which may hold some only the door knew.
-        let mut out: Vec<Escalation> = if local_escalations {
+        let mut out: Vec<(Escalation, bool)> = if local_escalations {
             ids.into_iter()
-                .map(|id| escalation(id, i.requests, entries, listed.contains(&id)))
+                .map(|id| {
+                    let e = escalation(id, i.requests, decided, listed.contains(&id));
+                    let word = on_word(id) && is_final(&e.decision);
+                    (e, word)
+                })
                 .collect()
         } else {
-            from.map(|f| f.escalations.clone()).unwrap_or_default()
+            from.map(|f| f.escalations.iter().map(|e| (e.clone(), false)).collect())
+                .unwrap_or_default()
         };
         // Onus Cloud's decisions: on the request they are about, else as
-        // escalations of their own.
+        // escalations of their own. Onus Cloud's word outranks the agent's.
         for d in decisions {
-            let at = match out.iter().position(|e| is_about(d, e)) {
+            let at = match out.iter().position(|(e, _)| is_about(d, e)) {
                 Some(n) => n,
                 None => {
                     let id = d
@@ -843,13 +1298,29 @@ pub fn build(i: Inputs) -> ProvenanceRecord {
                         .as_deref()
                         .or(d.request_id.as_deref())
                         .unwrap_or(&d.id);
-                    out.push(escalation(id, i.requests, entries, false));
+                    let e = escalation(id, i.requests, decided, false);
+                    let word = on_word(id) && is_final(&e.decision);
+                    out.push((e, word));
                     out.len() - 1
                 }
             };
-            disagreements.extend(decide_from_cloud(&mut out[at], d, i.now));
+            let (e, word) = &mut out[at];
+            disagreements.extend(decide_from_cloud(e, d, i.now, *word));
+            *word = false;
         }
-        out
+        // What only the agent says was decided, and nothing here confirms.
+        let unconfirmed: Vec<&str> = out
+            .iter()
+            .filter(|(_, word)| *word)
+            .map(|(e, _)| e.id.as_str())
+            .collect();
+        if !unconfirmed.is_empty() {
+            disagreements.push(format!(
+                "the decisions on {} are the agent's word: its own submission or the door log it attached says so, and neither Onus Cloud nor a door log this run read confirms it",
+                unconfirmed.join(", ")
+            ));
+        }
+        out.into_iter().map(|(e, _)| e).collect()
     } else {
         from.map(|f| f.escalations.clone()).unwrap_or_default()
     };
@@ -870,37 +1341,86 @@ pub fn build(i: Inputs) -> ProvenanceRecord {
         }),
         None => from.and_then(|f| f.judge.clone()),
     };
-    let doors = match &i.audit {
+    // The door log: read here, or the slice attached to the work; else the
+    // one kept earlier. Onus Cloud's calls sit beside it, never in it.
+    let kept_doors = from.and_then(|f| f.doors.as_ref());
+    let log: Option<(bool, Vec<DoorEntry>, Option<DoorSource>)> = match &i.audit {
         Some((all, intact)) => {
+            // A slice keeps the entries of its own task, the change's: none
+            // when it is another task's or may be another change's. One that
+            // does not verify keeps them, as not intact, even when nothing
+            // else names the task. Decisions on the change's escalations
+            // come only from a log whose decisions are read.
+            let slice_of_change = i
+                .audit_slice
+                .is_none_or(|s| foreign_slice.is_none() && task.as_deref().is_none_or(|t| t == s));
+            let of_task = task
+                .as_deref()
+                .or(i.audit_slice)
+                .filter(|_| slice_of_change);
             let ids: BTreeSet<&str> = escalations.iter().map(|e| e.id.as_str()).collect();
             let mut picked: Vec<&Entry> = all
                 .iter()
                 .filter(|e| {
-                    task.as_deref()
-                        .is_some_and(|t| e.actor == t || (e.action == "mint" && e.subject == t))
-                        || (matches!(e.action.as_str(), "grant" | "deny")
+                    of_task.is_some_and(|t| e.actor == t || (e.action == "mint" && e.subject == t))
+                        || (!decided.is_empty()
+                            && matches!(e.action.as_str(), "grant" | "deny")
                             && ids.contains(e.subject.as_str()))
                 })
                 .collect();
             picked.sort_by_key(|e| e.seq);
-            Some(Doors {
-                intact: *intact,
-                entries: picked
-                    .into_iter()
-                    .map(|e| DoorEntry {
-                        seq: e.seq,
-                        at: e.at,
-                        actor: e.actor.clone(),
-                        action: e.action.clone(),
-                        subject: e.subject.clone(),
-                        decision: e.decision.clone(),
-                        reason: e.reason.clone(),
-                        hash: e.hash.clone(),
-                    })
-                    .collect(),
-            })
+            let entries = picked
+                .into_iter()
+                .map(|e| DoorEntry {
+                    seq: e.seq,
+                    at: e.at,
+                    actor: e.actor.clone(),
+                    action: e.action.clone(),
+                    subject: e.subject.clone(),
+                    decision: e.decision.clone(),
+                    reason: e.reason.clone(),
+                    hash: e.hash.clone(),
+                })
+                .collect();
+            Some((
+                *intact,
+                entries,
+                i.audit_slice.map(|_| DoorSource::Attached),
+            ))
         }
-        None => from.and_then(|f| f.doors.clone()),
+        None => kept_doors
+            .filter(|d| d.source != Some(DoorSource::OnusCloud))
+            .map(|d| (d.intact, d.entries.clone(), d.source)),
+    };
+    // Onus Cloud's calls under the change's task, when it is known. They
+    // never say the task: Onus Cloud's word is not the door's.
+    let calls = match i.calls {
+        Some(all) => {
+            let mine: Vec<&CloudCall> = all
+                .iter()
+                .filter(|c| {
+                    task.as_deref()
+                        .is_none_or(|t| c.task.as_deref().is_none_or(|ct| ct == t))
+                })
+                .collect();
+            Some(calls_summary(&mine))
+        }
+        None => kept_doors.and_then(|d| d.calls.clone()),
+    };
+    let doors = match (log, calls) {
+        (Some((intact, entries, source)), calls) => Some(Doors {
+            intact,
+            entries,
+            source,
+            calls,
+        }),
+        (None, Some(calls)) => Some(Doors {
+            intact: false,
+            entries: Vec::new(),
+            source: Some(DoorSource::OnusCloud),
+            calls: Some(calls),
+        }),
+        (None, None) => None,
     };
 
     // The lane: its reasons from while it was open, the final lane from the
@@ -1163,7 +1683,7 @@ pub fn build(i: Inputs) -> ProvenanceRecord {
             ),
             None => gap(
                 "token",
-                "no task token reached this run: give --token/--key-public, --submission, --token-inspection, or --audit with --task",
+                "no task token reached this run: give --token/--key-public, --submission, --token-inspection, --audit with --task, or --audit with the door log the agent attached through onus mcp",
             ),
         }
     }
@@ -1205,16 +1725,88 @@ pub fn build(i: Inputs) -> ProvenanceRecord {
             "the lane was not judge, or the judge was not run (--judge)",
         );
     }
+    // What the doors cannot vouch for, in one gap.
+    let because = i.audit_why.map(|w| format!(" ({w})")).unwrap_or_default();
+    let mut door_doubts: Vec<String> = Vec::new();
+    let other_task = i
+        .audit_slice
+        .zip(task.as_deref())
+        .filter(|(slice, t)| slice != t);
     match &doors {
-        None => gap(
-            "doors",
-            "no door log reached this run: give --audit with --task, or --submission-id in the repository that keeps it",
+        None if i.audit_why.is_some() => door_doubts.push(format!(
+            "the door log could not be read{because}: give --audit with the door log, or the slice the agent attached in Onus Cloud"
+        )),
+        None => door_doubts.push(
+            "no door log reached this run: give --audit with --task (the door log, or the slice the agent attached in Onus Cloud), --submission-id in the repository that keeps it, or --calls with Onus Cloud's calls".into(),
         ),
-        Some(d) if !d.intact => gap(
-            "doors",
-            "the audit log's hash chain is broken: an entry was changed or removed",
+        Some(d) if d.source == Some(DoorSource::OnusCloud) => door_doubts.push(format!(
+            "only Onus Cloud's calls are on record, on its word: the agent's own door log (its MCP and gateway calls) did not reach this run{because}. The agent attaches it with onus cloud evidence --door-log or onus_cloud_attach_evidence; give it with --audit"
+        )),
+        Some(d) if !d.intact && d.source == Some(DoorSource::Attached) => door_doubts.push(format!(
+            "the door log attached to the work does not verify{because}: its hash chain is broken, so an entry was changed or removed"
+        )),
+        Some(d) if !d.intact => door_doubts.push(format!(
+            "the audit log's hash chain is broken{because}: an entry was changed or removed"
+        )),
+        // A log that verifies but holds nothing of the change vouches for
+        // nothing.
+        Some(d) if i.audit.is_some() && task.is_none() => door_doubts.push(
+            if d.entries.is_empty() {
+                "a door log reached this run, but the change's task is not known, so none of its entries is on record: give --task".into()
+            } else {
+                "a door log reached this run, but the change's task is not known, so only the decisions on its escalations are on record: give --task".into()
+            },
         ),
+        Some(d) if d.entries.is_empty() && other_task.is_none() && foreign_slice.is_none() => door_doubts.push(match &task {
+            Some(t) => format!("the door log holds no entry of task {t}: nothing it did through a door is on record"),
+            None => "the door log holds no entry of the change's task".into(),
+        }),
         Some(_) => {}
+    }
+    if i.calls.is_some_and(|c| !c.is_empty()) && task.is_none() {
+        door_doubts.push(
+            "the change's task is not known, so every call Onus Cloud logged that was given is counted as its: give --task".into(),
+        );
+    }
+    match foreign_slice {
+        Some("") => door_doubts.push(
+            "the door log attached does not say which commit it was cut at, so it may be another change's: it gives neither the task, the token nor any decision, and none of its entries is kept".into(),
+        ),
+        Some(h) => {
+            // The commit is named only when it looks like one.
+            let at = if (7..=64).contains(&h.len()) && h.chars().all(|c| c.is_ascii_hexdigit()) {
+                format!(" {h}")
+            } else {
+                String::new()
+            };
+            door_doubts.push(format!(
+                "the door log attached was cut at commit{at}, which is not one of this change's, so it gives neither the task, the token nor any decision, and none of its entries is kept"
+            ));
+        }
+        None => {}
+    }
+    // A slice that verifies is still the agent's word.
+    if doors
+        .as_ref()
+        .is_some_and(|d| d.intact && d.source == Some(DoorSource::Attached))
+    {
+        door_doubts.push(
+            "the door log is the slice the agent attached, on its word: its chain shows that nothing in it was changed after it was cut, not who cut it, so what it gives (its entries, and the task and token when nothing else does) is the agent's account".into(),
+        );
+    }
+    if let Some((slice, t)) = other_task {
+        door_doubts.push(format!(
+            "the door log attached is task {slice}'s, not this change's task {t}: its entries are left out"
+        ));
+    }
+    if !i.calls_unread.is_empty() {
+        door_doubts.push(format!(
+            "some of Onus Cloud's calls could not be read, so the counts may be short: {}",
+            i.calls_unread.join("; ")
+        ));
+    }
+    if !door_doubts.is_empty() {
+        gap("doors", &door_doubts.join("; "));
     }
     if by == ApprovedBy::Person && approval.people.is_empty() {
         gap("approval", "who merged it was not recorded");
@@ -1270,7 +1862,7 @@ mod tests {
     use crate::judge::Step;
     use crate::submission::{Approval as RowOk, ScopeUsed};
     use onus_core::{IntentCheck, ReportSummary, SemanticReport, StructureNotes, TextStats};
-    use onus_doors::audit::Record;
+    use onus_doors::audit::{AuditLog, Record};
     use onus_doors::escalation::{EscalationKind, Evidence as Proof};
     use onus_doors::runner::TestRun;
 
@@ -2212,6 +2804,812 @@ mod tests {
                 .iter()
                 .any(|g| g.field == "doors" && g.reason.contains("broken"))
         );
+    }
+
+    /// A task's slice of `log`, as `onus cloud evidence --door-log` sends it.
+    fn slice_of(log: &AuditLog, task: &str) -> String {
+        let all = log.verify().unwrap();
+        let entries = onus_doors::audit::slice(&all, task);
+        serde_json::json!({ "doorLog": { "task": task, "at": 9, "entries": entries } }).to_string()
+    }
+
+    #[test]
+    fn an_attached_door_log_is_checked_and_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = AuditLog::new(dir.path().join("audit.jsonl"));
+        entry(&log, "local", "mcp:onus_status", "", "allowed", 1);
+        entry(&log, "operator", "mint", "sms", "granted", 2);
+        entry(&log, "sms", "mcp:onus_find", "billing", "allowed", 3);
+        entry(&log, "other", "mcp:onus_find", "orders", "allowed", 4);
+        entry(
+            &log,
+            "sms",
+            "mcp:onus_cloud_attach_evidence",
+            "acme/shop#7",
+            "allowed",
+            5,
+        );
+        let text = slice_of(&log, "sms");
+        let read = parse_door_log(&text).unwrap();
+        assert!(read.intact, "{:?}", read.why);
+        assert_eq!(read.slice.as_deref(), Some("sms"));
+        let seqs: Vec<u64> = read.entries.iter().map(|e| e.seq).collect();
+        assert_eq!(seqs, [2, 3, 4, 5]);
+        let build_with = |read: &DoorLog, task: Option<&'static str>| {
+            build(Inputs {
+                audit: Some((read.entries.clone(), read.intact)),
+                audit_slice: read.slice.as_deref(),
+                audit_why: read.why.as_deref(),
+                task,
+                ..Inputs::new(CHANGE, 9)
+            })
+        };
+        // The slice names the task, and only the task's entries are kept.
+        let r = build_with(&read, None);
+        let doors = r.doors.clone().unwrap();
+        assert!(doors.intact);
+        assert_eq!(doors.source, Some(DoorSource::Attached));
+        let seqs: Vec<u64> = doors.entries.iter().map(|e| e.seq).collect();
+        assert_eq!(seqs, [2, 3, 5]);
+        // A slice that verifies is still the agent's word: the gap narrows.
+        let on_word = |r: &ProvenanceRecord| {
+            r.gaps
+                .iter()
+                .filter(|g| g.field == "doors")
+                .map(|g| g.reason.clone())
+                .collect::<Vec<_>>()
+                == [
+                    "the door log is the slice the agent attached, on its word: its chain shows that nothing in it was changed after it was cut, not who cut it, so what it gives (its entries, and the task and token when nothing else does) is the agent's account",
+                ]
+        };
+        assert!(on_word(&r), "{:?}", r.gaps);
+        // A rebuild keeps it.
+        let again = build(Inputs {
+            from: Some(r.clone()),
+            ..Inputs::new(CHANGE, 10)
+        });
+        assert_eq!(again.doors, r.doors);
+        assert!(on_word(&again), "{:?}", again.gaps);
+
+        // An entry changed after it was cut does not verify.
+        let edited = text.replace("billing", "payments");
+        let read = parse_door_log(&edited).unwrap();
+        assert!(!read.intact);
+        let r = build_with(&read, None);
+        assert!(!r.doors.as_ref().unwrap().intact);
+        // It still keeps the entries of the task it names, with no --task.
+        let kept = &r.doors.as_ref().unwrap().entries;
+        assert!(
+            !kept.is_empty()
+                && kept
+                    .iter()
+                    .all(|e| e.actor == "sms" || (e.action == "mint" && e.subject == "sms")),
+            "{kept:?}"
+        );
+        let gap = r.gaps.iter().find(|g| g.field == "doors").unwrap();
+        assert!(gap.reason.contains("does not verify"), "{}", gap.reason);
+        assert!(
+            gap.reason.contains("changed after it was written"),
+            "{}",
+            gap.reason
+        );
+        // Another task's log names the mismatch, and keeps none of its entries.
+        let read = parse_door_log(&slice_of(&log, "other")).unwrap();
+        assert!(read.intact);
+        let r = build_with(&read, Some("sms"));
+        assert!(
+            r.doors
+                .as_ref()
+                .unwrap()
+                .entries
+                .iter()
+                .all(|e| e.actor != "other")
+        );
+        let gap = r.gaps.iter().find(|g| g.field == "doors").unwrap();
+        assert!(gap.reason.contains("task other's"), "{}", gap.reason);
+
+        // The lines of a whole log read as before; one cut at the front does not verify.
+        let lines = std::fs::read_to_string(log.path()).unwrap();
+        let whole = parse_door_log(&lines).unwrap();
+        assert!(whole.intact && whole.slice.is_none());
+        let one = parse_door_log(lines.lines().next().unwrap()).unwrap();
+        assert!(one.intact && one.entries.len() == 1);
+        let cut: Vec<&str> = lines.lines().skip(1).collect();
+        let cut = parse_door_log(&cut.join("\n")).unwrap();
+        assert!(!cut.intact);
+        assert!(cut.why.unwrap().contains("starts at entry 2"));
+        assert!(parse_door_log(r#"{"entries": []}"#).is_err());
+        assert!(
+            !parse_door_log(r#"{"task": "sms", "entries": [1]}"#)
+                .unwrap()
+                .intact
+        );
+    }
+
+    fn calls(json: serde_json::Value) -> Vec<CloudCall> {
+        let read = parse_calls(&json.to_string()).unwrap();
+        assert_eq!(read.unread, Vec::<String>::new());
+        read.list
+    }
+
+    #[test]
+    fn onus_clouds_calls_are_summed_up_on_its_word() {
+        let list = calls(serde_json::json!({ "calls": [
+            { "at": 30, "method": "POST", "route": "/v1/orgs/:org/environments/:env/runs",
+              "scope": "env:run", "decision": "denied", "tokenId": "tok-1", "task": "sms",
+              "reason": "this token cannot run commands (env:run)" },
+            { "createdAt": "1970-01-01T00:00:10.000Z", "method": "GET",
+              "route": "/v1/orgs/:org/environments", "scope": "env:read",
+              "decision": "allowed", "credentialId": "tok-1", "task": "sms" },
+            { "at": 20, "method": "GET", "route": "/v1/orgs/:org/environments",
+              "scope": "env:read", "decision": "allowed", "tokenId": "tok-2", "task": "sms" },
+            { "at": 25, "method": "GET", "route": "/v1/orgs/:org/environments",
+              "scope": "env:read", "decision": "failed", "tokenId": "tok-2", "task": "sms" },
+            { "at": 5, "method": "GET", "route": "/v1/orgs/:org/pulls", "scope": "pulls:read",
+              "decision": "denied", "tokenId": "tok-9", "task": "other" },
+        ]}));
+        assert_eq!(list.len(), 5);
+        let r = build(Inputs {
+            calls: Some(&list),
+            task: Some("sms"),
+            ..Inputs::new(CHANGE, 40)
+        });
+        let doors = r.doors.clone().unwrap();
+        assert_eq!(doors.source, Some(DoorSource::OnusCloud));
+        assert!(!doors.intact && doors.entries.is_empty());
+        let c = doors.calls.unwrap();
+        assert_eq!(c.source, CallsSource::OnusCloud);
+        assert_eq!((c.total, c.allowed, c.denied, c.failed), (4, 2, 1, 1));
+        assert_eq!((c.first_at, c.last_at), (Some(10), Some(30)));
+        assert_eq!(c.tokens, ["tok-1", "tok-2"]);
+        assert_eq!(c.routes.len(), 2);
+        let read = &c.routes[0];
+        assert_eq!(read.route, "/v1/orgs/:org/environments");
+        assert_eq!((read.allowed, read.denied, read.failed), (2, 0, 1));
+        assert_eq!(c.routes[1].scope.as_deref(), Some("env:run"));
+        assert_eq!(c.denials.len(), 1);
+        assert_eq!(c.denials[0].at, 30);
+        assert_eq!(c.denials[0].token_id.as_deref(), Some("tok-1"));
+        assert!(c.denials[0].reason.as_deref().unwrap().contains("env:run"));
+        // Onus Cloud's word is not the door log: the gap stays, and says so.
+        let gap = r.gaps.iter().find(|g| g.field == "doors").unwrap();
+        assert!(
+            gap.reason.contains("only Onus Cloud's calls"),
+            "{}",
+            gap.reason
+        );
+        assert!(gap.reason.contains("--door-log"), "{}", gap.reason);
+        // Calls never say the task.
+        assert!(r.token.is_none());
+
+        // With the door log too, both are on record, and the gap says only
+        // that the slice is the agent's word.
+        let dir = tempfile::tempdir().unwrap();
+        let log = AuditLog::new(dir.path().join("audit.jsonl"));
+        entry(&log, "operator", "mint", "sms", "granted", 1);
+        entry(&log, "sms", "mcp:onus_cloud_envs", "", "allowed", 2);
+        let read = parse_door_log(&slice_of(&log, "sms")).unwrap();
+        let r = build(Inputs {
+            audit: Some((read.entries.clone(), read.intact)),
+            audit_slice: read.slice.as_deref(),
+            calls: Some(&list),
+            ..Inputs::new(CHANGE, 40)
+        });
+        let doors = r.doors.clone().unwrap();
+        assert_eq!(doors.source, Some(DoorSource::Attached));
+        assert_eq!(doors.entries.len(), 2);
+        assert_eq!(doors.calls.as_ref().unwrap().total, 4);
+        let doubts: Vec<&str> = r
+            .gaps
+            .iter()
+            .filter(|g| g.field == "doors")
+            .map(|g| g.reason.as_str())
+            .collect();
+        assert!(
+            doubts.len() == 1
+                && doubts[0]
+                    .starts_with("the door log is the slice the agent attached, on its word"),
+            "{:?}",
+            r.gaps
+        );
+        // A rebuild with fresh calls keeps the door log, and the other way round.
+        let fresh = calls(serde_json::json!([
+            { "at": 50, "method": "GET", "route": "/v1/orgs/:org/pulls", "decision": "allowed" },
+        ]));
+        let again = build(Inputs {
+            from: Some(r.clone()),
+            calls: Some(&fresh),
+            ..Inputs::new(CHANGE, 60)
+        });
+        let d = again.doors.unwrap();
+        assert_eq!(d.entries, doors.entries);
+        assert_eq!(d.source, Some(DoorSource::Attached));
+        assert_eq!(d.calls.unwrap().total, 1);
+        // An empty list is on record: no call was made there.
+        let r = build(Inputs {
+            calls: Some(&[]),
+            ..Inputs::new(CHANGE, 60)
+        });
+        assert_eq!(r.doors.unwrap().calls.unwrap().total, 0);
+    }
+
+    #[test]
+    fn calls_that_cannot_be_read_are_named_never_echoed() {
+        let secret = "s3cr3t-value-never-echoed";
+        let read = parse_calls(
+            &serde_json::json!([
+                { "at": 1, "method": "GET", "route": "/", "decision": "allowed" },
+                { "at": 1, "method": "GET", "route": "/", "decision": secret },
+                { "at": secret, "method": "GET", "route": "/", "decision": "allowed" },
+                { "method": "GET", "route": "/", "decision": "allowed" },
+                7,
+            ])
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(read.list.len(), 1);
+        assert_eq!(read.unread.len(), 4, "{:?}", read.unread);
+        let notes = read.unread.join("\n");
+        assert!(!notes.contains(secret), "{notes}");
+        assert!(notes.contains("`decision`"), "{notes}");
+        assert!(notes.contains("RFC 3339"), "{notes}");
+        assert!(notes.contains("missing field `at`"), "{notes}");
+        let r = build(Inputs {
+            calls: Some(&read.list),
+            calls_unread: &read.unread,
+            ..Inputs::new(CHANGE, 2)
+        });
+        let gap = r.gaps.iter().find(|g| g.field == "doors").unwrap();
+        assert!(gap.reason.contains("could not be read"), "{}", gap.reason);
+        // A call with a token is left out, never taken.
+        let read = parse_calls(
+            r#"[{"at":1,"method":"GET","route":"/","decision":"allowed","token":"onus_tok_x"}]"#,
+        )
+        .unwrap();
+        assert!(read.list.is_empty());
+        assert!(read.unread[0].contains("`token`"), "{:?}", read.unread);
+        assert!(parse_calls("{}").is_err());
+    }
+
+    #[test]
+    fn an_attached_door_log_gives_the_token_only_when_it_verifies() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = AuditLog::new(dir.path().join("audit.jsonl"));
+        // Through onus mcp, no mint is in the log: the door sends its
+        // inspection of the token it holds with the slice.
+        entry(&log, "sms", "mcp:onus_status", "", "allowed", 1);
+        entry(
+            &log,
+            "sms",
+            "mcp:onus_cloud_attach_evidence",
+            "acme/shop#7",
+            "allowed",
+            2,
+        );
+        let all = log.verify().unwrap();
+        let mut slice = serde_json::json!({ "doorLog": {
+            "task": "sms", "at": 9, "entries": onus_doors::audit::slice(&all, "sms"),
+            "inspection": { "task": "sms", "rights": ["write:path:a/**"], "expires": 99 },
+        }});
+        fn with(text: &str, inputs: Inputs) -> ProvenanceRecord {
+            let read = parse_door_log(text).unwrap();
+            build(Inputs {
+                audit: Some((read.entries.clone(), read.intact)),
+                audit_slice: read.slice.as_deref(),
+                attached_inspection: read.inspection.clone(),
+                ..inputs
+            })
+        }
+        let r = with(&slice.to_string(), Inputs::new(CHANGE, 9));
+        let t = r.token.clone().unwrap();
+        assert_eq!(t.source, TokenSource::Attached);
+        assert_eq!((t.task.as_str(), t.expires), ("sms", Some(99)));
+        assert_eq!(t.rights, ["write:path:a/**"]);
+        assert!(!r.gaps.iter().any(|g| g.field == "token"), "{:?}", r.gaps);
+        // Onus Cloud's own inspection of the token outranks it.
+        let kept = TokenInspection {
+            task: "sms".into(),
+            rights: vec!["write:path:b/**".into()],
+            attenuations: vec![],
+            expires: None,
+        };
+        let r = with(
+            &slice.to_string(),
+            Inputs {
+                inspection: Some(kept),
+                ..Inputs::new(CHANGE, 9)
+            },
+        );
+        assert_eq!(r.token.unwrap().source, TokenSource::Inspection);
+        // A rebuild takes a fresh one over it.
+        let again = build(Inputs {
+            from: Some(with(&slice.to_string(), Inputs::new(CHANGE, 9))),
+            inspection: Some(TokenInspection {
+                task: "sms".into(),
+                rights: vec![],
+                attenuations: vec![],
+                expires: None,
+            }),
+            ..Inputs::new(CHANGE, 10)
+        });
+        assert_eq!(again.token.unwrap().source, TokenSource::Inspection);
+
+        // A slice that does not verify gives neither the token nor the task.
+        let edited = slice.to_string().replace("acme/shop#7", "acme/shop#8");
+        let r = with(&edited, Inputs::new(CHANGE, 9));
+        assert!(!r.doors.as_ref().unwrap().intact);
+        assert!(r.token.is_none(), "{:?}", r.token);
+        assert!(r.gaps.iter().any(|g| g.field == "token"));
+        // Nor does one cut at a commit that is not the change's.
+        let mut cut = slice.clone();
+        cut["doorLog"]["head"] = "f00d".repeat(10).into();
+        let at = |head: &str| {
+            with(
+                &cut.to_string(),
+                Inputs {
+                    audit_head: parse_door_log(&cut.to_string()).unwrap().head.as_deref(),
+                    commits: &[head.to_string()],
+                    ..Inputs::new(CHANGE, 9)
+                },
+            )
+        };
+        let r = at(&"f00d".repeat(10));
+        assert_eq!(r.token.unwrap().source, TokenSource::Attached);
+        let r = at(&"beef".repeat(10));
+        assert!(r.token.is_none(), "{:?}", r.token);
+        let why = &r.gaps.iter().find(|g| g.field == "doors").unwrap().reason;
+        assert!(
+            why.contains(&format!("cut at commit {}", "f00d".repeat(10))),
+            "{why}"
+        );
+        // Nor does its mint entry, or a whole log's that does not verify.
+        let log2 = AuditLog::new(dir.path().join("minted.jsonl"));
+        entry(&log2, "operator", "mint", "sms", "granted", 1);
+        entry(&log2, "sms", "mcp:onus_status", "", "allowed", 2);
+        let lines = std::fs::read_to_string(log2.path()).unwrap();
+        let ok = parse_door_log(&lines).unwrap();
+        let tampered = parse_door_log(&lines.replace("onus_status", "onus_find")).unwrap();
+        assert!(ok.intact && !tampered.intact);
+        let local = |read: &DoorLog| {
+            build(Inputs {
+                audit: Some((read.entries.clone(), read.intact)),
+                task: Some("sms"),
+                ..Inputs::new(CHANGE, 9)
+            })
+            .token
+        };
+        assert_eq!(local(&ok).unwrap().source, TokenSource::Audit);
+        assert!(local(&tampered).is_none());
+        // An inspection of another task, or a token in its place, is never taken.
+        slice["doorLog"]["inspection"]["task"] = "other".into();
+        assert!(
+            parse_door_log(&slice.to_string())
+                .unwrap()
+                .inspection
+                .is_none()
+        );
+        slice["doorLog"]["inspection"] = "EoQBChoKBHRhc2sYAyIQCg4IBBIKCggIgQgSAxiACBIk".into();
+        let err = parse_door_log(&slice.to_string()).unwrap_err();
+        assert!(err.downcast_ref::<HoldsToken>().is_some());
+    }
+
+    #[test]
+    fn a_slice_that_does_not_say_where_it_was_cut_gives_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = AuditLog::new(dir.path().join("audit.jsonl"));
+        entry(&log, "operator", "mint", "sms", "granted", 1);
+        entry(&log, "sms", "mcp:onus_status", "", "allowed", 2);
+        let mut slice: serde_json::Value = serde_json::from_str(&slice_of(&log, "sms")).unwrap();
+        let head = "c0ffee".repeat(6);
+        let with = |slice: &serde_json::Value| {
+            let read = parse_door_log(&slice.to_string()).unwrap();
+            build(Inputs {
+                audit: Some((read.entries.clone(), read.intact)),
+                audit_slice: read.slice.as_deref(),
+                audit_head: read.head.as_deref(),
+                commits: std::slice::from_ref(&head),
+                ..Inputs::new(CHANGE, 9)
+            })
+        };
+        let r = with(&slice);
+        assert!(r.token.is_none(), "{:?}", r.token);
+        assert!(r.doors.as_ref().unwrap().entries.is_empty());
+        let why = &r.gaps.iter().find(|g| g.field == "doors").unwrap().reason;
+        assert!(why.contains("does not say which commit"), "{why}");
+        slice["doorLog"]["head"] = head.clone().into();
+        let r = with(&slice);
+        assert_eq!(r.token.unwrap().source, TokenSource::Attached);
+        assert_eq!(r.doors.unwrap().entries.len(), 2);
+    }
+
+    #[test]
+    fn the_agents_word_never_decides_against_onus_cloud() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = AuditLog::new(dir.path().join("audit.jsonl"));
+        entry(&log, "sms", "escalate", "e-1", "needs-person", 1);
+        entry(&log, "@lead", "grant", "e-1", "granted", 2);
+        entry(&log, "sms", "mcp:onus_status", "", "allowed", 3);
+        let text = slice_of(&log, "sms");
+        let cloud = |state: &str| {
+            decisions(serde_json::json!([{
+                "id": "cl-1", "clientRequestId": "e-1", "state": state, "task": "sms",
+                "repository": "acme/shop", "pull": 7,
+            }]))
+        };
+        let (waiting, granted) = (cloud("waiting"), cloud("granted"));
+        let mut asked = request("sms", "write:path:a/**");
+        asked.id = "e-1".into();
+        let with = |text: &str, cloud: Option<&[EscalationDecision]>| {
+            let read = parse_door_log(text).unwrap();
+            build(Inputs {
+                audit: Some((read.entries.clone(), read.intact)),
+                audit_slice: read.slice.as_deref(),
+                audit_why: read.why.as_deref(),
+                requests: std::slice::from_ref(&asked),
+                decisions: cloud,
+                ..Inputs::new(CHANGE, 9)
+            })
+        };
+        let gap = |r: &ProvenanceRecord| {
+            r.gaps
+                .iter()
+                .find(|g| g.field == "escalations")
+                .map(|g| g.reason.clone())
+        };
+
+        // A slice that does not verify decides nothing: Onus Cloud's stands,
+        // and no grant of it is kept among the doors' entries.
+        let forged = text.replace("grant granted", "looks fine");
+        let r = with(&forged, Some(&waiting));
+        assert!(!r.doors.as_ref().unwrap().intact);
+        let e = &r.escalations[0];
+        assert_eq!(
+            (e.decision.as_str(), e.by.as_deref()),
+            ("needs-person", None)
+        );
+        assert_eq!(e.cloud_id.as_deref(), Some("cl-1"));
+        assert!(
+            !r.doors.unwrap().entries.iter().any(|d| d.action == "grant"),
+            "a broken slice's grant is no decision"
+        );
+        // One that verifies is the agent's word: Onus Cloud's decision is
+        // recorded whatever its state, and the gap names the disagreement.
+        let r = with(&text, Some(&waiting));
+        assert_eq!(r.escalations[0].decision, "needs-person");
+        assert_eq!(r.escalations[0].by, None);
+        let why = gap(&r).unwrap();
+        assert!(
+            why.contains("e-1 is needs-person in Onus Cloud but granted on the agent's word"),
+            "{why}"
+        );
+        // Alone, it is recorded on its word, and the gap says so.
+        let r = with(&text, None);
+        let e = &r.escalations[0];
+        assert_eq!(
+            (e.decision.as_str(), e.by.as_deref()),
+            ("granted", Some("@lead"))
+        );
+        assert!(
+            gap(&r)
+                .unwrap()
+                .contains("the decisions on e-1 are the agent's word")
+        );
+        // Onus Cloud agreeing confirms it.
+        let r = with(&text, Some(&granted));
+        assert_eq!(r.escalations[0].decision, "granted");
+        assert_eq!(gap(&r), None);
+
+        // The escalations the agent's own submission lists are its word too.
+        let mut agents = submission();
+        agents.escalations = vec!["e-1".into()];
+        let listed = |cloud: Option<&[EscalationDecision]>| {
+            build(Inputs {
+                agents: Some(&agents),
+                decisions: cloud,
+                ..Inputs::new(CHANGE, 9)
+            })
+        };
+        let r = listed(None);
+        assert_eq!(r.escalations[0].decision, "granted");
+        assert!(
+            gap(&r)
+                .unwrap()
+                .contains("the decisions on e-1 are the agent's word")
+        );
+        let r = listed(Some(&waiting));
+        assert_eq!(r.escalations[0].decision, "needs-person");
+        assert!(gap(&r).unwrap().contains("on the agent's word"));
+        assert_eq!(gap(&listed(Some(&granted))), None);
+        // The run's own submission, verified when it was made, is not.
+        let mut own = submission();
+        own.escalations = vec!["e-1".into()];
+        let r = build(Inputs {
+            submission: Some(&own),
+            ..Inputs::new(CHANGE, 9)
+        });
+        assert_eq!(r.escalations[0].decision, "granted");
+        assert_eq!(gap(&r), None);
+    }
+
+    #[test]
+    fn the_agents_submission_ranks_below_the_doors_word() {
+        let mut agents = submission();
+        agents.scope = Some(ScopeUsed {
+            task: "sms".into(),
+            rights: vec!["write:path:**".into()],
+            attenuations: vec![],
+            expires: None,
+            fingerprint: None,
+        });
+        let inspection = TokenInspection {
+            task: "sms".into(),
+            rights: vec!["write:path:a/**".into()],
+            attenuations: vec![],
+            expires: None,
+        };
+        let r = build(Inputs {
+            agents: Some(&agents),
+            inspection: Some(inspection.clone()),
+            ..Inputs::new(CHANGE, 9)
+        });
+        let t = r.token.clone().unwrap();
+        assert_eq!(
+            (t.source, t.rights),
+            (TokenSource::Inspection, vec!["write:path:a/**".to_string()])
+        );
+        // A whole door log that verifies outranks it too.
+        let dir = tempfile::tempdir().unwrap();
+        let log = AuditLog::new(dir.path().join("audit.jsonl"));
+        entry(&log, "operator", "mint", "sms", "granted", 1);
+        let audit = read_audit(log.path()).unwrap();
+        let r = build(Inputs {
+            agents: Some(&agents),
+            audit: Some(audit),
+            task: Some("sms"),
+            ..Inputs::new(CHANGE, 9)
+        });
+        assert_eq!(r.token.unwrap().source, TokenSource::Audit);
+        // And a rebuild takes a fresh inspection over it.
+        let agents_only = build(Inputs {
+            agents: Some(&agents),
+            ..Inputs::new(CHANGE, 9)
+        });
+        assert_eq!(
+            agents_only.token.as_ref().unwrap().source,
+            TokenSource::AgentSubmission
+        );
+        let again = build(Inputs {
+            from: Some(agents_only),
+            inspection: Some(inspection),
+            ..Inputs::new(CHANGE, 10)
+        });
+        assert_eq!(again.token.unwrap().source, TokenSource::Inspection);
+    }
+
+    #[test]
+    fn a_door_log_that_holds_nothing_of_the_task_is_a_gap() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = AuditLog::new(dir.path().join("audit.jsonl"));
+        entry(&log, "operator", "mint", "sms", "granted", 1);
+        entry(&log, "sms", "mcp:onus_find", "billing", "allowed", 2);
+        let read = parse_door_log(&std::fs::read_to_string(log.path()).unwrap()).unwrap();
+        let doors_gap = |task: Option<&'static str>| {
+            let r = build(Inputs {
+                audit: Some((read.entries.clone(), read.intact)),
+                task,
+                ..Inputs::new(CHANGE, 9)
+            });
+            r.gaps
+                .iter()
+                .find(|g| g.field == "doors")
+                .map(|g| g.reason.clone())
+        };
+        // A whole log, and no task to pick its entries by.
+        let why = doors_gap(None).unwrap();
+        assert!(why.contains("task is not known"), "{why}");
+        assert!(why.contains("--task"), "{why}");
+        // A task the log holds nothing of.
+        let why = doors_gap(Some("deploy")).unwrap();
+        assert!(why.contains("no entry of task deploy"), "{why}");
+        assert_eq!(doors_gap(Some("sms")), None);
+        // A slice whose task has no entry in it.
+        let other = AuditLog::new(dir.path().join("other.jsonl"));
+        entry(&other, "other", "mcp:onus_find", "x", "allowed", 1);
+        let all = other.verify().unwrap();
+        let forged = serde_json::json!({ "task": "sms", "at": 9, "entries": all }).to_string();
+        let read = parse_door_log(&forged).unwrap();
+        assert!(read.intact);
+        let r = build(Inputs {
+            audit: Some((read.entries.clone(), read.intact)),
+            audit_slice: Some("sms"),
+            ..Inputs::new(CHANGE, 9)
+        });
+        let why = &r.gaps.iter().find(|g| g.field == "doors").unwrap().reason;
+        assert!(why.contains("no entry of task sms"), "{why}");
+    }
+
+    #[test]
+    fn onus_clouds_calls_say_what_they_cannot_tell() {
+        let list = calls(serde_json::json!([
+            { "at": 1, "method": "GET", "route": "/v1/orgs/:org/pulls", "decision": "allowed",
+              "task": "sms" },
+            { "at": 2, "method": "GET", "route": "/v1/orgs/:org/pulls", "decision": "allowed",
+              "reason": "onus_cloud_attach_evidence is allowed", "tokenId": "onus_tok_abc123" },
+        ]));
+        let r = build(Inputs {
+            calls: Some(&list),
+            task: Some("sms"),
+            ..Inputs::new(CHANGE, 9)
+        });
+        let c = r.doors.unwrap().calls.unwrap();
+        assert_eq!((c.total, c.untasked), (2, 1));
+        // With no task known, every call given is counted, and the gap says so.
+        let r = build(Inputs {
+            calls: Some(&list),
+            ..Inputs::new(CHANGE, 9)
+        });
+        let why = &r.gaps.iter().find(|g| g.field == "doors").unwrap().reason;
+        assert!(why.contains("every call Onus Cloud logged"), "{why}");
+
+        // A call with a token in a field that is read is left out, and the
+        // note never echoes it.
+        let token = format!("onus_tok_{}", "A1b2C3d4E5".repeat(4));
+        for call in [
+            serde_json::json!({ "tokenId": token }),
+            serde_json::json!({ "credentialId": format!("onus_live_{}", "x".repeat(32)) }),
+            serde_json::json!({ "reason": format!("the token {token} was revoked") }),
+            serde_json::json!({ "reason": "v4.public.eyJzdWIiOiJ4In0" }),
+            serde_json::json!({ "tokenId": "E".repeat(120) }),
+        ] {
+            let mut c = serde_json::json!({
+                "at": 1, "method": "GET", "route": "/", "decision": "allowed",
+            });
+            for (k, v) in call.as_object().unwrap() {
+                c[k] = v.clone();
+            }
+            let ok = serde_json::json!({
+                "at": 2, "method": "GET", "route": "/", "decision": "allowed",
+            });
+            let read = parse_calls(&serde_json::json!([c, ok]).to_string()).unwrap();
+            assert_eq!(read.list.len(), 1, "{c}");
+            assert!(read.unread[0].starts_with("call #1: "), "{:?}", read.unread);
+            assert!(!read.unread[0].contains(&token));
+        }
+
+        // The API's rows carry more than is read: those fields are never
+        // checked, so a long path, or a user agent or token label anyone
+        // can set, is no reason to leave a call out.
+        let id = "0b9c6a52-6f0e-4b8e-9d55-0d6c3c1f2a7e";
+        let row = serde_json::json!({
+            "id": "12",
+            "createdAt": "2026-10-14T09:00:00Z",
+            "credentialId": id,
+            "credentialName": "onus_cloud_notificationsworker2026",
+            "method": "POST",
+            "route": "/v1/orgs/:org/environments/:env/runs/:run",
+            "path": format!("/v1/orgs/{id}/environments/{id}/runs/{id}"),
+            "decision": "allowed",
+            "userAgent": "onus_agent_aaaaaaaaaaaaaaaaaaaaaaaa",
+            "status": 200,
+        });
+        let read = parse_calls(&serde_json::json!({ "calls": [row] }).to_string()).unwrap();
+        assert_eq!(read.list.len(), 1, "{:?}", read.unread);
+        assert_eq!(read.list[0].token_id.as_deref(), Some(id));
+        // A Biscuit is base64url, so a run of it with `/`, `+` or `=` inside
+        // is not one.
+        let mut c = ok_call();
+        c["tokenId"] = format!("{}/{}", "a".repeat(60), "b".repeat(60)).into();
+        assert_eq!(
+            parse_calls(&serde_json::json!([c]).to_string())
+                .unwrap()
+                .list
+                .len(),
+            1
+        );
+    }
+
+    fn ok_call() -> serde_json::Value {
+        serde_json::json!({ "at": 1, "method": "GET", "route": "/", "decision": "allowed" })
+    }
+
+    #[test]
+    fn only_the_token_and_escalations_of_the_agents_submission_are_taken() {
+        let mut agents = submission();
+        agents.head = "agent-head".into();
+        agents.intent = Some("summary: something else".into());
+        agents.evidence[0].command = "true".into();
+        agents.escalations = vec!["e-1".into()];
+        agents.scope = Some(ScopeUsed {
+            task: "sms".into(),
+            rights: vec!["write:path:a/**".into()],
+            attenuations: vec![],
+            expires: Some(50),
+            fingerprint: None,
+        });
+        let mut own = submission();
+        own.evidence.clear();
+        own.intent = None;
+        let r = build(Inputs {
+            submission: Some(&own),
+            agents: Some(&agents),
+            ..Inputs::new(CHANGE, 9)
+        });
+        assert_eq!(
+            r.token.as_ref().unwrap().source,
+            TokenSource::AgentSubmission
+        );
+        assert_eq!(r.escalations.len(), 1);
+        assert_eq!(r.escalations[0].decision, "granted");
+        assert!(r.intent.is_none() && r.evidence.is_empty());
+        // Alone, as the record rebuilt at close takes it.
+        let r = build(Inputs {
+            agents: Some(&agents),
+            ..Inputs::new(CHANGE, 9)
+        });
+        assert_eq!(r.token.unwrap().task, "sms");
+        assert!(r.intent.is_none() && r.report.is_none() && r.evidence.is_empty());
+        assert!(r.commits.head.is_empty());
+        // It is the change's only at one of its commits.
+        let pull = pull(Lane::Judge, None);
+        assert!(agents_submission_fits(
+            &agents,
+            CHANGE,
+            "x",
+            &["AGENT-HEAD".into()],
+            &[]
+        ));
+        assert!(!agents_submission_fits(
+            &agents,
+            CHANGE,
+            "x",
+            &[],
+            std::slice::from_ref(&pull)
+        ));
+        let mut at = pull;
+        at.head = "agent-head".into();
+        assert!(agents_submission_fits(
+            &agents,
+            CHANGE,
+            "",
+            &[],
+            &[at.clone()]
+        ));
+        assert!(!agents_submission_fits(
+            &agents,
+            "acme/shop#8",
+            "",
+            &[],
+            &[at]
+        ));
+    }
+
+    #[test]
+    fn the_door_log_schema_holds_every_field_of_an_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = AuditLog::new(dir.path().join("audit.jsonl"));
+        log.append(
+            Record {
+                actor: "sms".into(),
+                action: "mcp:onus_find".into(),
+                subject: "billing".into(),
+                decision: "allowed".into(),
+                reason: "ok".into(),
+                details: serde_json::json!({ "token": { "task": "sms" } }),
+            },
+            1,
+        )
+        .unwrap();
+        let entries = log.verify().unwrap();
+        let slice = serde_json::json!({
+            "task": "sms", "at": 2, "head": "abc",
+            "inspection": { "task": "sms", "rights": ["read:path:**"], "expires": 9 },
+            "entries": entries,
+        });
+        // What the door writes reads as the published format and back, so
+        // the schema drifts from the log never silently.
+        let typed: onus_core::provenance::DoorLogSlice =
+            serde_json::from_value(slice.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&typed).unwrap(), slice);
     }
 
     #[test]

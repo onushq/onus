@@ -37,7 +37,7 @@ use onus_lanes::pulls::{self, PullRecord};
 use onus_lanes::review::{self, ApprovalPolicy, ReviewState, ReviewsFile};
 use onus_lanes::rollout::{self, Decision, RolloutPlan};
 use onus_lanes::signals;
-use onus_lanes::submission::Approval;
+use onus_lanes::submission::{Approval, Submission};
 use onus_map::discover::{CODEOWNERS_PATHS, Codeowners, ComponentMatcher};
 use serde_json::json;
 
@@ -101,6 +101,23 @@ pub enum CiCmd {
         /// never the token. For its provenance.
         #[arg(long, value_name = "FILE")]
         token_inspection: Option<PathBuf>,
+        /// The agent's own submission of this change (onus submit, onus_submit): its
+        /// provenance keeps the token and escalations it names. It must be for one of the
+        /// pull request's commits.
+        #[arg(long, value_name = "FILE")]
+        submission: Option<PathBuf>,
+        /// The task's door log, or the slice of it the agent attached in Onus Cloud
+        /// (schemas/door-log.schema.json): its hash chain is checked, for its provenance.
+        #[arg(long, value_name = "FILE")]
+        audit: Option<PathBuf>,
+        /// The task the change was made under, whose door log entries and Onus Cloud calls
+        /// to keep (default: the submission's, the inspection's or the slice's task).
+        #[arg(long)]
+        task: Option<String>,
+        /// Onus Cloud's log of the calls made under the task token
+        /// (schemas/cloud-calls.schema.json), for its provenance.
+        #[arg(long, value_name = "FILE")]
+        calls: Option<PathBuf>,
         /// Where to write the submission, classification, judgment, held-out report, provenance
         /// and comment section.
         #[arg(long, value_name = "DIR")]
@@ -319,6 +336,10 @@ pub fn run(cmd: CiCmd) -> Result<i32> {
             model,
             escalations,
             token_inspection,
+            submission,
+            audit,
+            task,
+            calls,
             out,
             at,
         } => pr(PrArgs {
@@ -339,6 +360,10 @@ pub fn run(cmd: CiCmd) -> Result<i32> {
             model,
             escalations,
             token_inspection,
+            submission,
+            audit,
+            task,
+            calls,
             out,
             at,
         }),
@@ -514,6 +539,10 @@ struct PrArgs {
     model: Option<PathBuf>,
     escalations: Option<PathBuf>,
     token_inspection: Option<PathBuf>,
+    submission: Option<PathBuf>,
+    audit: Option<PathBuf>,
+    task: Option<String>,
+    calls: Option<PathBuf>,
     out: PathBuf,
     at: Option<u64>,
 }
@@ -577,15 +606,40 @@ fn pr(a: PrArgs) -> Result<i32> {
         }
         None => None,
     };
+    let (calls, calls_unread) = match a.calls.as_deref().map(crate::provenance::calls_or_gap) {
+        Some((c, unread)) => (c, unread),
+        None => (None, Vec::new()),
+    };
+    let (door_log, audit_why) = match a.audit.as_deref().map(crate::provenance::door_log_or_gap) {
+        Some((l, why)) => (l, why),
+        None => (None, None),
+    };
+    let agents_submission: Option<Submission> = a
+        .submission
+        .as_deref()
+        .and_then(crate::provenance::agents_submission_at);
     std::fs::create_dir_all(&a.out)?;
     std::fs::create_dir_all(&a.records)?;
     let (base, head) = (commit_sha(&a.repo, &a.base)?, commit_sha(&a.repo, &a.head)?);
     // Onus Cloud's escalations that name no pull request are joined by the
-    // commits they were filed at.
-    let change_commits = match &decisions {
-        Some(_) => crate::provenance::change_commits(&a.repo, &base, &head),
-        None => Vec::new(),
-    };
+    // commits they were filed at, and the agent's submission and door log
+    // must be for one.
+    let slice_head = door_log
+        .as_ref()
+        .and_then(|l| l.slice.as_ref().and(l.head.as_ref()));
+    let change_commits =
+        if decisions.is_some() || agents_submission.is_some() || slice_head.is_some() {
+            crate::provenance::change_commits(&a.repo, &base, &head)
+        } else {
+            Vec::new()
+        };
+    let agents_submission = crate::provenance::agents_submission_for(
+        agents_submission,
+        &a.change,
+        &head,
+        &change_commits,
+        &[],
+    );
     let message = lanes::git_lines(&a.repo, &["log", "-1", "--format=%B", &head])?.join("\n");
     let (agent, agent_source) = pulls::detect_agent_source(&message, &a.branch, &a.author);
     let body = match &a.body_file {
@@ -771,9 +825,11 @@ fn pr(a: PrArgs) -> Result<i32> {
         },
     )?;
     // The change's provenance while it is open: the facts from this run, with
-    // the records as they now stand.
+    // the records as they now stand. The agent's submission brings the token
+    // and escalations it was made with; what this run found stays this run's.
     let record_of = provenance::build(provenance::Inputs {
         submission: Some(&sub),
+        agents: agents_submission.as_ref(),
         intent_source: IntentSource::PullRequest,
         agent_source: Some(agent_source),
         classification: Some(&c),
@@ -786,6 +842,14 @@ fn pr(a: PrArgs) -> Result<i32> {
         unread: &unread,
         inspection,
         inspection_unread: inspection_unread.as_deref(),
+        audit: door_log.as_ref().map(|l| (l.entries.clone(), l.intact)),
+        audit_slice: door_log.as_ref().and_then(|l| l.slice.as_deref()),
+        audit_head: door_log.as_ref().and_then(|l| l.head.as_deref()),
+        audit_why: audit_why.as_deref(),
+        calls: calls.as_deref(),
+        calls_unread: &calls_unread,
+        attached_inspection: door_log.as_ref().and_then(|l| l.inspection.clone()),
+        task: a.task.as_deref(),
         branch: Some(&a.branch),
         commits: &change_commits,
         ..provenance::Inputs::new(&a.change, at)

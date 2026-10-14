@@ -1017,6 +1017,434 @@ fn escalations_and_the_token_onus_cloud_kept_reach_the_provenance() {
     assert_eq!(verify(&merged), Some(1));
 }
 
+/// The agent's door log, cut as `onus cloud evidence --door-log` cuts it
+/// at the worktree's commit `head`.
+fn door_log_slice(log: &Path, task: &str, head: &str) -> serde_json::Value {
+    let all = onus_doors::audit::AuditLog::new(log).verify().unwrap();
+    let entries = onus_doors::audit::slice(&all, task);
+    serde_json::json!({ "doorLog": { "task": task, "at": 1, "head": head, "entries": entries } })
+}
+
+#[test]
+fn the_agents_door_log_and_submission_and_onus_clouds_calls_reach_the_provenance() {
+    let tmp = tempfile::tempdir().unwrap();
+    let t = tmp.path();
+    let r = t.join("shop");
+    copy_dir(&fixture().join("base"), &r);
+    git(&r, &["init", "-q", "-b", "main"]);
+    git(&r, &["add", "-A"]);
+    git(&r, &["commit", "-q", "-m", "base"]);
+    let origin = t.join("origin.git");
+    git(t, &["init", "-q", "--bare", origin.to_str().unwrap()]);
+    git(&r, &["remote", "add", "origin", origin.to_str().unwrap()]);
+    git(&r, &["push", "-q", "origin", "main"]);
+    git(&r, &["checkout", "-q", "-b", "codex/sms"]);
+    apply_overlay(&fixture().join("scenarios/s1-sms-alerts"), &r);
+    git(&r, &["add", "-A"]);
+    git(&r, &["commit", "-q", "-m", "Text customers"]);
+    let head = git(&r, &["rev-parse", "HEAD"]);
+    let path = |name: &str| t.join(name).to_str().unwrap().to_string();
+
+    // The agent's task token, its door log and its own submission.
+    onus(&r, &["token", "keygen", "--out", &path("keys")]);
+    std::fs::write(
+        t.join("plan.yaml"),
+        "task: sms\nwrites: [\"services/notifications/**\"]\n",
+    )
+    .unwrap();
+    let audit = path("audit.jsonl");
+    let key = path("keys/root.key");
+    let token = onus(
+        &r,
+        &[
+            "token",
+            "mint",
+            "--plan",
+            &path("plan.yaml"),
+            "--key",
+            &key,
+            "--audit",
+            &audit,
+        ],
+    );
+    let log = onus_doors::audit::AuditLog::new(&audit);
+    for (actor, action, subject) in [
+        ("other", "mcp:onus_find", "orders"),
+        ("sms", "mcp:onus_find", "notifications"),
+        ("sms", "mcp:onus_cloud_attach_evidence", "acme/shop#9"),
+    ] {
+        log.append(
+            onus_doors::audit::Record {
+                actor: actor.into(),
+                action: action.into(),
+                subject: subject.into(),
+                decision: "allowed".into(),
+                reason: "the token is valid".into(),
+                details: serde_json::Value::Null,
+            },
+            100,
+        )
+        .unwrap();
+    }
+    let slice = t.join("door-log.json");
+    std::fs::write(
+        &slice,
+        door_log_slice(Path::new(&audit), "sms", &head).to_string(),
+    )
+    .unwrap();
+    let sub = path("agent-submission.json");
+    onus(
+        &r,
+        &[
+            "submit",
+            "--base",
+            "main",
+            "--head",
+            "codex/sms",
+            "--token",
+            &token,
+            "--key-public",
+            &path("keys/root.pub"),
+            "--agent-tool",
+            "codex",
+            "--out",
+            &sub,
+        ],
+    );
+    // Onus Cloud's log of the calls made under the task token, as the API
+    // lists them: with fields that are never read, some the caller sets.
+    let calls = t.join("calls.json");
+    let id = "0b9c6a52-6f0e-4b8e-9d55-0d6c3c1f2a7e";
+    std::fs::write(
+        &calls,
+        serde_json::json!({ "calls": [
+            { "createdAt": "2026-10-12T10:00:00.000Z", "method": "GET",
+              "route": "/v1/orgs/:org/environments", "scope": "env:read",
+              "decision": "allowed", "credentialId": "tok-1", "task": "sms",
+              "path": format!("/v1/orgs/{id}/environments/{id}/runs/{id}"),
+              "userAgent": "onus_agent_aaaaaaaaaaaaaaaaaaaaaaaa",
+              "credentialName": "onus_cloud_notificationsworker2026" },
+            { "at": 1791799300, "method": "POST",
+              "route": "/v1/orgs/:org/environments/:env/runs", "scope": "env:run",
+              "decision": "denied", "tokenId": "tok-1", "task": "sms",
+              "reason": "this token cannot run commands (env:run)" },
+            { "at": 1791799400, "method": "GET", "route": "/v1/orgs/:org/pulls",
+              "scope": "pulls:read", "decision": "allowed", "tokenId": "tok-9", "task": "deploy" },
+        ]})
+        .to_string(),
+    )
+    .unwrap();
+
+    let rec = t.join("records");
+    let pr = |out: &str, extra: &[&str]| {
+        let mut args = vec![
+            "ci",
+            "pr",
+            "--base",
+            "main",
+            "--head",
+            "codex/sms",
+            "--change",
+            "acme/shop#9",
+            "--branch",
+            "codex/sms",
+            "--records",
+            rec.to_str().unwrap(),
+            "--out",
+            out,
+        ];
+        args.extend_from_slice(extra);
+        let o = Command::new(env!("CARGO_BIN_EXE_onus"))
+            .current_dir(&r)
+            .args(&args)
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        let p: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(Path::new(out).join("provenance.json")).unwrap(),
+        )
+        .unwrap();
+        (p, String::from_utf8_lossy(&o.stderr).to_string())
+    };
+    let gap = |p: &serde_json::Value, field: &str| -> Option<String> {
+        p["gaps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|g| g["field"] == field)
+            .map(|g| g["reason"].as_str().unwrap().to_string())
+    };
+
+    let (p, _) = pr(
+        &path("out"),
+        &[
+            "--submission",
+            &sub,
+            "--audit",
+            slice.to_str().unwrap(),
+            "--calls",
+            calls.to_str().unwrap(),
+        ],
+    );
+    // The token the agent's submission was made under, on its word.
+    assert_eq!(p["token"]["source"], "agent-submission", "{p}");
+    assert_eq!(p["token"]["task"], "sms");
+    assert_eq!(
+        p["token"]["rights"][0],
+        "write:path:services/notifications/**"
+    );
+    assert!(!p.to_string().contains(token.trim()));
+    assert_eq!(gap(&p, "token"), None);
+    // What this run found stays this run's: the intent and the agent.
+    assert_eq!(p["agent"]["key"], "codex//");
+    // The door log the agent attached, checked: the task's entries only.
+    let doors = &p["doors"];
+    assert_eq!(doors["source"], "attached", "{doors}");
+    assert_eq!(doors["intact"], true);
+    let actions: Vec<&str> = doors["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["action"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        actions,
+        ["mint", "mcp:onus_find", "mcp:onus_cloud_attach_evidence"]
+    );
+    // Onus Cloud's calls beside it, on its word, for the task only.
+    let c = &doors["calls"];
+    assert_eq!(c["source"], "onus-cloud");
+    assert_eq!(
+        (c["total"].as_u64(), c["denied"].as_u64()),
+        (Some(2), Some(1))
+    );
+    assert_eq!(c["firstAt"], 1791799200);
+    assert_eq!(c["tokens"], serde_json::json!(["tok-1"]));
+    assert_eq!(c["routes"].as_array().unwrap().len(), 2);
+    assert_eq!(c["denials"][0]["scope"], "env:run");
+    assert!(
+        c["denials"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("env:run")
+    );
+    // Even when it verifies, the slice is the agent's word.
+    assert!(
+        gap(&p, "doors")
+            .unwrap()
+            .starts_with("the door log is the slice the agent attached, on its word"),
+        "{p}"
+    );
+    // A rebuild keeps them.
+    let rebuilt: serde_json::Value = serde_json::from_str(&onus(
+        &r,
+        &[
+            "provenance",
+            "--change",
+            "acme/shop#9",
+            "--records",
+            rec.to_str().unwrap(),
+            "--from",
+            &path("out/provenance.json"),
+        ],
+    ))
+    .unwrap();
+    assert_eq!(rebuilt["doors"], p["doors"]);
+    assert_eq!(rebuilt["token"], p["token"]);
+
+    // A door log changed after it was cut does not verify, and says so; the
+    // lane goes on.
+    let edited = std::fs::read_to_string(&slice)
+        .unwrap()
+        .replace("notifications", "billing");
+    let bad = t.join("edited.json");
+    std::fs::write(&bad, edited).unwrap();
+    let (p, err) = pr(&path("out2"), &["--audit", bad.to_str().unwrap()]);
+    assert!(err.contains("does not verify"), "{err}");
+    assert_eq!(p["doors"]["intact"], false);
+    assert!(gap(&p, "doors").unwrap().contains("does not verify"));
+    // Calls alone leave the door log a gap: Onus Cloud's word is not the
+    // agent's door log. A file that is not calls is a warning and a gap.
+    let (p, _) = pr(&path("out3"), &["--calls", calls.to_str().unwrap()]);
+    assert_eq!(p["doors"]["source"], "onus-cloud");
+    assert_eq!(p["doors"]["calls"]["total"], 3);
+    assert!(
+        gap(&p, "doors")
+            .unwrap()
+            .contains("only Onus Cloud's calls")
+    );
+    std::fs::write(t.join("junk.json"), "{\"nope\": 1}").unwrap();
+    let (p, err) = pr(
+        &path("out4"),
+        &[
+            "--calls",
+            &path("junk.json"),
+            "--audit",
+            &path("missing.json"),
+        ],
+    );
+    assert!(err.contains("warning"), "{err}");
+    let doors_gap = gap(&p, "doors").unwrap();
+    assert!(doors_gap.contains("could not be read"), "{doors_gap}");
+    // A slice cut at another commit, or that does not say where it was
+    // cut, gives neither the task nor the token.
+    let mut cut: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&slice).unwrap()).unwrap();
+    cut["doorLog"].as_object_mut().unwrap().remove("head");
+    let headless = t.join("headless.json");
+    std::fs::write(&headless, cut.to_string()).unwrap();
+    let (p, _) = pr(&path("out10"), &["--audit", headless.to_str().unwrap()]);
+    assert!(p["token"].is_null(), "{p}");
+    assert!(
+        gap(&p, "doors")
+            .unwrap()
+            .contains("does not say which commit"),
+        "{p}"
+    );
+    for (n, at) in [(8, head.clone()), (9, "1".repeat(40))] {
+        cut["doorLog"]["head"] = at.clone().into();
+        let file = t.join(format!("cut-{n}.json"));
+        std::fs::write(&file, cut.to_string()).unwrap();
+        let (p, _) = pr(
+            &path(&format!("out{n}")),
+            &["--audit", file.to_str().unwrap()],
+        );
+        if at == head {
+            assert_eq!(p["token"]["source"], "attached", "{p}");
+            assert!(gap(&p, "doors").unwrap().contains("on its word"), "{p}");
+        } else {
+            assert!(p["token"].is_null(), "{p}");
+            let why = gap(&p, "doors").unwrap();
+            assert!(why.contains(&format!("cut at commit {at}")), "{why}");
+        }
+    }
+    // A submission for another commit is not this change's.
+    let other = path("other-submission.json");
+    std::fs::write(
+        &other,
+        std::fs::read_to_string(&sub)
+            .unwrap()
+            .replace(&head, &"0".repeat(40)),
+    )
+    .unwrap();
+    let (p, err) = pr(&path("out5"), &["--submission", &other]);
+    assert!(err.contains("not one of this pull request's"), "{err}");
+    assert!(gap(&p, "token").is_some());
+    // The whole door log, with no task to pick by, is a gap; --task names it.
+    let (p, _) = pr(&path("out6"), &["--audit", &audit]);
+    assert!(
+        gap(&p, "doors").unwrap().contains("task is not known"),
+        "{p}"
+    );
+    let (p, _) = pr(&path("out7"), &["--audit", &audit, "--task", "sms"]);
+    assert_eq!(p["doors"]["intact"], true);
+    assert_eq!(p["doors"]["entries"].as_array().unwrap().len(), 3);
+    assert_eq!(gap(&p, "doors"), None, "{p}");
+
+    // At close, the action rebuilds the record from the records and the
+    // agent's submission: only its token and escalations, and only when it
+    // is for one of the pull request's commits. One that cannot be read is
+    // a warning, never a failed job.
+    onus(
+        &r,
+        &[
+            "ci",
+            "closed",
+            "--change",
+            "acme/shop#9",
+            "--merged",
+            "--records",
+            rec.to_str().unwrap(),
+        ],
+    );
+    let close = |submission: &str| {
+        let o = Command::new(env!("CARGO_BIN_EXE_onus"))
+            .current_dir(&r)
+            .args([
+                "provenance",
+                "--change",
+                "acme/shop#9",
+                "--records",
+                rec.to_str().unwrap(),
+                "--agent-submission",
+                submission,
+            ])
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        let p: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+        (p, String::from_utf8_lossy(&o.stderr).to_string())
+    };
+    let (p, _) = close(&sub);
+    assert_eq!(p["stage"], "merged");
+    assert_eq!(p["token"]["source"], "agent-submission", "{p}");
+    assert_eq!(p["commits"]["head"], head.as_str());
+    assert!(
+        p["intent"].is_null() && p["evidence"] == serde_json::json!([]),
+        "{p}"
+    );
+    let (p, err) = close(&other);
+    assert!(err.contains("not one of this pull request's"), "{err}");
+    assert!(p["token"].is_null());
+    assert!(gap(&p, "token").is_some());
+    let (p, err) = close(&path("junk.json"));
+    assert!(err.contains("is not a submission"), "{err}");
+    assert!(p["token"].is_null());
+
+    // The records branch keeps a submission someone put there, and the
+    // action finds it as submissions/<number>.json.
+    let records = t.join("rec-branch");
+    onus(
+        &r,
+        &["ci", "records", "pull", "--dir", records.to_str().unwrap()],
+    );
+    onus(
+        &r,
+        &["ci", "records", "push", "--dir", records.to_str().unwrap()],
+    );
+    let work = t.join("records-work");
+    git(
+        t,
+        &[
+            "clone",
+            "-q",
+            "-b",
+            "onus/records",
+            origin.to_str().unwrap(),
+            work.to_str().unwrap(),
+        ],
+    );
+    std::fs::create_dir_all(work.join("submissions")).unwrap();
+    std::fs::copy(&sub, work.join("submissions/9.json")).unwrap();
+    git(&work, &["add", "-A"]);
+    git(&work, &["commit", "-q", "-m", "the agent's submission"]);
+    git(&work, &["push", "-q", "origin", "onus/records"]);
+    onus(
+        &r,
+        &["ci", "records", "pull", "--dir", records.to_str().unwrap()],
+    );
+    assert!(records.join("submissions/9.json").exists());
+    std::fs::write(records.join("pulls.jsonl"), "{\"a\":1}\n").unwrap();
+    onus(
+        &r,
+        &["ci", "records", "push", "--dir", records.to_str().unwrap()],
+    );
+    let again = t.join("rec-again");
+    onus(
+        &r,
+        &["ci", "records", "pull", "--dir", again.to_str().unwrap()],
+    );
+    assert_eq!(
+        std::fs::read_to_string(again.join("submissions/9.json")).unwrap(),
+        std::fs::read_to_string(&sub).unwrap()
+    );
+    assert!(
+        std::fs::read_to_string(again.join("pulls.jsonl"))
+            .unwrap()
+            .contains("\"a\":1")
+    );
+}
+
 #[test]
 fn a_judged_pull_request_records_the_judge_that_decided() {
     let tmp = tempfile::tempdir().unwrap();

@@ -1234,7 +1234,14 @@ pub fn act(client: &Client, root: &Path, name: &str, input: Value) -> Result<Val
             client.get(&client.org_path(&format!("/repos/{}/pulls/{number}", segment(&repo)))?)
         }
         "cloud.attachEvidence" => {
-            let run = text("run").context("name the run (its id from onus_cloud_env_run)")?;
+            // A run, the task's door log (its slice, cut by the caller), or both.
+            let run = text("run");
+            let door_log = Some(&input["doorLog"]).filter(|d| d.is_object());
+            if run.is_none() && door_log.is_none() {
+                bail!(
+                    "name the run (its id from onus_cloud_env_run), or attach the task's door log"
+                );
+            }
             let (repo, number) = parse_pull(
                 &match (text("repository"), input["number"].as_u64()) {
                     (Some(r), Some(n)) => format!("{r}#{n}"),
@@ -1245,13 +1252,53 @@ pub fn act(client: &Client, root: &Path, name: &str, input: Value) -> Result<Val
                 },
                 root,
             )?;
-            client.post(
-                &client.org_path(&format!(
-                    "/repos/{}/pulls/{number}/evidence",
-                    segment(&repo)
-                ))?,
-                &json!({ "environmentRun": run }),
-            )
+            // A task's door log goes only with its own work: the pull request
+            // whose head is the commit the slice was cut at. Checked first, so
+            // a refused log attaches no run either.
+            if let Some(slice) = door_log {
+                let Some(cut) = slice["head"].as_str().filter(|h| !h.is_empty()) else {
+                    bail!(
+                        "the door log names no commit it was cut at, so it cannot be tied to {repo}#{number}: commit your work and push it first"
+                    );
+                };
+                let pull = client
+                    .get(&client.org_path(&format!("/repos/{}/pulls/{number}", segment(&repo)))?)
+                    .with_context(|| format!("cannot check that {repo}#{number} is this work's"))?;
+                match pull["pull"]["headSha"].as_str() {
+                    Some(h) if h.eq_ignore_ascii_case(cut) => {}
+                    head => bail!(
+                        "{repo}#{number}'s head is {}, not this worktree's commit {cut}: a task's door log goes only with its own pull request. Push your work to it, then attach the log",
+                        head.unwrap_or("not known to Onus Cloud")
+                    ),
+                }
+            }
+            let path = client.org_path(&format!(
+                "/repos/{}/pulls/{number}/evidence",
+                segment(&repo)
+            ))?;
+            // One request each: an API that does not take door logs refuses
+            // the log, rather than keeping the run and dropping it unsaid.
+            let mut out = match run {
+                Some(run) => client.post(&path, &json!({ "environmentRun": run }))?,
+                None => json!({}),
+            };
+            if let Some(slice) = door_log {
+                let attached = client
+                    .post(&path, &json!({ "doorLog": slice }))
+                    .with_context(|| match run {
+                        Some(run) => format!("run {run} was attached; the door log was not"),
+                        None => "the door log was not attached".into(),
+                    })?;
+                out["doorLog"] = json!({
+                    "task": slice["task"],
+                    "entries": slice["entries"].as_array().map_or(0, Vec::len),
+                    "attached": attached,
+                });
+                if attached["reanalysing"] == true {
+                    out["reanalysing"] = json!(true);
+                }
+            }
+            Ok(out)
         }
         "cloud.map" => {
             let repository = repository_for(root, text("repository"))

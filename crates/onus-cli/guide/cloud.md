@@ -76,6 +76,12 @@ Attach a recorded run to a pull request:
 
 Onus Cloud keeps it for the run's commit and, when that is the pull request's head, analyses the pull request again. The judge finds the run's manifest and artifacts beside the repository, checks the run against them (the commit, the command, the exit code), and re-runs it in a fresh container with the environment's setup and seed. Its verdict says how many runs matched their manifests.
 
+Attach the task's door log, so the change's provenance keeps every call made through the door:
+
+    onus cloud evidence acme/shop#42 --door-log --task sms [--audit .onus/audit.jsonl]
+
+It sends the task's slice of the log: the entries from the task's first to its last, with whatever lies between (other tasks' entries on the same log included), so the hash chain can be checked (`schemas/door-log.schema.json`). Through `onus mcp --token`, the door also sends its inspection of the token it holds, never the token, so the change's provenance knows the token even when the agent never escalated. From the command line no door holds the token, so the slice gives it only when it holds the task's `mint` entry. Attach it after committing and pushing the work: the slice goes only to the pull request whose head, as Onus Cloud knows it, is the worktree's commit, so an agent cannot hang its log, and the other tasks' entries in it, on another change (this reads the pull request, so the token needs `pulls:read` as well as `evidence:write`). A slice cut at a commit that is not one of the change's gives neither the task nor the token. An Onus Cloud that keeps door logs passes the slice, as it was sent, to `onus ci pr --audit`, which checks the chain and keeps the task's entries in the provenance record, with Onus Cloud's own log of the calls made under the task token beside them (`--calls`; `onus help provenance`). Give `--run` as well to attach both. Each goes in its own request, so an older Onus Cloud, which does not take door logs, refuses it rather than keeping the run alone.
+
     onus cloud pulls --attention                            # waiting for a person
     onus cloud pulls --repo acme/shop --lane judge
     onus cloud pull acme/shop#42                            # its lane, analyses and evidence
@@ -129,7 +135,7 @@ When the CLI is signed in (with `onus login`, `ONUS_CLOUD_TOKEN` or `ONUS_API_KE
 
 - `onus_cloud_status`: who the CLI is, the organisation, the token's scopes, what the plan allows.
 - `onus_cloud_env_create`, `onus_cloud_env_run`, `onus_cloud_envs`, `onus_cloud_env_destroy`: hosted environments; the repository and commit default to the agent's worktree and its pushed HEAD.
-- `onus_cloud_attach_evidence`: a recorded run to a pull request, for the judge.
+- `onus_cloud_attach_evidence`: a recorded run to a pull request, for the judge; with `doorLog: true`, the task's slice of the door log, which the server cuts from its own log (the agent names only the pull request).
 - `onus_cloud_pulls`, `onus_cloud_pull`: governed pull requests, their lanes and evidence, read-only.
 - `onus_cloud_map`: a question to the map Onus Cloud keeps, at a commit or a pull request's head, answered by the CLI; under a task token, filtered to what the task may read, as the map tools are.
 - `onus_cloud_token`: a narrower token for a sub-agent, never wider than the server's.

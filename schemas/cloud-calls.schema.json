@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CloudCalls",
+  "description": "Onus Cloud's log of the calls made under a task token: the input of `onus provenance --calls FILE` and `onus ci pr --calls FILE`. Also read: the API's `{\"calls\": [...]}`, with `createdAt` for `at` and `credentialId` for `tokenId`.",
+  "type": "array",
+  "items": {
+    "$ref": "#/$defs/CloudCall"
+  },
+  "$defs": {
+    "CallDecision": {
+      "description": "How Onus Cloud decided a call.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "allowed",
+            "denied"
+          ]
+        },
+        {
+          "description": "The API could not answer it.",
+          "type": "string",
+          "const": "failed"
+        }
+      ]
+    },
+    "CloudCall": {
+      "description": "One call Onus Cloud logged under a task token: the input of `onus\nprovenance --calls FILE` and `onus ci pr --calls FILE`, which take a\nJSON array of these.",
+      "type": "object",
+      "properties": {
+        "at": {
+          "description": "When it was made (`createdAt` is read too).",
+          "$ref": "#/$defs/Moment"
+        },
+        "decision": {
+          "$ref": "#/$defs/CallDecision"
+        },
+        "method": {
+          "type": "string"
+        },
+        "reason": {
+          "description": "The denial, as it was sent back.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "route": {
+          "type": "string"
+        },
+        "scope": {
+          "description": "What the route needs of a scoped token.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "task": {
+          "description": "The task the token was minted for.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tokenId": {
+          "description": "The token's id (`credentialId` is read too); never the token.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "at",
+        "method",
+        "route",
+        "decision"
+      ]
+    },
+    "Moment": {
+      "description": "A time: Unix seconds, or an RFC 3339 date in UTC\n(`2026-10-12T10:00:00Z`, `Z` or `+00:00`).",
+      "anyOf": [
+        {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}(:\\d{2}(\\.\\d+)?)?(Z|\\+00:00)$"
+        }
+      ]
+    }
+  }
+}

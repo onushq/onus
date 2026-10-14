@@ -287,6 +287,142 @@
         }
       ]
     },
+    "CallDenial": {
+      "description": "A call Onus Cloud refused.",
+      "type": "object",
+      "properties": {
+        "at": {
+          "description": "Unix seconds.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "method": {
+          "type": "string"
+        },
+        "reason": {
+          "description": "The denial, as Onus Cloud sent it back.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "route": {
+          "type": "string"
+        },
+        "scope": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tokenId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "at",
+        "method",
+        "route"
+      ]
+    },
+    "CallsSource": {
+      "description": "Where Onus Cloud's calls came from: only ever Onus Cloud.",
+      "oneOf": [
+        {
+          "description": "Onus Cloud's own log of the calls made under the task token, on its\nword: it has no hash chain.",
+          "type": "string",
+          "const": "onus-cloud"
+        }
+      ]
+    },
+    "CloudCalls": {
+      "description": "Onus Cloud's log of the calls made under a task token, summed up.",
+      "type": "object",
+      "properties": {
+        "allowed": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "denials": {
+          "description": "Every call Onus Cloud refused, in time order (at most 100).",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/CallDenial"
+          }
+        },
+        "denied": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "failed": {
+          "description": "Calls the API could not answer.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "firstAt": {
+          "description": "Unix seconds of the first and the last call.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "lastAt": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "routes": {
+          "description": "The calls by route and scope, with how each was decided.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RouteCalls"
+          }
+        },
+        "source": {
+          "description": "Always `onus-cloud`, so these are never taken for the door log.",
+          "$ref": "#/$defs/CallsSource"
+        },
+        "tokens": {
+          "description": "The ids of the tokens the calls were made with; never a token.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "total": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "untasked": {
+          "description": "Calls that name no task, counted as the change's on Onus Cloud's\nword.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "source",
+        "total",
+        "allowed",
+        "denied"
+      ]
+    },
     "Commits": {
       "type": "object",
       "properties": {
@@ -353,10 +489,37 @@
         "hash"
       ]
     },
+    "DoorSource": {
+      "description": "Where door decisions came from, when not the door log (audit.jsonl)\nthis run read.",
+      "oneOf": [
+        {
+          "description": "The task's slice of the door log, attached to its work in Onus Cloud\n(`onus cloud evidence --door-log`); its chain is checked here.",
+          "type": "string",
+          "const": "attached"
+        },
+        {
+          "description": "Onus Cloud's own log of the calls made under the task token. Onus\nCloud's word: it has no hash chain.",
+          "type": "string",
+          "const": "onus-cloud"
+        }
+      ]
+    },
     "Doors": {
       "type": "object",
       "properties": {
+        "calls": {
+          "description": "Onus Cloud's log of the calls made under the task token, summed up.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CloudCalls"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "entries": {
+          "description": "The task's door decisions, from the door log.",
           "type": "array",
           "default": [],
           "items": {
@@ -364,8 +527,19 @@
           }
         },
         "intact": {
-          "description": "The audit log's hash chain verified.",
+          "description": "The door log's hash chain verified: the whole log, or an attached\nslice from its first entry. False when only Onus Cloud's calls are\nknown (`source: onus-cloud`): they have no chain to check.",
           "type": "boolean"
+        },
+        "source": {
+          "description": "Where `entries` came from. Absent: the door log this run read.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DoorSource"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -1052,6 +1226,47 @@
         }
       ]
     },
+    "RouteCalls": {
+      "description": "The calls to one route, under one scope.",
+      "type": "object",
+      "properties": {
+        "allowed": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "denied": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "failed": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "method": {
+          "type": "string"
+        },
+        "route": {
+          "description": "`/v1/orgs/:org/environments/:env/runs`.",
+          "type": "string"
+        },
+        "scope": {
+          "description": "What the route needs of a scoped token.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "method",
+        "route",
+        "allowed",
+        "denied"
+      ]
+    },
     "RowApproval": {
       "type": "object",
       "properties": {
@@ -1235,6 +1450,11 @@
           "const": "submission"
         },
         {
+          "description": "The agent's own submission, handed in beside the run (`onus ci pr\n--submission`, `onus provenance --agent-submission`), such as one\nkept on the records branch. On its word: this run cannot tell it was\nverified when it was made, and whoever can write where it was kept\ncould have written it. Ranked below `audit` and `inspection`.",
+          "type": "string",
+          "const": "agent-submission"
+        },
+        {
           "description": "The door log's `mint` entry for the task, widened by its grants.",
           "type": "string",
           "const": "audit"
@@ -1243,6 +1463,11 @@
           "description": "The door's inspection of the token (`--token-inspection`, or the one\nOnus Cloud keeps with an escalation), widened by the escalations\ngranted to the task. What the door said it held: this run did not\nverify it.",
           "type": "string",
           "const": "inspection"
+        },
+        {
+          "description": "The door log the agent attached to its work in Onus Cloud: the\ndoor's inspection sent with it, or its `mint` entry, widened by its\ngrants. Taken only when its chain verifies, and ranked below the\nrest: whoever attached it chose what it holds.",
+          "type": "string",
+          "const": "attached"
         }
       ]
     },

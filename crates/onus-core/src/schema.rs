@@ -8,7 +8,7 @@ use crate::held_out::HeldOutSuite;
 use crate::map::CodebaseMap;
 use crate::plugins::PluginsFile;
 use crate::protocol::PluginProtocol;
-use crate::provenance::{EscalationDecision, ProvenanceRecord};
+use crate::provenance::{CloudCall, DoorLogSlice, EscalationDecision, ProvenanceRecord};
 use crate::signal::{ProductionSignal, RolloutMetrics};
 
 /// The input of `--escalations FILE`: a JSON array, titled as the format it
@@ -23,6 +23,21 @@ fn escalation_decisions() -> schemars::Schema {
          Also read: the API's `{\"escalations\": [...]}`, a stored row's `status` \
          (for `state`) and `input: {scopes, reason}`, and a view's nested \
          `decision: {by: {id, name}, at, answer}`."
+            .into(),
+    );
+    s
+}
+
+/// The input of `--calls FILE`: a JSON array of the calls Onus Cloud logged.
+fn cloud_calls() -> schemars::Schema {
+    let mut s = schema_for!(Vec<CloudCall>);
+    s.insert("title".into(), "CloudCalls".into());
+    s.insert(
+        "description".into(),
+        "Onus Cloud's log of the calls made under a task token: the input of \
+         `onus provenance --calls FILE` and `onus ci pr --calls FILE`. Also read: \
+         the API's `{\"calls\": [...]}`, with `createdAt` for `at` and \
+         `credentialId` for `tokenId`."
             .into(),
     );
     s
@@ -58,6 +73,14 @@ pub fn all_schemas() -> Vec<(&'static str, String)> {
         (
             "escalation-decisions.schema.json",
             serde_json::to_string_pretty(&escalation_decisions()),
+        ),
+        (
+            "cloud-calls.schema.json",
+            serde_json::to_string_pretty(&cloud_calls()),
+        ),
+        (
+            "door-log.schema.json",
+            serde_json::to_string_pretty(&schema_for!(DoorLogSlice)),
         ),
         (
             "production-signal.schema.json",

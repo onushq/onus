@@ -128,6 +128,15 @@ inputs:
       onus env run recorded at the head commit.
     required: false
     default: ''
+  submission:
+    description: >-
+      The agent's own submission of the change (onus submit's JSON), written by an earlier step
+      (with records). Its token and escalations go into the change's provenance. When empty, a
+      submission kept on the records branch at submissions/<pull request number>.json or
+      submissions/<head commit>.json is used. The action cannot verify the token itself, see the
+      door log, or see Onus Cloud's calls (`onus help provenance`).
+    required: false
+    default: ''
   coverage:
     description: >-
       Coverage of the head commit (lcov, Cobertura XML or Istanbul JSON) written by an earlier
@@ -494,6 +503,7 @@ runs:
         JUDGE: ${{ inputs.judge }}
         HELD_OUT: ${{ inputs.held-out }}
         EVIDENCE: ${{ inputs.evidence }}
+        SUBMISSION: ${{ inputs.submission }}
         BASE: ${{ inputs.base }}
         HEAD: ${{ inputs.head }}
         CHANGE: ${{ github.repository }}#${{ github.event.pull_request.number }}
@@ -505,6 +515,16 @@ runs:
         PR: ${{ github.event.pull_request.number }}
       run: |
         set -euo pipefail
+        # The submission input, else submissions/<number>.json or
+        # submissions/<head commit>.json in the records; empty when none.
+        submission_of() {
+          if [ -n "$SUBMISSION" ]; then echo "$SUBMISSION"; return; fi
+          local sha
+          sha=$(git rev-parse --verify --quiet "$HEAD^{commit}" || true)
+          for f in "$1/submissions/$PR.json" ${sha:+"$1/submissions/$sha.json"}; do
+            if [ -f "$f" ]; then echo "$f"; return; fi
+          done
+        }
         if [ "$RECORDS" = true ] && "$ONUS" ci --help > /dev/null 2>&1; then
           dir="$RUNNER_TEMP/onus-records"
           out="$RUNNER_TEMP/onus/ci"
@@ -521,6 +541,12 @@ runs:
           if [ -n "$EVIDENCE" ]; then
             shopt -s nullglob globstar
             for f in $EVIDENCE; do args+=(--evidence "$f"); done
+          fi
+          # The agent's own submission, for the change's provenance: the input,
+          # else one kept on the records branch for this pull request or its head.
+          sub=$(submission_of "$dir")
+          if [ -n "$sub" ] && "$ONUS" ci pr --help | grep -q -- --submission; then
+            args+=(--submission "$sub")
           fi
           # The pull request's reviews, as GitHub has them; onus decides which
           # count. When they cannot be listed, none are passed and a human-lane
@@ -759,6 +785,9 @@ runs:
         MERGED: ${{ github.event.pull_request.merged }}
         COMMIT: ${{ github.event.pull_request.merge_commit_sha }}
         MERGED_BY: ${{ github.event.pull_request.merged_by.login }}
+        SUBMISSION: ${{ inputs.submission }}
+        PR: ${{ github.event.pull_request.number }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       run: |
         set -euo pipefail
         dir="$RUNNER_TEMP/onus-records"
@@ -774,7 +803,18 @@ runs:
           echo "::warning::Cannot push the records to $RECORDS_BRANCH (a read-only token on a fork?)."
         if [ "$provenance" = true ]; then
           mkdir -p "$RUNNER_TEMP/onus"
-          "$ONUS" provenance --change "$CHANGE" --records "$dir" --out "$RUNNER_TEMP/onus/provenance.json"
+          prov=(--change "$CHANGE" --records "$dir" --out "$RUNNER_TEMP/onus/provenance.json")
+          # The agent's own submission brings its token and escalations, and
+          # only those, when it is for one of the pull request's commits; one
+          # that cannot be read is a warning.
+          sub="$SUBMISSION"
+          for f in "$dir/submissions/$PR.json" "$dir/submissions/$HEAD_SHA.json"; do
+            if [ -z "$sub" ] && [ -f "$f" ]; then sub="$f"; fi
+          done
+          if [ -n "$sub" ] && "$ONUS" provenance --help | grep -q -- --agent-submission; then
+            prov+=(--agent-submission "$sub")
+          fi
+          "$ONUS" provenance "${prov[@]}"
           echo "provenance=$RUNNER_TEMP/onus/provenance.json" >> "$GITHUB_OUTPUT"
         fi
 
